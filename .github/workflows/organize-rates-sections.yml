@@ -1,0 +1,262 @@
+name: Organize rates VBA sections
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/organize-rates-sections.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  organize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add explicit module sections
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          from collections import Counter
+
+          engine_path = Path('Rates_Analysis_Engine.bas')
+          engine = engine_path.read_text(encoding='utf-8')
+
+          top = "' ============================================================================\n\nPrivate Const TENOR_COUNT As Long = 5"
+          section_map = """' ============================================================================
+          '
+          ' MODULE SECTION MAP
+          '
+          '   SECTION 01 - Execution control and model orchestration
+          '   SECTION 02 - Inputs, curve loading, and validation
+          '   SECTION 03 - Rolling-strategy return analysis
+          '   SECTION 04 - Tenor-rate and reinvestment-volatility analysis
+          '   SECTION 05 - Earnings-return and earnings-volatility analysis
+          '   SECTION 06 - Static-sleeve efficient-frontier analysis
+          '   SECTION 07 - Out-of-sample validation
+          '   SECTION 08 - Output tables and worksheet presentation
+          '   SECTION 09 - Chart data and dashboard layout
+          '   SECTION 10 - Model validation and reconciliation
+          '   SECTION 11 - Shared calculation and worksheet helpers
+          '
+          ' Each analytical concept is kept in a separate section so return,
+          ' earnings volatility, reset volatility, and portfolio optimization are not
+          ' mixed together in the code or in the workbook outputs.
+          ' ============================================================================
+
+          Private Const TENOR_COUNT As Long = 5"""
+          assert top in engine
+          engine = engine.replace(top, section_map, 1)
+
+          engine = engine.replace(
+              'Public Sub RunRatesAnalysis()',
+              """' ============================================================================
+          ' SECTION 01 - EXECUTION CONTROL AND MODEL ORCHESTRATION
+          '
+          ' Purpose:
+          '   Run the model in a controlled sequence, preserve user-maintained data,
+          '   report the exact processing stage, and restore Excel settings on exit.
+          ' ============================================================================
+
+          Public Sub RunRatesAnalysis()""",
+              1,
+          )
+
+          replacements = {
+              "' ============================================================================\n' Inputs and curve\n' ============================================================================": """' ============================================================================
+          ' SECTION 02 - INPUTS, CURVE LOADING, AND VALIDATION
+          '
+          ' Purpose:
+          '   Read Inputs, Curve, and Frontier_Settings; enforce numeric rate inputs;
+          '   resolve the effective start date; and reject invalid dates, duplicated
+          '   curve observations, unsupported frontier steps, or invalid constraints.
+          ' ============================================================================""",
+              "' ============================================================================\n' Rolling strategies\n' ============================================================================": """' ============================================================================
+          ' SECTION 03 - ROLLING-STRATEGY RETURN ANALYSIS
+          '
+          ' Purpose:
+          '   Build the realized ON, 1M, 2M, 3M, and 6M investment paths using ACT/360.
+          '   Interest is reinvested at each actual maturity, and each new term starts
+          '   from the prior actual maturity. This section produces economic balances,
+          '   total interest, annualized return, and incremental interest versus ON.
+          ' ============================================================================""",
+              "' ============================================================================\n' Tenor scenario analysis\n' ============================================================================": """' ============================================================================
+          ' SECTION 04 - TENOR-RATE AND REINVESTMENT-VOLATILITY ANALYSIS
+          '
+          ' Purpose:
+          '   Treat every eligible curve date as a valid investment start; compare the
+          '   same-tenor quoted rate at start and actual maturity; retain all scenarios;
+          '   and calculate cross-tenor statistics on one common starting-date sample.
+          '   Reset volatility remains separate from earnings-return volatility.
+          ' ============================================================================""",
+              "' ============================================================================\n' Monthly strategy returns\n' ============================================================================": """' ============================================================================
+          ' SECTION 05 - EARNINGS-RETURN AND EARNINGS-VOLATILITY ANALYSIS
+          '
+          ' Purpose:
+          '   Convert rolling-strategy economic balances into aligned month-end returns.
+          '   These returns support annualized earnings return, sample volatility, and
+          '   covariance-consistent portfolio analysis. Quoted-rate volatility is not
+          '   substituted for earnings volatility in this section.
+          ' ============================================================================""",
+              "' ============================================================================\n' Static-sleeve portfolios and efficient frontiers\n' ============================================================================": """' ============================================================================
+          ' SECTION 06 - STATIC-SLEEVE EFFICIENT-FRONTIER ANALYSIS
+          '
+          ' Purpose:
+          '   Allocate initial cash to fixed tenor sleeves that compound independently,
+          '   without implicit monthly rebalancing. Build constrained and unconstrained
+          '   frontiers using incremental annual return versus ON, earnings volatility,
+          '   downside risk, underperformance frequency, reset risk, WAM, and liquidity.
+          ' ============================================================================""",
+              "' ============================================================================\n' Out-of-sample validation\n' ============================================================================": """' ============================================================================
+          ' SECTION 07 - OUT-OF-SAMPLE VALIDATION
+          '
+          ' Purpose:
+          '   Select representative portfolios from the estimation-period frontier and
+          '   apply the same weights to the later test period without re-optimizing.
+          '   This separates historical in-sample efficiency from realized validation.
+          ' ============================================================================""",
+              "' ============================================================================\n' Output sheets\n' ============================================================================": """' ============================================================================
+          ' SECTION 08 - OUTPUT TABLES AND WORKSHEET PRESENTATION
+          '
+          ' Purpose:
+          '   Write each analysis to its dedicated output sheet. User-maintained sheets
+          '   are never cleared here. Large data blocks are written in arrays to reduce
+          '   Excel calls and lower the risk of the model stopping mid-process.
+          ' ============================================================================""",
+              "' ============================================================================\n' Chart data and dashboard\n' ============================================================================": """' ============================================================================
+          ' SECTION 09 - CHART DATA AND DASHBOARD LAYOUT
+          '
+          ' Purpose:
+          '   Build compact chart-source ranges and create a fixed six-chart dashboard.
+          '   Chart errors are isolated from calculations so a chart warning does not
+          '   invalidate completed return, volatility, tenor, or frontier results.
+          ' ============================================================================""",
+              "' ============================================================================\n' Validation\n' ============================================================================": """' ============================================================================
+          ' SECTION 10 - MODEL VALIDATION AND RECONCILIATION
+          '
+          ' Purpose:
+          '   Reconcile daily rows, common samples, frontier generation, pure-tenor
+          '   static-sleeve returns, training/test observations, and dashboard charts.
+          ' ============================================================================""",
+              "' ============================================================================\n' General helpers\n' ============================================================================": """' ============================================================================
+          ' SECTION 11 - SHARED CALCULATION AND WORKSHEET HELPERS
+          '
+          ' Purpose:
+          '   Centralize date conventions, binary searches, statistics, sorting,
+          '   formatting, chart creation, and reusable utility functions.
+          ' ============================================================================""",
+          }
+          for old, new in replacements.items():
+              assert old in engine, old
+              engine = engine.replace(old, new, 1)
+          engine_path.write_text(engine, encoding='utf-8')
+
+          setup_path = Path('Rates_Workbook_Setup.bas')
+          setup = setup_path.read_text(encoding='utf-8')
+          setup_top = "' ============================================================================\n\nPrivate Const COLOR_NAVY As Long = 3809035"
+          setup_map = """' ============================================================================
+          '
+          ' MODULE SECTION MAP
+          '
+          '   SECTION A - Public setup and reset macros
+          '   SECTION B - User-maintained input sheets
+          '   SECTION C - Calculated output-sheet structure
+          '   SECTION D - Sheet ordering, preservation, and cleanup
+          '   SECTION E - Shared setup and formatting helpers
+          '
+          ' Inputs, Curve, and Frontier_Settings are maintained separately from all
+          ' calculated outputs. Setup and rerun actions must preserve those three sheets.
+          ' ============================================================================
+
+          Private Const COLOR_NAVY As Long = 3809035"""
+          assert setup_top in setup
+          setup = setup.replace(setup_top, setup_map, 1)
+          setup = setup.replace(
+              'Public Sub CreateRatesWorkbook()',
+              """' ============================================================================
+          ' SECTION A - PUBLIC SETUP AND RESET MACROS
+          '
+          ' CreateRatesWorkbook and EnsureRatesWorkbook preserve existing user inputs.
+          ' ResetRatesOutputs clears only calculated sheets.
+          ' ============================================================================
+
+          Public Sub CreateRatesWorkbook()""",
+              1,
+          )
+          setup = setup.replace(
+              'Private Sub SetupInputs()',
+              """' ============================================================================
+          ' SECTION B - USER-MAINTAINED INPUT SHEETS
+          '
+          ' These routines create or format Inputs, Curve, and Frontier_Settings without
+          ' deleting values already defined by the user.
+          ' ============================================================================
+
+          Private Sub SetupInputs()""",
+              1,
+          )
+          setup = setup.replace(
+              'Private Sub SetupCalculatedSheet(ByVal sheetName As String, _',
+              """' ============================================================================
+          ' SECTION C - CALCULATED OUTPUT-SHEET STRUCTURE
+          '
+          ' Output sheets are created independently from user-maintained data sheets.
+          ' ============================================================================
+
+          Private Sub SetupCalculatedSheet(ByVal sheetName As String, _""",
+              1,
+          )
+          setup = setup.replace(
+              'Private Function InputSheetNames() As Variant',
+              """' ============================================================================
+          ' SECTION D - SHEET ORDERING, PRESERVATION, AND CLEANUP
+          '
+          ' The output list is the only list used by ResetRatesOutputs. Input sheets are
+          ' excluded so rerunning the engine cannot erase the curve or defined settings.
+          ' ============================================================================
+
+          Private Function InputSheetNames() As Variant""",
+              1,
+          )
+          setup = setup.replace(
+              'Public Function GetOrCreateRatesSheet(ByVal sheetName As String) As Worksheet',
+              """' ============================================================================
+          ' SECTION E - SHARED SETUP AND FORMATTING HELPERS
+          ' ============================================================================
+
+          Public Function GetOrCreateRatesSheet(ByVal sheetName As String) As Worksheet""",
+              1,
+          )
+          setup_path.write_text(setup, encoding='utf-8')
+
+          for name, text in [('setup', setup), ('engine', engine)]:
+              subs = re.findall(r'^\s*(?:Public |Private )?Sub\s+([A-Za-z_][A-Za-z0-9_]*)', text, re.I | re.M)
+              funcs = re.findall(r'^\s*(?:Public |Private )?Function\s+([A-Za-z_][A-Za-z0-9_]*)', text, re.I | re.M)
+              assert len(subs) == len(re.findall(r'^\s*End Sub\s*$', text, re.I | re.M)), name
+              assert len(funcs) == len(re.findall(r'^\s*End Function\s*$', text, re.I | re.M)), name
+              names = [value.lower() for value in subs + funcs]
+              assert not [value for value, count in Counter(names).items() if count > 1]
+              assert '.Merge' not in text
+              assert 'AutoFit' not in text
+
+          for number in range(1, 12):
+              assert f'SECTION {number:02d}' in engine
+          for letter in 'ABCDE':
+              assert f'SECTION {letter}' in setup
+
+      - name: Commit organized modules and remove workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/organize-rates-sections.yml
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Organize rates VBA modules by analysis section'
+          git push origin main
