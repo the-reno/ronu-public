@@ -1,0 +1,72 @@
+name: Finalize rates VBA files
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/finalize-rates-vba.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct VBA modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .rates-build/setup.part* | base64 --decode | gzip -dc > Rates_Workbook_Setup.bas
+          cat .rates-build/engine.part* | base64 --decode | gzip -dc > Rates_Analysis_Engine.bas
+          printf '%s  %s\n' 'b2f74800ecc8ed6dd97b12e014bca05e865ae689a14b0ab4631d8f7339f170a8' 'Rates_Workbook_Setup.bas' | sha256sum -c -
+          printf '%s  %s\n' 'b56f69e4bc2ae2ee656a379c68f0710bdf4711280038b07a9651bb7fb122201f' 'Rates_Analysis_Engine.bas' | sha256sum -c -
+
+      - name: Validate VBA structure
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          files = {
+              'Rates_Workbook_Setup.bas': ('RatesWorkbookSetup', ['CreateRatesWorkbook', 'EnsureRatesWorkbook']),
+              'Rates_Analysis_Engine.bas': ('RatesAnalysisEngine', ['RunRatesAnalysis', 'ValidateRatesAnalysis']),
+          }
+
+          for filename, (module_name, public_macros) in files.items():
+              text = Path(filename).read_text(encoding='utf-8-sig')
+              assert f'Attribute VB_Name = "{module_name}"' in text
+              assert '.Merge' not in text and 'MergeCells' not in text and 'UnMerge' not in text
+              for macro in public_macros:
+                  assert re.search(rf'Public\s+Sub\s+{macro}\b', text, re.I)
+              starts_sub = len(re.findall(r'^\s*(?:Public|Private|Friend)?\s*Sub\s+\w+', text, re.I | re.M))
+              ends_sub = len(re.findall(r'^\s*End\s+Sub\s*$', text, re.I | re.M))
+              starts_fn = len(re.findall(r'^\s*(?:Public|Private|Friend)?\s*Function\s+\w+', text, re.I | re.M))
+              ends_fn = len(re.findall(r'^\s*End\s+Function\s*$', text, re.I | re.M))
+              assert starts_sub == ends_sub, (filename, starts_sub, ends_sub)
+              assert starts_fn == ends_fn, (filename, starts_fn, ends_fn)
+
+          setup = Path('Rates_Workbook_Setup.bas').read_text(encoding='utf-8-sig')
+          engine = Path('Rates_Analysis_Engine.bas').read_text(encoding='utf-8-sig')
+          assert 'DateSerial(2023, 1, 3)' in setup
+          assert 'DateSerial(2026, 7, 3)' in setup
+          assert '4.31 means 4.31 percent' in setup
+          assert 'gInputStart' in engine and 'gInputEnd' in engine
+          assert 'ChartObjects.Count <> 8' in engine
+
+      - name: Keep only the two requested code files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .rates-build
+          rm -f .github/workflows/finalize-rates-vba.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A Rates_Workbook_Setup.bas Rates_Analysis_Engine.bas .rates-build .github/workflows/finalize-rates-vba.yml
+          git commit -m 'Add tested two-module rates VBA model'
+          git push
