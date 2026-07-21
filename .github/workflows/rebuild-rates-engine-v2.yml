@@ -82,4 +82,4 @@ jobs:
           git commit -m 'Publish static-sleeve frontier rates engine'
           git push
 
-# Trigger reconstruction after staging the payload.
+# Merge-triggered reconstruction.
