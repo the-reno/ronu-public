@@ -56,8 +56,8 @@ jobs:
           assert 'DateSerial(2023, 1, 3)' in setup
           assert 'DateSerial(2026, 7, 3)' in setup
           assert '4.31 means 4.31 percent' in setup
-          assert 'gInputStart' in engine and 'gInputEnd' in engine
-          assert 'ChartObjects.Count <> 8' in engine
+          assert 'gRequestedStart' in engine and 'gEndDate' in engine
+          assert 'ChartObjects.Count = 8' in engine
 
       - name: Keep only the two requested code files
         shell: bash
@@ -67,6 +67,6 @@ jobs:
           rm -f .github/workflows/finalize-rates-vba.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A Rates_Workbook_Setup.bas Rates_Analysis_Engine.bas .rates-build .github/workflows/finalize-rates-vba.yml
+          git add -A
           git commit -m 'Add tested two-module rates VBA model'
           git push
