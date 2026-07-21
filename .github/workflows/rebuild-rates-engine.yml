@@ -1,0 +1,71 @@
+name: Rebuild corrected rates engine
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.tmp/engine.part01'
+      - '.tmp/engine.part02'
+      - '.tmp/engine.part03'
+      - '.github/workflows/rebuild-rates-engine.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild and validate VBA engine
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64
+          import gzip
+          import hashlib
+          import pathlib
+          import re
+
+          parts = [pathlib.Path(f'.tmp/engine.part{i:02d}').read_text().strip() for i in range(1, 4)]
+          encoded = ''.join(parts)
+          data = gzip.decompress(base64.b64decode(encoded))
+          expected = 'ff396d037bb3dc2164132d54d9cafaafc90f205141853d8d013f663190b13a29'
+          actual = hashlib.sha256(data).hexdigest()
+          assert actual == expected, (actual, expected)
+
+          path = pathlib.Path('Rates_Analysis_Engine.bas')
+          path.write_bytes(data)
+          text = data.decode('utf-8')
+
+          subs = len(re.findall(r'(?im)^\s*(?:Public |Private )?Sub\s+', text))
+          end_subs = len(re.findall(r'(?im)^\s*End Sub\s*$', text))
+          functions = len(re.findall(r'(?im)^\s*(?:Public |Private )?Function\s+', text))
+          end_functions = len(re.findall(r'(?im)^\s*End Function\s*$', text))
+          assert subs == end_subs, (subs, end_subs)
+          assert functions == end_functions, (functions, end_functions)
+          assert '.Merge' not in text
+          assert 'AutoFit' not in text
+          assert 'targetRoll = AddMonthsPreserveEndOfMonth(currentStart' in text
+          assert 'Common Comparison Sample' in text
+          assert 'RunRatesAnalysis' in text
+          PY
+
+      - name: Remove temporary files
+        shell: bash
+        run: |
+          rm -f .tmp/engine.part01 .tmp/engine.part02 .tmp/engine.part03
+          rmdir .tmp 2>/dev/null || true
+          rm -f .github/workflows/rebuild-rates-engine.yml
+
+      - name: Commit corrected two-file model
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Publish corrected rates engine and remove temporary files"
+          git push
