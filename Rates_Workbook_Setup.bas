@@ -35,11 +35,30 @@ Option Explicit
 ' Rates are ordinary numbers. 4.31 means 4.31 percent.
 ' No cells are merged.
 ' ============================================================================
+'
+' MODULE SECTION MAP
+'
+'   SECTION A - Public setup and reset macros
+'   SECTION B - User-maintained input sheets
+'   SECTION C - Calculated output-sheet structure
+'   SECTION D - Sheet ordering, preservation, and cleanup
+'   SECTION E - Shared setup and formatting helpers
+'
+' Inputs, Curve, and Frontier_Settings are maintained separately from all
+' calculated outputs. Setup and rerun actions must preserve those three sheets.
+' ============================================================================
 
 Private Const COLOR_NAVY As Long = 3809035
 Private Const COLOR_INPUT As Long = 13434879
 Private Const COLOR_PALE As Long = 16448250
 Private Const COLOR_GREEN_PALE As Long = 15198183
+
+' ============================================================================
+' SECTION A - PUBLIC SETUP AND RESET MACROS
+'
+' CreateRatesWorkbook and EnsureRatesWorkbook preserve existing user inputs.
+' ResetRatesOutputs clears only calculated sheets.
+' ============================================================================
 
 Public Sub CreateRatesWorkbook()
     BuildRatesWorkbook True
@@ -141,6 +160,13 @@ Fail:
     MsgBox "Workbook setup stopped during " & stageName & "." & vbCrLf & _
            Err.Number & " - " & Err.Description, vbCritical
 End Sub
+
+' ============================================================================
+' SECTION B - USER-MAINTAINED INPUT SHEETS
+'
+' These routines create or format Inputs, Curve, and Frontier_Settings without
+' deleting values already defined by the user.
+' ============================================================================
 
 Private Sub SetupInputs()
     Dim ws As Worksheet
@@ -333,6 +359,12 @@ Private Sub SetupFrontierSettings()
     ws.Rows(1).RowHeight = 28
 End Sub
 
+' ============================================================================
+' SECTION C - CALCULATED OUTPUT-SHEET STRUCTURE
+'
+' Output sheets are created independently from user-maintained data sheets.
+' ============================================================================
+
 Private Sub SetupCalculatedSheet(ByVal sheetName As String, _
                                  ByVal titleText As String, _
                                  ByVal columnCount As Long)
@@ -347,6 +379,13 @@ Private Sub SetupCalculatedSheet(ByVal sheetName As String, _
     ws.Rows(1).RowHeight = 28
     ws.Columns(1).ColumnWidth = 15
 End Sub
+
+' ============================================================================
+' SECTION D - SHEET ORDERING, PRESERVATION, AND CLEANUP
+'
+' The output list is the only list used by ResetRatesOutputs. Input sheets are
+' excluded so rerunning the engine cannot erase the curve or defined settings.
+' ============================================================================
 
 Private Function InputSheetNames() As Variant
     InputSheetNames = Array("Inputs", "Curve", "Frontier_Settings")
@@ -411,6 +450,10 @@ Private Sub ClearCalculatedSheet(ByVal ws As Worksheet)
 
     ws.Cells.Clear
 End Sub
+
+' ============================================================================
+' SECTION E - SHARED SETUP AND FORMATTING HELPERS
+' ============================================================================
 
 Public Function GetOrCreateRatesSheet(ByVal sheetName As String) As Worksheet
     On Error Resume Next

@@ -27,6 +27,25 @@ Option Explicit
 '   - Out-of-sample results use a separate validation period.
 '   - No cells are merged.
 ' ============================================================================
+'
+' MODULE SECTION MAP
+'
+'   SECTION 01 - Execution control and model orchestration
+'   SECTION 02 - Inputs, curve loading, and validation
+'   SECTION 03 - Rolling-strategy return analysis
+'   SECTION 04 - Tenor-rate and reinvestment-volatility analysis
+'   SECTION 05 - Earnings-return and earnings-volatility analysis
+'   SECTION 06 - Static-sleeve efficient-frontier analysis
+'   SECTION 07 - Out-of-sample validation
+'   SECTION 08 - Output tables and worksheet presentation
+'   SECTION 09 - Chart data and dashboard layout
+'   SECTION 10 - Model validation and reconciliation
+'   SECTION 11 - Shared calculation and worksheet helpers
+'
+' Each analytical concept is kept in a separate section so return,
+' earnings volatility, reset volatility, and portfolio optimization are not
+' mixed together in the code or in the workbook outputs.
+' ============================================================================
 
 Private Const TENOR_COUNT As Long = 5
 Private Const DAY_COUNT As Double = 360#
@@ -105,6 +124,14 @@ Private gUnconstrainedFrontierCount As Long
 Private gTrainingFrontier() As Double
 Private gTrainingFrontierCount As Long
 Private gOutSampleData() As Variant
+
+' ============================================================================
+' SECTION 01 - EXECUTION CONTROL AND MODEL ORCHESTRATION
+'
+' Purpose:
+'   Run the model in a controlled sequence, preserve user-maintained data,
+'   report the exact processing stage, and restore Excel settings on exit.
+' ============================================================================
 
 Public Sub RunRatesAnalysis()
     Dim oldCalculation As XlCalculation
@@ -206,7 +233,12 @@ Private Sub SetStage(ByVal stageText As String)
 End Sub
 
 ' ============================================================================
-' Inputs and curve
+' SECTION 02 - INPUTS, CURVE LOADING, AND VALIDATION
+'
+' Purpose:
+'   Read Inputs, Curve, and Frontier_Settings; enforce numeric rate inputs;
+'   resolve the effective start date; and reject invalid dates, duplicated
+'   curve observations, unsupported frontier steps, or invalid constraints.
 ' ============================================================================
 
 Private Sub LoadInputs()
@@ -523,7 +555,13 @@ Private Sub InitializeArrays()
 End Sub
 
 ' ============================================================================
-' Rolling strategies
+' SECTION 03 - ROLLING-STRATEGY RETURN ANALYSIS
+'
+' Purpose:
+'   Build the realized ON, 1M, 2M, 3M, and 6M investment paths using ACT/360.
+'   Interest is reinvested at each actual maturity, and each new term starts
+'   from the prior actual maturity. This section produces economic balances,
+'   total interest, annualized return, and incremental interest versus ON.
 ' ============================================================================
 
 Private Sub BuildStrategies()
@@ -799,7 +837,13 @@ Private Function DaysToRoll(ByVal currentDate As Double, _
 End Function
 
 ' ============================================================================
-' Tenor scenario analysis
+' SECTION 04 - TENOR-RATE AND REINVESTMENT-VOLATILITY ANALYSIS
+'
+' Purpose:
+'   Treat every eligible curve date as a valid investment start; compare the
+'   same-tenor quoted rate at start and actual maturity; retain all scenarios;
+'   and calculate cross-tenor statistics on one common starting-date sample.
+'   Reset volatility remains separate from earnings-return volatility.
 ' ============================================================================
 
 Private Sub BuildTenorScenarios()
@@ -1049,7 +1093,13 @@ Private Function CommonFlagText(ByVal isCommon As Boolean) As String
 End Function
 
 ' ============================================================================
-' Monthly strategy returns
+' SECTION 05 - EARNINGS-RETURN AND EARNINGS-VOLATILITY ANALYSIS
+'
+' Purpose:
+'   Convert rolling-strategy economic balances into aligned month-end returns.
+'   These returns support annualized earnings return, sample volatility, and
+'   covariance-consistent portfolio analysis. Quoted-rate volatility is not
+'   substituted for earnings volatility in this section.
 ' ============================================================================
 
 Private Sub BuildMonthlyReturns()
@@ -1209,7 +1259,13 @@ Private Sub DetermineSplitMonthIndex()
 End Sub
 
 ' ============================================================================
-' Static-sleeve portfolios and efficient frontiers
+' SECTION 06 - STATIC-SLEEVE EFFICIENT-FRONTIER ANALYSIS
+'
+' Purpose:
+'   Allocate initial cash to fixed tenor sleeves that compound independently,
+'   without implicit monthly rebalancing. Build constrained and unconstrained
+'   frontiers using incremental annual return versus ON, earnings volatility,
+'   downside risk, underperformance frequency, reset risk, WAM, and liquidity.
 ' ============================================================================
 
 Private Sub BuildPortfolioFrontiers()
@@ -1588,7 +1644,12 @@ Private Sub BuildFrontierFromCandidates( _
 End Sub
 
 ' ============================================================================
-' Out-of-sample validation
+' SECTION 07 - OUT-OF-SAMPLE VALIDATION
+'
+' Purpose:
+'   Select representative portfolios from the estimation-period frontier and
+'   apply the same weights to the later test period without re-optimizing.
+'   This separates historical in-sample efficiency from realized validation.
 ' ============================================================================
 
 Private Sub BuildOutOfSample()
@@ -1668,7 +1729,12 @@ Private Sub BuildOutOfSample()
 End Sub
 
 ' ============================================================================
-' Output sheets
+' SECTION 08 - OUTPUT TABLES AND WORKSHEET PRESENTATION
+'
+' Purpose:
+'   Write each analysis to its dedicated output sheet. User-maintained sheets
+'   are never cleared here. Large data blocks are written in arrays to reduce
+'   Excel calls and lower the risk of the model stopping mid-process.
 ' ============================================================================
 
 Private Sub WriteTransactions()
@@ -2036,7 +2102,12 @@ Private Sub WriteOutOfSample()
 End Sub
 
 ' ============================================================================
-' Chart data and dashboard
+' SECTION 09 - CHART DATA AND DASHBOARD LAYOUT
+'
+' Purpose:
+'   Build compact chart-source ranges and create a fixed six-chart dashboard.
+'   Chart errors are isolated from calculations so a chart warning does not
+'   invalidate completed return, volatility, tenor, or frontier results.
 ' ============================================================================
 
 Private Sub BuildChartData()
@@ -2614,7 +2685,11 @@ Private Sub FormatDashboardCard(ByVal ws As Worksheet, _
 End Sub
 
 ' ============================================================================
-' Validation
+' SECTION 10 - MODEL VALIDATION AND RECONCILIATION
+'
+' Purpose:
+'   Reconcile daily rows, common samples, frontier generation, pure-tenor
+'   static-sleeve returns, training/test observations, and dashboard charts.
 ' ============================================================================
 
 Private Sub WriteValidationResults()
@@ -2752,7 +2827,11 @@ Private Function ValidationPassed() As Boolean
 End Function
 
 ' ============================================================================
-' General helpers
+' SECTION 11 - SHARED CALCULATION AND WORKSHEET HELPERS
+'
+' Purpose:
+'   Centralize date conventions, binary searches, statistics, sorting,
+'   formatting, chart creation, and reusable utility functions.
 ' ============================================================================
 
 Private Sub SetOutputTitle(ByVal ws As Worksheet, _
