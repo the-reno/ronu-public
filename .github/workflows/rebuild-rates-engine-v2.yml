@@ -82,3 +82,5 @@ jobs:
           git add -A
           git commit -m 'Publish improved static-sleeve frontier model'
           git push
+
+# Trigger after pull-request merge.
