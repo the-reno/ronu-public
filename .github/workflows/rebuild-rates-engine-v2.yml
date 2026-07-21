@@ -81,3 +81,5 @@ jobs:
           git add -A
           git commit -m 'Publish static-sleeve frontier rates engine'
           git push
+
+# Trigger reconstruction after staging the payload.
