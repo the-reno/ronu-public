@@ -16,17 +16,35 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           show-progress: false
-      - name: Diagnose payload
+      - name: Reconstruct and validate CSV
         shell: bash
         run: |
-          {
-            wc -c temp/rates_curve_part_*.b64
-            sha256sum temp/rates_curve_part_*.b64
-          } > rates_curve_diagnostic.txt
-          cat temp/rates_curve_part_00.b64 temp/rates_curve_part_01.b64 temp/rates_curve_part_02.b64 temp/rates_curve_part_03.b64 > /tmp/rates_curve.b64
-          base64 --decode /tmp/rates_curve.b64 > /tmp/rates_curve.csv.gz 2>> rates_curve_diagnostic.txt || true
-          gzip --test /tmp/rates_curve.csv.gz 2>> rates_curve_diagnostic.txt || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rates-curve-diagnostic
-          path: rates_curve_diagnostic.txt
+          set -euo pipefail
+          cat temp/rates_curve_part_00.b64 temp/rates_curve_part_01.b64 temp/rates_curve_part_02a.b64 temp/rates_curve_part_02b.b64 temp/rates_curve_part_03.b64 > /tmp/rates_curve.b64
+          base64 --decode /tmp/rates_curve.b64 > /tmp/rates_curve.csv.gz
+          gzip --test /tmp/rates_curve.csv.gz
+          gzip --decompress --stdout /tmp/rates_curve.csv.gz > Rates_Curve_2020-01-02_to_2026-07-10.csv
+          test "$(head -n 1 Rates_Curve_2020-01-02_to_2026-07-10.csv)" = "Date,ON,1M,2M,3M,6M"
+          test "$(tail -n 1 Rates_Curve_2020-01-02_to_2026-07-10.csv | cut -d, -f1)" = "2026-07-10"
+          test "$(wc -l < Rates_Curve_2020-01-02_to_2026-07-10.csv)" -eq 1629
+      - name: Remove temporary publication files
+        shell: bash
+        run: |
+          rm -f temp/Rates_Curve_2020-01-02_to_2026-07-10.csv.gz.b64
+          rm -f temp/rates_curve_part_00.b64
+          rm -f temp/rates_curve_part_01.b64
+          rm -f temp/rates_curve_part_02.b64
+          rm -f temp/rates_curve_part_02a.b64
+          rm -f temp/rates_curve_part_02b.b64
+          rm -f temp/rates_curve_part_03.b64
+          rm -f temp/publish-rates-curve.trigger
+          rm -f temp/rates_curve_diagnostic.txt
+          rm -f .github/workflows/publish-rates-curve.yml
+      - name: Commit published CSV
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Publish validated rates curve CSV"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
