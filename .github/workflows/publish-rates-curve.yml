@@ -22,12 +22,11 @@ jobs:
           {
             wc -c temp/rates_curve_part_*.b64
             sha256sum temp/rates_curve_part_*.b64
-          } > temp/rates_curve_diagnostic.txt
+          } > rates_curve_diagnostic.txt
           cat temp/rates_curve_part_00.b64 temp/rates_curve_part_01.b64 temp/rates_curve_part_02.b64 temp/rates_curve_part_03.b64 > /tmp/rates_curve.b64
-          base64 --decode /tmp/rates_curve.b64 > /tmp/rates_curve.csv.gz 2>> temp/rates_curve_diagnostic.txt || true
-          gzip --test /tmp/rates_curve.csv.gz 2>> temp/rates_curve_diagnostic.txt || true
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add temp/rates_curve_diagnostic.txt
-          git commit -m "Add rates curve payload diagnostic"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          base64 --decode /tmp/rates_curve.b64 > /tmp/rates_curve.csv.gz 2>> rates_curve_diagnostic.txt || true
+          gzip --test /tmp/rates_curve.csv.gz 2>> rates_curve_diagnostic.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rates-curve-diagnostic
+          path: rates_curve_diagnostic.txt
