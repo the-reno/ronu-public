@@ -1,0 +1,65 @@
+name: Fix VBA name collision
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-vba-name-collision.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fix function and local-variable name collision
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          from collections import Counter
+
+          path = Path('Rates_Analysis_Engine.bas')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = {
+              'Dim combinationCount As Long': 'Dim candidateCapacity As Long',
+              'combinationCount = CombinationCount(gWeightUnits + 4, 4)': 'candidateCapacity = CountWeightCombinations(gWeightUnits + 4, 4)',
+              'ReDim candidates(1 To combinationCount, 1 To CANDIDATE_COLUMNS)': 'ReDim candidates(1 To candidateCapacity, 1 To CANDIDATE_COLUMNS)',
+              'Private Function CombinationCount(ByVal nValue As Long, _': 'Private Function CountWeightCombinations(ByVal nValue As Long, _',
+              '    CombinationCount = CLng(Round(resultValue, 0))': '    CountWeightCombinations = CLng(Round(resultValue, 0))',
+          }
+
+          for old, new in replacements.items():
+              assert old in text, f'Missing expected source text: {old}'
+              text = text.replace(old, new)
+
+          assert 'Dim combinationCount As Long' not in text
+          assert 'Private Function CombinationCount' not in text
+          assert 'candidateCapacity = CountWeightCombinations(gWeightUnits + 4, 4)' in text
+
+          subs = re.findall(r'^\s*(?:Public |Private )?Sub\s+([A-Za-z_][A-Za-z0-9_]*)', text, re.I | re.M)
+          funcs = re.findall(r'^\s*(?:Public |Private )?Function\s+([A-Za-z_][A-Za-z0-9_]*)', text, re.I | re.M)
+          assert len(subs) == len(re.findall(r'^\s*End Sub\s*$', text, re.I | re.M))
+          assert len(funcs) == len(re.findall(r'^\s*End Function\s*$', text, re.I | re.M))
+          names = [name.lower() for name in subs + funcs]
+          assert not [name for name, count in Counter(names).items() if count > 1]
+
+          path.write_text(text, encoding='utf-8')
+
+      - name: Commit fix and remove temporary workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/fix-vba-name-collision.yml
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Fix VBA expected-array compile error'
+          git push origin main
