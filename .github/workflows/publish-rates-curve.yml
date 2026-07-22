@@ -19,7 +19,13 @@ jobs:
       - name: Reconstruct validated CSV
         shell: bash
         run: |
-          base64 --decode temp/Rates_Curve_2020-01-02_to_2026-07-10.csv.gz.b64 | gzip --decompress > Rates_Curve_2020-01-02_to_2026-07-10.csv
+          cat temp/rates_curve_part_00.b64 \
+              temp/rates_curve_part_01.b64 \
+              temp/rates_curve_part_02.b64 \
+              temp/rates_curve_part_03.b64 \
+            | base64 --decode \
+            | gzip --decompress \
+            > Rates_Curve_2020-01-02_to_2026-07-10.csv
           test "$(head -n 1 Rates_Curve_2020-01-02_to_2026-07-10.csv)" = "Date,ON,1M,2M,3M,6M"
           test "$(tail -n 1 Rates_Curve_2020-01-02_to_2026-07-10.csv | cut -d, -f1)" = "2026-07-10"
           test "$(wc -l < Rates_Curve_2020-01-02_to_2026-07-10.csv)" -eq 1629
@@ -27,6 +33,10 @@ jobs:
         shell: bash
         run: |
           rm -f temp/Rates_Curve_2020-01-02_to_2026-07-10.csv.gz.b64
+          rm -f temp/rates_curve_part_00.b64
+          rm -f temp/rates_curve_part_01.b64
+          rm -f temp/rates_curve_part_02.b64
+          rm -f temp/rates_curve_part_03.b64
           rm -f temp/publish-rates-curve.trigger
           rm -f .github/workflows/publish-rates-curve.yml
       - name: Commit published CSV
