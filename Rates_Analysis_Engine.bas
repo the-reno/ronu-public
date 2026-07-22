@@ -1312,7 +1312,7 @@ Private Sub BuildCandidateSet(ByVal startMonthIndex As Long, _
                               ByVal endMonthIndex As Long, _
                               ByRef candidates() As Double, _
                               ByRef candidateCount As Long)
-    Dim combinationCount As Long
+    Dim candidateCapacity As Long
     Dim w0 As Long
     Dim w1 As Long
     Dim w2 As Long
@@ -1324,8 +1324,8 @@ Private Sub BuildCandidateSet(ByVal startMonthIndex As Long, _
     Dim rowIndex As Long
     Dim tenorIndex As Long
 
-    combinationCount = CombinationCount(gWeightUnits + 4, 4)
-    ReDim candidates(1 To combinationCount, 1 To CANDIDATE_COLUMNS)
+    candidateCapacity = CountWeightCombinations(gWeightUnits + 4, 4)
+    ReDim candidates(1 To candidateCapacity, 1 To CANDIDATE_COLUMNS)
 
     benchmarkReturnPct = WindowTenorAnnualReturnPct( _
         1, startMonthIndex, endMonthIndex)
@@ -3402,7 +3402,7 @@ Private Sub SwapCandidateRows(ByRef candidates() As Double, _
     Next columnIndex
 End Sub
 
-Private Function CombinationCount(ByVal nValue As Long, _
+Private Function CountWeightCombinations(ByVal nValue As Long, _
                                   ByVal kValue As Long) As Long
     Dim index As Long
     Dim resultValue As Double
@@ -3418,7 +3418,7 @@ Private Function CombinationCount(ByVal nValue As Long, _
                       (nValue - kValue + index) / index
     Next index
 
-    CombinationCount = CLng(Round(resultValue, 0))
+    CountWeightCombinations = CLng(Round(resultValue, 0))
 End Function
 
 Private Function MinimumDouble(ByVal firstValue As Double, _
