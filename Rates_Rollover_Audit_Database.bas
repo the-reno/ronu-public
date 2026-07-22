@@ -366,28 +366,29 @@ Private Sub BuildSequentialRolloverDatabase()
             maturityAdjustmentDays = _
                 CLng(actualMaturity - targetMaturity)
 
-            rowData = Array( _
-                "SEQUENTIAL", _
-                AuditTenorName(tenorIndex), _
-                transactionID, _
-                currentStart, _
-                startRateDate, _
-                startRate, _
-                targetMaturity, _
-                actualMaturity, _
-                maturityAdjustmentDays, _
-                holdingDays, _
-                openingPrincipal, _
-                interestAmount, _
-                closingPrincipal, _
-                holdingReturnPct, _
-                annualizedEquivalentPct, _
-                maturityRateDate, _
-                maturitySameTenorRate, _
-                sameTenorRateChangeBps, _
-                nextRateDate, _
-                nextRolloverRate, _
-                nextRolloverRateChangeBps)
+            ReDim rowData(0 To 20)
+
+            rowData(0) = "SEQUENTIAL"
+            rowData(1) = AuditTenorName(tenorIndex)
+            rowData(2) = transactionID
+            rowData(3) = currentStart
+            rowData(4) = startRateDate
+            rowData(5) = startRate
+            rowData(6) = targetMaturity
+            rowData(7) = actualMaturity
+            rowData(8) = maturityAdjustmentDays
+            rowData(9) = holdingDays
+            rowData(10) = openingPrincipal
+            rowData(11) = interestAmount
+            rowData(12) = closingPrincipal
+            rowData(13) = holdingReturnPct
+            rowData(14) = annualizedEquivalentPct
+            rowData(15) = maturityRateDate
+            rowData(16) = maturitySameTenorRate
+            rowData(17) = sameTenorRateChangeBps
+            rowData(18) = nextRateDate
+            rowData(19) = nextRolloverRate
+            rowData(20) = nextRolloverRateChangeBps
 
             outputRows.Add rowData
 
@@ -469,28 +470,29 @@ Private Sub BuildAllStartsDatabase()
             maturityAdjustmentDays = _
                 CLng(actualMaturity - targetMaturity)
 
-            rowData = Array( _
-                "ALL_STARTS", _
-                AuditTenorName(tenorIndex), _
-                startCurveIndex - firstCurveIndex + 1, _
-                gCurveDates(startCurveIndex), _
-                gCurveDates(startCurveIndex), _
-                startRate, _
-                targetMaturity, _
-                actualMaturity, _
-                maturityAdjustmentDays, _
-                holdingDays, _
-                gInitialNotional, _
-                interestAmount, _
-                closingValue, _
-                holdingReturnPct, _
-                annualizedEquivalentPct, _
-                gCurveDates(maturityRateIndex), _
-                maturityRate, _
-                rateChangeBps, _
-                gCurveDates(maturityRateIndex), _
-                maturityRate, _
-                rateChangeBps)
+            ReDim rowData(0 To 20)
+
+            rowData(0) = "ALL_STARTS"
+            rowData(1) = AuditTenorName(tenorIndex)
+            rowData(2) = startCurveIndex - firstCurveIndex + 1
+            rowData(3) = gCurveDates(startCurveIndex)
+            rowData(4) = gCurveDates(startCurveIndex)
+            rowData(5) = startRate
+            rowData(6) = targetMaturity
+            rowData(7) = actualMaturity
+            rowData(8) = maturityAdjustmentDays
+            rowData(9) = holdingDays
+            rowData(10) = gInitialNotional
+            rowData(11) = interestAmount
+            rowData(12) = closingValue
+            rowData(13) = holdingReturnPct
+            rowData(14) = annualizedEquivalentPct
+            rowData(15) = gCurveDates(maturityRateIndex)
+            rowData(16) = maturityRate
+            rowData(17) = rateChangeBps
+            rowData(18) = gCurveDates(maturityRateIndex)
+            rowData(19) = maturityRate
+            rowData(20) = rateChangeBps
 
             outputRows.Add rowData
 
@@ -538,25 +540,7 @@ Private Sub BuildAuditSummary()
     ws.Range("A2:Q2").Interior.Color = COLOR_PALE
     ws.Range("A2:Q2").WrapText = True
 
-    WriteAuditRow ws.Range("A4"), Array( _
-        "Database", _
-        "Tenor", _
-        "Observations", _
-        "Average Holding Days", _
-        "Average Start Rate", _
-        "Average Holding Return", _
-        "Holding Return Volatility", _
-        "Average Annualized Equivalent Return", _
-        "Annualized Equivalent Return Volatility", _
-        "5th Percentile Annualized Return", _
-        "Median Annualized Return", _
-        "95th Percentile Annualized Return", _
-        "Average Rate Change (bps)", _
-        "Rate Change Volatility (bps)", _
-        "Total Interest ($)", _
-        "Final Sequential Principal ($)", _
-        "Audit Note"))
-
+    WriteAuditSummaryHeaders ws
     StyleAuditHeader ws.Range("A4:Q4")
 
     databaseNames = Array("Rollover_Path_DB", "Rollover_All_Starts")
@@ -666,30 +650,52 @@ Private Sub WriteAuditDatabaseHeader(ByVal ws As Worksheet, _
     ws.Range("A2:U2").Interior.Color = COLOR_PALE
     ws.Range("A2:U2").WrapText = True
 
-    WriteAuditRow ws.Range("A4"), Array( _
-        "Database Type", _
-        "Tenor", _
-        "Observation / Transaction ID", _
-        "Start Date", _
-        "Start Rate Observation Date", _
-        "Start Rate", _
-        "Target Maturity", _
-        "Actual Maturity", _
-        "Maturity Adjustment Days", _
-        "Holding Days", _
-        "Opening Principal ($)", _
-        "Interest ($)", _
-        "Closing Principal / Value ($)", _
-        "Holding Period Return", _
-        "Annualized Equivalent Return", _
-        "Maturity Rate Observation Date", _
-        "Same-Tenor Rate at Maturity", _
-        "Same-Tenor Rate Change (bps)", _
-        "Next Rollover Rate Date", _
-        "Next Rollover Rate", _
-        "Next Rollover Rate Change (bps)"))
-
+    WriteAuditDatabaseHeaders ws
     StyleAuditHeader ws.Range("A4:U4")
+End Sub
+
+Private Sub WriteAuditDatabaseHeaders(ByVal ws As Worksheet)
+    ws.Cells(4, 1).Value = "Database Type"
+    ws.Cells(4, 2).Value = "Tenor"
+    ws.Cells(4, 3).Value = "Observation / Transaction ID"
+    ws.Cells(4, 4).Value = "Start Date"
+    ws.Cells(4, 5).Value = "Start Rate Observation Date"
+    ws.Cells(4, 6).Value = "Start Rate"
+    ws.Cells(4, 7).Value = "Target Maturity"
+    ws.Cells(4, 8).Value = "Actual Maturity"
+    ws.Cells(4, 9).Value = "Maturity Adjustment Days"
+    ws.Cells(4, 10).Value = "Holding Days"
+    ws.Cells(4, 11).Value = "Opening Principal ($)"
+    ws.Cells(4, 12).Value = "Interest ($)"
+    ws.Cells(4, 13).Value = "Closing Principal / Value ($)"
+    ws.Cells(4, 14).Value = "Holding Period Return"
+    ws.Cells(4, 15).Value = "Annualized Equivalent Return"
+    ws.Cells(4, 16).Value = "Maturity Rate Observation Date"
+    ws.Cells(4, 17).Value = "Same-Tenor Rate at Maturity"
+    ws.Cells(4, 18).Value = "Same-Tenor Rate Change (bps)"
+    ws.Cells(4, 19).Value = "Next Rollover Rate Date"
+    ws.Cells(4, 20).Value = "Next Rollover Rate"
+    ws.Cells(4, 21).Value = "Next Rollover Rate Change (bps)"
+End Sub
+
+Private Sub WriteAuditSummaryHeaders(ByVal ws As Worksheet)
+    ws.Cells(4, 1).Value = "Database"
+    ws.Cells(4, 2).Value = "Tenor"
+    ws.Cells(4, 3).Value = "Observations"
+    ws.Cells(4, 4).Value = "Average Holding Days"
+    ws.Cells(4, 5).Value = "Average Start Rate"
+    ws.Cells(4, 6).Value = "Average Holding Return"
+    ws.Cells(4, 7).Value = "Holding Return Volatility"
+    ws.Cells(4, 8).Value = "Average Annualized Equivalent Return"
+    ws.Cells(4, 9).Value = "Annualized Equivalent Return Volatility"
+    ws.Cells(4, 10).Value = "5th Percentile Annualized Return"
+    ws.Cells(4, 11).Value = "Median Annualized Return"
+    ws.Cells(4, 12).Value = "95th Percentile Annualized Return"
+    ws.Cells(4, 13).Value = "Average Rate Change (bps)"
+    ws.Cells(4, 14).Value = "Rate Change Volatility (bps)"
+    ws.Cells(4, 15).Value = "Total Interest ($)"
+    ws.Cells(4, 16).Value = "Final Sequential Principal ($)"
+    ws.Cells(4, 17).Value = "Audit Note"
 End Sub
 
 Private Sub FormatAuditDatabase(ByVal ws As Worksheet, _
