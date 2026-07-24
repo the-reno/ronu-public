@@ -1,0 +1,357 @@
+Option Explicit
+
+' ============================================================
+' R_CURVE_ROLLOVER_PATHS
+'
+' Usage:
+'   =R_CURVE_ROLLOVER_PATHS(A:U, DATE(2020,1,1))
+'
+' ON:
+'   Lists every available Curve Date from the resolved start date
+'   through the final date in the table.
+'
+' 1M, 2M, 3M and 6M:
+'   The stored Effective Maturity becomes the next Curve Date.
+'
+' The function only copies dates, rates and factors already
+' present in the 21-column R_CURVE_FACTORS output.
+' ============================================================
+
+Public Function R_CURVE_ROLLOVER_PATHS( _
+    ByVal CurveFactors As Range, _
+    ByVal InitialDate As Variant) As Variant
+
+    Dim ws As Worksheet
+    Dim sourceRange As Range
+    Dim data As Variant
+    Dim workOutput() As Variant
+    Dim finalOutput() As Variant
+
+    Dim firstDataRow As Long
+    Dim lastDataRow As Long
+    Dim lastUsedRow As Long
+    Dim lastInputRow As Long
+    Dim validRows As Long
+
+    Dim startRow As Long
+    Dim currentRow As Long
+    Dim nextRow As Long
+    Dim sourceRow As Long
+    Dim outputRow As Long
+    Dim finalRows As Long
+    Dim outputColumn As Long
+    Dim tenorIndex As Long
+    Dim rollNumber As Long
+
+    Dim initialSerial As Double
+    Dim curveSerial As Double
+    Dim effectiveSerial As Double
+
+    Dim tenorNames As Variant
+    Dim targetColumns As Variant
+    Dim effectiveColumns As Variant
+    Dim rateColumns As Variant
+    Dim factorColumns As Variant
+
+    On Error GoTo FunctionError
+
+    If CurveFactors Is Nothing Then
+        R_CURVE_ROLLOVER_PATHS = CVErr(xlErrRef)
+        Exit Function
+    End If
+
+    If CurveFactors.Columns.Count < 21 Then
+        R_CURVE_ROLLOVER_PATHS = CVErr(xlErrRef)
+        Exit Function
+    End If
+
+    If Not GetDateSerial(InitialDate, initialSerial) Then
+        R_CURVE_ROLLOVER_PATHS = CVErr(xlErrValue)
+        Exit Function
+    End If
+
+    Set ws = CurveFactors.Worksheet
+
+    lastUsedRow = ws.Cells( _
+        ws.Rows.Count, _
+        CurveFactors.Column).End(xlUp).Row
+
+    lastInputRow = _
+        CurveFactors.Row + CurveFactors.Rows.Count - 1
+
+    If lastUsedRow < CurveFactors.Row Then
+        R_CURVE_ROLLOVER_PATHS = CVErr(xlErrNA)
+        Exit Function
+    End If
+
+    If lastUsedRow < lastInputRow Then
+        lastInputRow = lastUsedRow
+    End If
+
+    Set sourceRange = ws.Range( _
+        ws.Cells(CurveFactors.Row, CurveFactors.Column), _
+        ws.Cells(lastInputRow, CurveFactors.Column + 20))
+
+    data = sourceRange.Value2
+    lastDataRow = UBound(data, 1)
+
+    If IsDateSerial(data(1, 1)) Then
+        firstDataRow = 1
+    Else
+        firstDataRow = 2
+    End If
+
+    For sourceRow = firstDataRow To lastDataRow
+        If IsDateSerial(data(sourceRow, 1)) Then
+            validRows = validRows + 1
+        End If
+    Next sourceRow
+
+    If validRows = 0 Then
+        R_CURVE_ROLLOVER_PATHS = CVErr(xlErrNA)
+        Exit Function
+    End If
+
+    startRow = FirstRowOnOrAfter( _
+        data, _
+        firstDataRow, _
+        lastDataRow, _
+        initialSerial)
+
+    If startRow = 0 Then
+        R_CURVE_ROLLOVER_PATHS = CVErr(xlErrNA)
+        Exit Function
+    End If
+
+    tenorNames = Array("ON", "1M", "2M", "3M", "6M")
+    targetColumns = Array(2, 6, 10, 14, 18)
+    effectiveColumns = Array(3, 7, 11, 15, 19)
+    rateColumns = Array(4, 8, 12, 16, 20)
+    factorColumns = Array(5, 9, 13, 17, 21)
+
+    ReDim workOutput(1 To validRows * 5 + 1, 1 To 7)
+
+    workOutput(1, 1) = "Tenor"
+    workOutput(1, 2) = "Roll"
+    workOutput(1, 3) = "Curve Date"
+    workOutput(1, 4) = "Target Maturity"
+    workOutput(1, 5) = "Effective Maturity"
+    workOutput(1, 6) = "Rate"
+    workOutput(1, 7) = "Factor"
+
+    outputRow = 2
+
+    For tenorIndex = 0 To 4
+
+        currentRow = startRow
+        rollNumber = 0
+
+        Do While currentRow > 0 _
+            And rollNumber < validRows
+
+            rollNumber = rollNumber + 1
+            curveSerial = Fix(CDbl(data(currentRow, 1)))
+
+            workOutput(outputRow, 1) = _
+                tenorNames(tenorIndex)
+
+            workOutput(outputRow, 2) = rollNumber
+            workOutput(outputRow, 3) = data(currentRow, 1)
+
+            workOutput(outputRow, 4) = _
+                data(currentRow, _
+                    CLng(targetColumns(tenorIndex)))
+
+            workOutput(outputRow, 5) = _
+                data(currentRow, _
+                    CLng(effectiveColumns(tenorIndex)))
+
+            workOutput(outputRow, 6) = _
+                data(currentRow, _
+                    CLng(rateColumns(tenorIndex)))
+
+            workOutput(outputRow, 7) = _
+                data(currentRow, _
+                    CLng(factorColumns(tenorIndex)))
+
+            outputRow = outputRow + 1
+
+            If tenorIndex = 0 Then
+
+                ' ON always advances to the next available
+                ' Curve Date, even when its stored effective
+                ' maturity equals the current Curve Date.
+                nextRow = FirstRowOnOrAfter( _
+                    data, _
+                    firstDataRow, _
+                    lastDataRow, _
+                    curveSerial + 1#)
+
+            Else
+
+                If Not IsDateSerial( _
+                    data(currentRow, _
+                        CLng(effectiveColumns(tenorIndex)))) Then
+
+                    Exit Do
+
+                End If
+
+                effectiveSerial = Fix(CDbl( _
+                    data(currentRow, _
+                        CLng(effectiveColumns(tenorIndex)))))
+
+                If effectiveSerial <= curveSerial Then Exit Do
+
+                nextRow = ExactDateRow( _
+                    data, _
+                    firstDataRow, _
+                    lastDataRow, _
+                    effectiveSerial)
+
+            End If
+
+            If nextRow = 0 Then Exit Do
+            currentRow = nextRow
+
+        Loop
+
+    Next tenorIndex
+
+    finalRows = outputRow - 1
+    ReDim finalOutput(1 To finalRows, 1 To 7)
+
+    For outputRow = 1 To finalRows
+        For outputColumn = 1 To 7
+            finalOutput(outputRow, outputColumn) = _
+                workOutput(outputRow, outputColumn)
+        Next outputColumn
+    Next outputRow
+
+    R_CURVE_ROLLOVER_PATHS = finalOutput
+    Exit Function
+
+FunctionError:
+    R_CURVE_ROLLOVER_PATHS = CVErr(xlErrValue)
+
+End Function
+
+
+Private Function FirstRowOnOrAfter( _
+    ByVal data As Variant, _
+    ByVal firstDataRow As Long, _
+    ByVal lastDataRow As Long, _
+    ByVal requestedDate As Double) As Long
+
+    Dim rowIndex As Long
+    Dim candidateDate As Double
+    Dim selectedDate As Double
+    Dim selectedRow As Long
+
+    requestedDate = Fix(requestedDate)
+
+    For rowIndex = firstDataRow To lastDataRow
+
+        If IsDateSerial(data(rowIndex, 1)) Then
+
+            candidateDate = Fix(CDbl(data(rowIndex, 1)))
+
+            If candidateDate >= requestedDate Then
+
+                If selectedRow = 0 _
+                    Or candidateDate < selectedDate Then
+
+                    selectedDate = candidateDate
+                    selectedRow = rowIndex
+
+                End If
+
+            End If
+
+        End If
+
+    Next rowIndex
+
+    FirstRowOnOrAfter = selectedRow
+
+End Function
+
+
+Private Function ExactDateRow( _
+    ByVal data As Variant, _
+    ByVal firstDataRow As Long, _
+    ByVal lastDataRow As Long, _
+    ByVal requestedDate As Double) As Long
+
+    Dim rowIndex As Long
+
+    requestedDate = Fix(requestedDate)
+
+    For rowIndex = firstDataRow To lastDataRow
+
+        If IsDateSerial(data(rowIndex, 1)) Then
+
+            If Fix(CDbl(data(rowIndex, 1))) = _
+                requestedDate Then
+
+                ExactDateRow = rowIndex
+                Exit Function
+
+            End If
+
+        End If
+
+    Next rowIndex
+
+End Function
+
+
+Private Function GetDateSerial( _
+    ByVal value As Variant, _
+    ByRef dateSerial As Double) As Boolean
+
+    Dim inputValue As Variant
+
+    If IsObject(value) Then
+
+        If TypeName(value) <> "Range" Then Exit Function
+        inputValue = value.Cells(1, 1).Value2
+
+    Else
+
+        inputValue = value
+
+    End If
+
+    If IsError(inputValue) Then Exit Function
+    If IsEmpty(inputValue) Then Exit Function
+
+    If IsNumeric(inputValue) Then
+
+        dateSerial = Fix(CDbl(inputValue))
+
+    ElseIf IsDate(inputValue) Then
+
+        dateSerial = Fix(CDbl(CDate(inputValue)))
+
+    Else
+
+        Exit Function
+
+    End If
+
+    GetDateSerial = (dateSerial > 0#)
+
+End Function
+
+
+Private Function IsDateSerial( _
+    ByVal value As Variant) As Boolean
+
+    If IsError(value) Then Exit Function
+    If IsEmpty(value) Then Exit Function
+    If Not IsNumeric(value) Then Exit Function
+
+    IsDateSerial = (CDbl(value) > 0#)
+
+End Function
