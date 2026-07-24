@@ -1,0 +1,363 @@
+Option Explicit
+
+' ============================================================
+' R_CURVE_FACTORS
+'
+' Usage:
+'   =R_CURVE_FACTORS(A:F)
+'
+' Input columns:
+'   A = Curve Date
+'   B = ON rate
+'   C = 1M rate
+'   D = 2M rate
+'   E = 3M rate
+'   F = 6M rate
+'
+' Target maturity:
+'   ON = Curve Date + 1 calendar day
+'   1M = Curve Date + 1 calendar month
+'   2M = Curve Date + 2 calendar months
+'   3M = Curve Date + 3 calendar months
+'   6M = Curve Date + 6 calendar months
+'
+' Effective maturity:
+'   Modified Following using only the dates available
+'   in the Curve Date column.
+'
+'   1. If target exists, use target.
+'   2. Otherwise, use first available date after target.
+'   3. If that date is in another month, use the latest
+'      available date before target.
+'   4. If no future date exists, use the latest available
+'      date before target.
+'
+' Rate:
+'   Same source row and same tenor column.
+'
+' Factor:
+'   1 + Rate * ActualDays / 360
+' ============================================================
+
+Public Function R_CURVE_FACTORS( _
+    ByVal Curve As Range) As Variant
+
+    Dim ws As Worksheet
+    Dim sourceRange As Range
+    Dim data As Variant
+    Dim output() As Variant
+
+    Dim firstDataRow As Long
+    Dim lastWorksheetRow As Long
+    Dim lastDataRow As Long
+    Dim validRowCount As Long
+
+    Dim sourceRow As Long
+    Dim outputRow As Long
+    Dim outputCol As Long
+    Dim tenorIndex As Long
+
+    Dim curveDate As Double
+    Dim targetDate As Double
+    Dim effectiveDate As Double
+    Dim rateValue As Variant
+    Dim actualDays As Long
+
+    Dim tenorNames As Variant
+    Dim tenorMonths As Variant
+
+    On Error GoTo FunctionError
+
+    If Curve Is Nothing Then
+        R_CURVE_FACTORS = CVErr(xlErrRef)
+        Exit Function
+    End If
+
+    If Curve.Columns.Count < 6 Then
+        R_CURVE_FACTORS = CVErr(xlErrRef)
+        Exit Function
+    End If
+
+    Set ws = Curve.Worksheet
+
+    ' If a whole-column range is supplied, stop at the last
+    ' populated curve date. Otherwise, respect the selected range.
+    If Curve.Rows.Count = ws.Rows.Count Then
+
+        lastWorksheetRow = ws.Cells( _
+            ws.Rows.Count, _
+            Curve.Column).End(xlUp).Row
+
+    Else
+
+        lastWorksheetRow = _
+            Curve.Row + Curve.Rows.Count - 1
+
+    End If
+
+    If lastWorksheetRow < Curve.Row Then
+        R_CURVE_FACTORS = CVErr(xlErrNA)
+        Exit Function
+    End If
+
+    Set sourceRange = ws.Range( _
+        ws.Cells(Curve.Row, Curve.Column), _
+        ws.Cells(lastWorksheetRow, Curve.Column + 5))
+
+    data = sourceRange.Value2
+    lastDataRow = UBound(data, 1)
+
+    ' Detect whether the first row is a header.
+    If IsValidDateSerial(data(1, 1)) Then
+        firstDataRow = 1
+    Else
+        firstDataRow = 2
+    End If
+
+    ' Count valid curve-date rows.
+    For sourceRow = firstDataRow To lastDataRow
+
+        If IsValidDateSerial(data(sourceRow, 1)) Then
+            validRowCount = validRowCount + 1
+        End If
+
+    Next sourceRow
+
+    If validRowCount = 0 Then
+        R_CURVE_FACTORS = CVErr(xlErrNA)
+        Exit Function
+    End If
+
+    tenorNames = Array("ON", "1M", "2M", "3M", "6M")
+    tenorMonths = Array(0, 1, 2, 3, 6)
+
+    ReDim output(1 To validRowCount + 1, 1 To 21)
+
+    ' Output headers.
+    output(1, 1) = "Curve Date"
+    outputCol = 2
+
+    For tenorIndex = 0 To 4
+
+        output(1, outputCol) = _
+            tenorNames(tenorIndex) & " Target Maturity"
+
+        output(1, outputCol + 1) = _
+            tenorNames(tenorIndex) & " Effective Maturity"
+
+        output(1, outputCol + 2) = _
+            tenorNames(tenorIndex) & " Rate"
+
+        output(1, outputCol + 3) = _
+            tenorNames(tenorIndex) & " Factor"
+
+        outputCol = outputCol + 4
+
+    Next tenorIndex
+
+    ' Calculate every curve row.
+    outputRow = 2
+
+    For sourceRow = firstDataRow To lastDataRow
+
+        If IsValidDateSerial(data(sourceRow, 1)) Then
+
+            curveDate = Fix(CDbl(data(sourceRow, 1)))
+
+            output(outputRow, 1) = curveDate
+            outputCol = 2
+
+            For tenorIndex = 0 To 4
+
+                ' Calculate contractual target maturity.
+                If tenorIndex = 0 Then
+
+                    targetDate = curveDate + 1#
+
+                Else
+
+                    targetDate = CDbl(DateAdd( _
+                        "m", _
+                        CLng(tenorMonths(tenorIndex)), _
+                        CDate(curveDate)))
+
+                End If
+
+                ' Same Modified Following rule for every tenor.
+                effectiveDate = ModifiedFollowingCurveDate( _
+                    targetDate, _
+                    data, _
+                    firstDataRow, _
+                    lastDataRow)
+
+                ' Rate from the same observation row.
+                rateValue = data(sourceRow, tenorIndex + 2)
+
+                output(outputRow, outputCol) = targetDate
+                output(outputRow, outputCol + 1) = effectiveDate
+
+                If HasNumericValue(rateValue) Then
+
+                    output(outputRow, outputCol + 2) = _
+                        CDbl(rateValue)
+
+                    actualDays = DateDiff( _
+                        "d", _
+                        CDate(curveDate), _
+                        CDate(effectiveDate))
+
+                    output(outputRow, outputCol + 3) = _
+                        1# + CDbl(rateValue) * _
+                        CDbl(actualDays) / 360#
+
+                Else
+
+                    output(outputRow, outputCol + 2) = Empty
+                    output(outputRow, outputCol + 3) = Empty
+
+                End If
+
+                outputCol = outputCol + 4
+
+            Next tenorIndex
+
+            outputRow = outputRow + 1
+
+        End If
+
+    Next sourceRow
+
+    R_CURVE_FACTORS = output
+    Exit Function
+
+FunctionError:
+
+    R_CURVE_FACTORS = CVErr(xlErrValue)
+
+End Function
+
+
+Private Function ModifiedFollowingCurveDate( _
+    ByVal targetDate As Double, _
+    ByVal curveData As Variant, _
+    ByVal firstDataRow As Long, _
+    ByVal lastDataRow As Long) As Double
+
+    Dim rowIndex As Long
+    Dim availableDate As Double
+
+    Dim previousDate As Double
+    Dim followingDate As Double
+
+    Dim previousFound As Boolean
+    Dim followingFound As Boolean
+
+    targetDate = Fix(targetDate)
+
+    For rowIndex = firstDataRow To lastDataRow
+
+        If IsValidDateSerial(curveData(rowIndex, 1)) Then
+
+            availableDate = _
+                Fix(CDbl(curveData(rowIndex, 1)))
+
+            ' Target date exists in the curve.
+            If availableDate = targetDate Then
+
+                ModifiedFollowingCurveDate = availableDate
+                Exit Function
+
+            End If
+
+            ' Latest date before target.
+            If availableDate < targetDate Then
+
+                If Not previousFound _
+                    Or availableDate > previousDate Then
+
+                    previousDate = availableDate
+                    previousFound = True
+
+                End If
+
+            End If
+
+            ' Earliest date after target.
+            If availableDate > targetDate Then
+
+                If Not followingFound _
+                    Or availableDate < followingDate Then
+
+                    followingDate = availableDate
+                    followingFound = True
+
+                End If
+
+            End If
+
+        End If
+
+    Next rowIndex
+
+    ' Modified Following:
+    ' Use the next available date only when it remains
+    ' in the same calendar month as the target.
+    If followingFound Then
+
+        If Year(CDate(followingDate)) = Year(CDate(targetDate)) _
+            And Month(CDate(followingDate)) = _
+                Month(CDate(targetDate)) Then
+
+            ModifiedFollowingCurveDate = followingDate
+            Exit Function
+
+        End If
+
+    End If
+
+    ' If following crosses the month, or no future date exists,
+    ' use the latest available date before target.
+    If previousFound Then
+
+        ModifiedFollowingCurveDate = previousDate
+        Exit Function
+
+    End If
+
+    ' Defensive fallback for a target earlier than every curve date.
+    If followingFound Then
+
+        ModifiedFollowingCurveDate = followingDate
+        Exit Function
+
+    End If
+
+    Err.Raise vbObjectError + 1000, _
+        "ModifiedFollowingCurveDate", _
+        "No valid curve date is available."
+
+End Function
+
+
+Private Function IsValidDateSerial( _
+    ByVal value As Variant) As Boolean
+
+    If IsError(value) Then Exit Function
+    If Not IsNumeric(value) Then Exit Function
+
+    IsValidDateSerial = (CDbl(value) > 0#)
+
+End Function
+
+
+Private Function HasNumericValue( _
+    ByVal value As Variant) As Boolean
+
+    If IsError(value) Then Exit Function
+    If IsEmpty(value) Then Exit Function
+    If Len(Trim$(CStr(value))) = 0 Then Exit Function
+
+    HasNumericValue = IsNumeric(value)
+
+End Function
+
