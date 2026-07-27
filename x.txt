@@ -1,0 +1,1302 @@
+#!/usr/bin/env python3
+"""
+Build SOFR_Presentation_Framework.xlsx.
+
+The script reproduces the workbook created in ChatGPT using:
+- the ON, 1M, 2M, 3M and 6M curve from curve.txt;
+- historical FOMC decision dates hard-coded through 17-Jun-2026;
+- an analysis window from 03-Jan-2023 through 10-Jul-2026.
+
+The input curve can contain rates either as percentage points, such as 3.5500,
+or as Excel-style decimals, such as 0.0355. The script normalizes both formats.
+
+Dependency:
+    artifact_tool
+
+Usage:
+    python build_sofr_presentation.py
+
+    python build_sofr_presentation.py \
+        --curve-file curve.txt \
+        --output SOFR_Presentation_Framework.xlsx
+
+    python build_sofr_presentation.py \
+        --curve-url https://raw.githubusercontent.com/the-reno/ronu-public/main/curve.txt
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import io
+import math
+import urllib.request
+from bisect import bisect_left
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+from dateutil.relativedelta import relativedelta
+
+from artifact_tool import SpreadsheetFile, Workbook
+
+
+DEFAULT_CURVE_URL = (
+    "https://raw.githubusercontent.com/the-reno/ronu-public/main/curve.txt"
+)
+DEFAULT_OUTPUT = "SOFR_Presentation_Framework.xlsx"
+ANALYSIS_START = date(2023, 1, 1)
+ANALYSIS_END = date(2026, 7, 10)
+
+TENORS = ["ON", "1M", "2M", "3M", "6M"]
+TERM_TENORS = ["1M", "2M", "3M", "6M"]
+TENOR_MONTHS = {"1M": 1, "2M": 2, "3M": 3, "6M": 6}
+
+DARK = "#17365D"
+MID = "#D9EAF7"
+LIGHT = "#F3F6F9"
+WHITE = "#FFFFFF"
+BLUE = "#0000FF"
+YELLOW = "#FFF2CC"
+
+
+FOMC_HISTORY = [
+    (date(2023, 2, 1), "Hike", 25),
+    (date(2023, 3, 22), "Hike", 25),
+    (date(2023, 5, 3), "Hike", 25),
+    (date(2023, 6, 14), "Hold", 0),
+    (date(2023, 7, 26), "Hike", 25),
+    (date(2023, 9, 20), "Hold", 0),
+    (date(2023, 11, 1), "Hold", 0),
+    (date(2023, 12, 13), "Hold", 0),
+    (date(2024, 1, 31), "Hold", 0),
+    (date(2024, 3, 20), "Hold", 0),
+    (date(2024, 5, 1), "Hold", 0),
+    (date(2024, 6, 12), "Hold", 0),
+    (date(2024, 7, 31), "Hold", 0),
+    (date(2024, 9, 18), "Cut", -50),
+    (date(2024, 11, 7), "Cut", -25),
+    (date(2024, 12, 18), "Cut", -25),
+    (date(2025, 1, 29), "Hold", 0),
+    (date(2025, 3, 19), "Hold", 0),
+    (date(2025, 5, 7), "Hold", 0),
+    (date(2025, 6, 18), "Hold", 0),
+    (date(2025, 7, 30), "Hold", 0),
+    (date(2025, 9, 17), "Cut", -25),
+    (date(2025, 10, 29), "Cut", -25),
+    (date(2025, 12, 10), "Cut", -25),
+    (date(2026, 1, 28), "Hold", 0),
+    (date(2026, 3, 18), "Hold", 0),
+    (date(2026, 4, 29), "Hold", 0),
+    (date(2026, 6, 17), "Hold", 0),
+]
+
+START_SCENARIOS = [
+    ("Jan-24", date(2024, 1, 1)),
+    ("Jul-24", date(2024, 7, 1)),
+    ("Jan-25", date(2025, 1, 1)),
+    ("Jul-25", date(2025, 7, 1)),
+]
+
+
+class CurveData:
+    def __init__(self, dates: list[date], rates: dict[str, list[float]]) -> None:
+        self.dates = dates
+        self.dates_dt = [datetime.combine(d, datetime.min.time()) for d in dates]
+        self.rates = rates
+        self.last_idx = len(dates) - 1
+
+    def target_date(self, start: date, tenor: str) -> date:
+        if tenor == "ON":
+            return start + timedelta(days=1)
+        return start + relativedelta(months=TENOR_MONTHS[tenor])
+
+    def effective_index(self, target: date) -> int | None:
+        idx = bisect_left(self.dates, target)
+        return idx if idx < len(self.dates) else None
+
+    def rolled_on_factor(self, start_idx: int, end_idx: int) -> float:
+        factor = 1.0
+        for idx in range(start_idx, end_idx):
+            day_count = (self.dates[idx + 1] - self.dates[idx]).days
+            factor *= 1.0 + self.rates["ON"][idx] * day_count / 360.0
+        return factor
+
+    def wealth_path(self, start_idx: int, tenor: str) -> list[float | None]:
+        values: list[float | None] = [None] * len(self.dates)
+        base = 1.0
+        current_idx = start_idx
+        locked_rate = self.rates[tenor][current_idx]
+        maturity_idx = self.effective_index(
+            self.target_date(self.dates[current_idx], tenor)
+        )
+
+        for idx in range(start_idx, len(self.dates)):
+            while (
+                maturity_idx is not None
+                and idx >= maturity_idx
+                and current_idx < idx
+            ):
+                day_count = (
+                    self.dates[maturity_idx] - self.dates[current_idx]
+                ).days
+                base *= 1.0 + locked_rate * day_count / 360.0
+                current_idx = maturity_idx
+                if current_idx >= self.last_idx:
+                    break
+                locked_rate = self.rates[tenor][current_idx]
+                maturity_idx = self.effective_index(
+                    self.target_date(self.dates[current_idx], tenor)
+                )
+
+            elapsed_days = (self.dates[idx] - self.dates[current_idx]).days
+            values[idx] = base * (1.0 + locked_rate * elapsed_days / 360.0)
+
+        return values
+
+    def rolling_result(self, start_idx: int, tenor: str) -> float:
+        base = 1.0
+        current_idx = start_idx
+        locked_rate = self.rates[tenor][current_idx]
+        maturity_idx = self.effective_index(
+            self.target_date(self.dates[current_idx], tenor)
+        )
+
+        while (
+            maturity_idx is not None
+            and maturity_idx <= self.last_idx
+            and current_idx < maturity_idx
+        ):
+            day_count = (
+                self.dates[maturity_idx] - self.dates[current_idx]
+            ).days
+            base *= 1.0 + locked_rate * day_count / 360.0
+            current_idx = maturity_idx
+            if current_idx >= self.last_idx:
+                return base
+            locked_rate = self.rates[tenor][current_idx]
+            maturity_idx = self.effective_index(
+                self.target_date(self.dates[current_idx], tenor)
+            )
+
+        elapsed_days = (
+            self.dates[self.last_idx] - self.dates[current_idx]
+        ).days
+        return base * (1.0 + locked_rate * elapsed_days / 360.0)
+
+
+def _read_text_from_url(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=30) as response:
+        return response.read().decode("utf-8")
+
+
+def load_curve(curve_file: str | None, curve_url: str) -> CurveData:
+    if curve_file:
+        text = Path(curve_file).read_text(encoding="utf-8")
+    else:
+        text = _read_text_from_url(curve_url)
+
+    reader = csv.DictReader(io.StringIO(text))
+    required = ["Date", *TENORS]
+    if reader.fieldnames != required:
+        raise ValueError(
+            f"Expected columns {required}, received {reader.fieldnames}."
+        )
+
+    dates: list[date] = []
+    rates: dict[str, list[float]] = {tenor: [] for tenor in TENORS}
+
+    for row in reader:
+        curve_date = datetime.strptime(row["Date"].strip(), "%Y-%m-%d").date()
+        if curve_date > ANALYSIS_END:
+            continue
+
+        values = [float(row[tenor]) for tenor in TENORS]
+        # GitHub data uses percentage points, e.g. 3.5500. Excel often stores
+        # the same rate as 0.0355. Normalize both formats to decimals.
+        if max(abs(value) for value in values) > 1.0:
+            values = [value / 100.0 for value in values]
+
+        dates.append(curve_date)
+        for tenor, value in zip(TENORS, values):
+            rates[tenor].append(value)
+
+    if not dates:
+        raise ValueError("The curve file contains no usable observations.")
+    if dates[-1] != ANALYSIS_END:
+        raise ValueError(
+            f"Exact reproduction requires curve data through {ANALYSIS_END}; "
+            f"last available date is {dates[-1]}."
+        )
+
+    return CurveData(dates, rates)
+
+
+def portfolio_frontier(
+    return_matrix: np.ndarray,
+    weight_step: float = 0.05,
+) -> tuple[
+    np.ndarray,
+    list[tuple[float, float, np.ndarray]],
+    tuple[float, float, np.ndarray],
+    tuple[float, float, np.ndarray],
+    tuple[float, float, np.ndarray],
+]:
+    annualized_mean = np.mean(return_matrix, axis=0) * 12.0
+    annualized_cov = np.cov(return_matrix, rowvar=False, ddof=1) * 12.0
+
+    units = int(round(1.0 / weight_step))
+    portfolios: list[tuple[float, float, np.ndarray]] = []
+
+    for w1 in range(units + 1):
+        for w2 in range(units + 1 - w1):
+            for w3 in range(units + 1 - w1 - w2):
+                w4 = units - w1 - w2 - w3
+                weights = np.array([w1, w2, w3, w4], dtype=float) / units
+                expected_return = float(weights @ annualized_mean)
+                volatility = float(
+                    math.sqrt(max(0.0, weights @ annualized_cov @ weights))
+                )
+                portfolios.append((expected_return, volatility, weights))
+
+    efficient: list[tuple[float, float, np.ndarray]] = []
+    best_return = -1e9
+    for expected_return, volatility, weights in sorted(
+        portfolios,
+        key=lambda item: (item[1], -item[0]),
+    ):
+        if expected_return > best_return + 1e-12:
+            efficient.append((expected_return, volatility, weights))
+            best_return = expected_return
+
+    minimum_volatility = min(portfolios, key=lambda item: item[1])
+    maximum_return = max(portfolios, key=lambda item: item[0])
+    best_information_ratio = max(
+        portfolios,
+        key=lambda item: item[0] / item[1] if item[1] else -1e9,
+    )
+
+    return (
+        annualized_mean,
+        efficient,
+        minimum_volatility,
+        maximum_return,
+        best_information_ratio,
+    )
+
+
+def merged_title(sheet, cell_range: str, text: str) -> None:
+    sheet.merge_cells(cell_range)
+    first_cell = cell_range.split(":")[0]
+    sheet.get_range(first_cell).values = [[text]]
+    sheet.get_range(cell_range).format = {
+        "fill": DARK,
+        "font": {"bold": True, "color": WHITE, "size": 16},
+        "row_height": 28,
+    }
+
+
+def merged_section(sheet, cell_range: str, text: str) -> None:
+    sheet.merge_cells(cell_range)
+    first_cell = cell_range.split(":")[0]
+    sheet.get_range(first_cell).values = [[text]]
+    sheet.get_range(cell_range).format = {
+        "fill": DARK,
+        "font": {"bold": True, "color": WHITE},
+    }
+
+
+def weight_description(weights: Iterable[float]) -> str:
+    return " / ".join(
+        f"{weight:.0%} {tenor}"
+        for tenor, weight in zip(TERM_TENORS, weights)
+        if weight > 0.001
+    )
+
+
+def build_workbook(curve: CurveData, output_path: str) -> None:
+    start_idx = bisect_left(curve.dates, ANALYSIS_START)
+    last_idx = curve.last_idx
+    last_date = curve.dates[-1]
+
+    # ---------------------------------------------------------------
+    # Premium priced versus realized
+    # ---------------------------------------------------------------
+    premium_summary: list[list[object]] = []
+    for tenor in TERM_TENORS:
+        entry_values: list[float] = []
+        realized_values: list[float] = []
+
+        for idx in range(start_idx, len(curve.dates)):
+            maturity_idx = curve.effective_index(
+                curve.target_date(curve.dates[idx], tenor)
+            )
+            if maturity_idx is None:
+                break
+
+            day_count = (
+                curve.dates[maturity_idx] - curve.dates[idx]
+            ).days
+            fixed_rate = curve.rates[tenor][idx]
+            entry_values.append(
+                (fixed_rate - curve.rates["ON"][idx]) * 10000.0
+            )
+            rolled_equivalent = (
+                curve.rolled_on_factor(idx, maturity_idx) - 1.0
+            ) * 360.0 / day_count
+            realized_values.append(
+                (fixed_rate - rolled_equivalent) * 10000.0
+            )
+
+        entry = np.array(entry_values)
+        realized = np.array(realized_values)
+        historical_spreads = np.array(
+            [
+                (curve.rates[tenor][idx] - curve.rates["ON"][idx])
+                * 10000.0
+                for idx in range(start_idx, len(curve.dates))
+            ]
+        )
+        current_premium = (
+            curve.rates[tenor][-1] - curve.rates["ON"][-1]
+        ) * 10000.0
+
+        premium_summary.append(
+            [
+                tenor,
+                len(realized),
+                float(entry.mean()),
+                float(realized.mean()),
+                float(np.median(realized)),
+                float(realized.std(ddof=1)),
+                float(np.mean(realized > 0)),
+                float(np.corrcoef(entry, realized)[0, 1]),
+                current_premium,
+                float(100.0 * np.mean(historical_spreads <= current_premium)),
+            ]
+        )
+
+    # ---------------------------------------------------------------
+    # Monthly wealth and risk metrics
+    # ---------------------------------------------------------------
+    wealth_paths = {
+        tenor: curve.wealth_path(start_idx, tenor) for tenor in TENORS
+    }
+
+    month_end_by_month: dict[tuple[int, int], int] = {}
+    for idx in range(start_idx, len(curve.dates)):
+        key = (curve.dates[idx].year, curve.dates[idx].month)
+        month_end_by_month[key] = idx
+    month_end_indices = sorted(month_end_by_month.values())
+
+    monthly_returns = {tenor: [] for tenor in TENORS}
+    monthly_on_rate_changes_bps: list[float] = []
+
+    for idx_a, idx_b in zip(month_end_indices[:-1], month_end_indices[1:]):
+        monthly_on_rate_changes_bps.append(
+            (curve.rates["ON"][idx_b] - curve.rates["ON"][idx_a])
+            * 10000.0
+        )
+        for tenor in TENORS:
+            value_a = wealth_paths[tenor][idx_a]
+            value_b = wealth_paths[tenor][idx_b]
+            assert value_a is not None and value_b is not None
+            monthly_returns[tenor].append(value_b / value_a - 1.0)
+
+    on_monthly = np.array(monthly_returns["ON"])
+    risk_rows: list[list[object]] = []
+
+    for tenor in TENORS:
+        returns = np.array(monthly_returns[tenor])
+        annualized_return = float(returns.mean() * 12.0)
+        annualized_volatility = float(
+            returns.std(ddof=1) * math.sqrt(12.0)
+        )
+
+        if tenor == "ON":
+            risk_rows.append(
+                [
+                    tenor,
+                    annualized_return,
+                    annualized_volatility,
+                    0.0,
+                    0.0,
+                    None,
+                    0.0,
+                ]
+            )
+        else:
+            excess = returns - on_monthly
+            annualized_excess_bps = float(
+                excess.mean() * 12.0 * 10000.0
+            )
+            tracking_error_bps = float(
+                excess.std(ddof=1) * math.sqrt(12.0) * 10000.0
+            )
+            information_ratio = (
+                annualized_excess_bps / tracking_error_bps
+                if tracking_error_bps
+                else None
+            )
+            risk_rows.append(
+                [
+                    tenor,
+                    annualized_return,
+                    annualized_volatility,
+                    annualized_excess_bps,
+                    tracking_error_bps,
+                    information_ratio,
+                    float(np.percentile(excess * 10000.0, 5)),
+                ]
+            )
+
+    # ---------------------------------------------------------------
+    # Efficient frontier
+    # ---------------------------------------------------------------
+    excess_matrix = np.column_stack(
+        [
+            np.array(monthly_returns[tenor]) - on_monthly
+            for tenor in TERM_TENORS
+        ]
+    )
+    overall_frontier = portfolio_frontier(excess_matrix)
+
+    regime_indices = {
+        "Hike / Rising": [],
+        "Hold / Stable": [],
+        "Cut / Falling": [],
+    }
+    for idx, rate_change_bps in enumerate(monthly_on_rate_changes_bps):
+        if rate_change_bps > 5.0:
+            regime_indices["Hike / Rising"].append(idx)
+        elif rate_change_bps < -5.0:
+            regime_indices["Cut / Falling"].append(idx)
+        else:
+            regime_indices["Hold / Stable"].append(idx)
+
+    regime_frontiers = {
+        regime: portfolio_frontier(excess_matrix[indices, :])
+        for regime, indices in regime_indices.items()
+    }
+
+    # ---------------------------------------------------------------
+    # Starting-period returns
+    # ---------------------------------------------------------------
+    start_rows: list[list[object]] = []
+    for label, requested_start in START_SCENARIOS:
+        idx = bisect_left(curve.dates, requested_start)
+        values = {
+            tenor: curve.rolling_result(idx, tenor) * 100.0
+            for tenor in TENORS
+        }
+        best_tenor = max(TENORS, key=lambda tenor: values[tenor])
+        horizon_days = (last_date - curve.dates[idx]).days
+        factors = {tenor: values[tenor] / 100.0 for tenor in TENORS}
+        cagrs = {
+            tenor: factors[tenor] ** (365.25 / horizon_days) - 1.0
+            for tenor in TENORS
+        }
+
+        start_rows.append(
+            [
+                label,
+                curve.dates_dt[idx],
+                values["ON"],
+                values["1M"],
+                values["2M"],
+                values["3M"],
+                values["6M"],
+                best_tenor,
+                values[best_tenor] - values["ON"],
+                (cagrs[best_tenor] - cagrs["ON"]) * 10000.0,
+            ]
+        )
+
+    # ---------------------------------------------------------------
+    # FOMC historical patterns
+    # ---------------------------------------------------------------
+    reactions = {"Hike": [], "Hold": [], "Cut": []}
+    pre_patterns = {"Hike": [], "Hold": [], "Cut": []}
+
+    for meeting_date, decision, _action in FOMC_HISTORY:
+        idx = bisect_left(curve.dates, meeting_date)
+        pre_idx = idx - 10
+        if pre_idx < start_idx or idx + 1 >= len(curve.dates):
+            continue
+
+        pre_spreads = [
+            (
+                curve.rates[tenor][pre_idx]
+                - curve.rates["ON"][pre_idx]
+            )
+            * 10000.0
+            for tenor in TERM_TENORS
+        ]
+        reaction = [
+            (
+                curve.rates[tenor][idx + 1]
+                - curve.rates[tenor][idx - 1]
+            )
+            * 10000.0
+            for tenor in TENORS
+        ]
+        pre_patterns[decision].append(pre_spreads)
+        reactions[decision].append(reaction)
+
+    pattern_rows: list[list[object]] = []
+    for decision in ["Hike", "Hold", "Cut"]:
+        matrix = np.array(pre_patterns[decision], dtype=float)
+        averages = matrix.mean(axis=0)
+        aggregate = matrix.mean(axis=1)
+        pattern_rows.append(
+            [
+                decision,
+                len(matrix),
+                *averages.tolist(),
+                float(aggregate.mean()),
+                float(aggregate.std(ddof=1)),
+            ]
+        )
+
+    current_rates = np.array(
+        [curve.rates[tenor][-1] for tenor in TENORS]
+    )
+    scenario_rows: list[list[object]] = []
+    for decision in ["Hold", "Hike", "Cut"]:
+        average_reaction = np.array(reactions[decision], dtype=float).mean(
+            axis=0
+        )
+        projected_rates = current_rates + average_reaction / 10000.0
+        policy_action = (
+            0 if decision == "Hold" else 25 if decision == "Hike" else -25
+        )
+        scenario_rows.append(
+            [
+                decision,
+                policy_action,
+                *average_reaction.tolist(),
+                *projected_rates.tolist(),
+            ]
+        )
+
+    current_spreads = np.array(
+        [
+            (curve.rates[tenor][-1] - curve.rates["ON"][-1])
+            * 10000.0
+            for tenor in TERM_TENORS
+        ]
+    )
+    percentile_rows: list[list[object]] = []
+    for tenor in TERM_TENORS:
+        historical = np.array(
+            [
+                (
+                    curve.rates[tenor][idx]
+                    - curve.rates["ON"][idx]
+                )
+                * 10000.0
+                for idx in range(start_idx, len(curve.dates))
+            ]
+        )
+        current = (
+            curve.rates[tenor][-1] - curve.rates["ON"][-1]
+        ) * 10000.0
+        percentile_rows.append(
+            [tenor, current, float(100.0 * np.mean(historical <= current))]
+        )
+
+    # Pure-expectations illustration used in the original workbook.
+    implied_post_meeting_on = (
+        curve.rates["1M"][-1] * 31
+        - curve.rates["ON"][-1] * 20
+    ) / 11
+    implied_change_bps = (
+        implied_post_meeting_on - curve.rates["ON"][-1]
+    ) * 10000.0
+
+    # ---------------------------------------------------------------
+    # Create workbook and sheets
+    # ---------------------------------------------------------------
+    workbook = Workbook.create()
+    executive = workbook.worksheets.add("Executive")
+    historical = workbook.worksheets.add("Historical Curve")
+    premium = workbook.worksheets.add("Premium vs Realized")
+    starting = workbook.worksheets.add("Starting Periods")
+    risk = workbook.worksheets.add("Risk Return")
+    frontier = workbook.worksheets.add("Efficient Frontier")
+    future = workbook.worksheets.add("Next FOMC")
+    sources = workbook.worksheets.add("Sources")
+
+    # ---------------------------------------------------------------
+    # Executive sheet
+    # ---------------------------------------------------------------
+    merged_title(
+        executive,
+        "A1:J1",
+        "SOFR Curve, Returns and Risk Management",
+    )
+    executive.merge_cells("A2:J2")
+    executive.get_range("A2").values = [
+        [
+            f"Analysis period: {curve.dates[start_idx].isoformat()} to "
+            f"{last_date.isoformat()}. Future scenario is based on the "
+            "10-Jul-2026 curve."
+        ]
+    ]
+    executive.get_range("A2:J2").format = {
+        "fill": LIGHT,
+        "font": {"italic": True, "color": DARK},
+    }
+
+    merged_section(executive, "A4:J4", "Recommended Storyline")
+    storyline = [
+        [
+            "1",
+            "Historical curve",
+            "Connect curve changes to FOMC meetings and show where repricing occurred.",
+        ],
+        [
+            "2",
+            "Premium priced vs realized",
+            "Show whether quoted tenor premium actually beat rolled ON.",
+        ],
+        [
+            "3",
+            "Different starting periods",
+            "Demonstrate entry-date sensitivity and the small absolute differences.",
+        ],
+        [
+            "4",
+            "Risk and return",
+            "Compare volatility, tracking error, downside and information ratio.",
+        ],
+        [
+            "5",
+            "Efficient frontier",
+            "Identify efficient tenor combinations in rising, stable and falling-rate regimes.",
+        ],
+        [
+            "6",
+            "Next meeting",
+            "Use the current curve and historical FOMC patterns for hold, hike and cut scenarios.",
+        ],
+    ]
+    executive.get_range("A5:J10").values = [
+        [number, heading, explanation, None, None, None, None, None, None, None]
+        for number, heading, explanation in storyline
+    ]
+    for row_number in range(5, 11):
+        executive.merge_cells(f"C{row_number}:J{row_number}")
+    executive.get_range("A5:A10").format = {
+        "fill": DARK,
+        "font": {"bold": True, "color": WHITE},
+        "horizontal_alignment": "center",
+    }
+    executive.get_range("B5:B10").format.font = {"bold": True}
+    executive.get_range("C5:J10").format.wrap_text = True
+    executive.get_range("A5:J10").format.row_height = 34
+
+    merged_section(executive, "A12:J12", "Core Conclusions")
+    conclusions = [
+        "2M produced the strongest historical risk-adjusted result: +1.06 bp annualized excess return versus ON with 1.97 bp tracking error.",
+        "1M was the lowest-risk term extension, with only 0.78 bp annualized tracking error.",
+        "3M and 6M were outside the historical efficient frontier since 2023.",
+        "In falling-rate periods, 6M had the highest return but also the highest risk; the best risk-adjusted mix was 90% 2M / 10% 6M.",
+        "The 10-Jul-2026 curve was unusually steep: all term premiums were above the 91st percentile since 2023.",
+        "The curve shape was hike-like, but historical premium-to-realized-return correlations were weak. The presentation should use a hawkish-hold base case, not treat the curve as a certain hike forecast.",
+    ]
+    for row_number, text in enumerate(conclusions, start=13):
+        executive.merge_cells(f"A{row_number}:J{row_number}")
+        executive.get_range(f"A{row_number}").values = [[text]]
+    executive.get_range("A13:J18").format = {
+        "fill": LIGHT,
+        "wrap_text": True,
+        "row_height": 30,
+    }
+
+    merged_section(executive, "A20:J20", "Risk Management Approach")
+    risk_management = [
+        ["Liquidity core", "ON / 1M", "Minimize rollover and liquidity risk."],
+        [
+            "Core yield extension",
+            "2M",
+            "Best historical return per unit of tracking risk.",
+        ],
+        [
+            "Directional easing position",
+            "6M, limited size",
+            "Use only when there is strong conviction that ON will fall.",
+        ],
+        [
+            "Implementation",
+            "Ladder",
+            "Diversify entry dates and avoid one-meeting concentration.",
+        ],
+    ]
+    executive.get_range("A21:J24").values = [
+        [label, tenor, explanation, None, None, None, None, None, None, None]
+        for label, tenor, explanation in risk_management
+    ]
+    for row_number in range(21, 25):
+        executive.merge_cells(f"C{row_number}:J{row_number}")
+    executive.get_range("A21:A24").format.font = {"bold": True}
+    executive.get_range("B21:B24").format = {
+        "fill": YELLOW,
+        "font": {"bold": True},
+    }
+    executive.get_range("C21:J24").format.wrap_text = True
+    executive.get_range("A21:J24").format.row_height = 30
+
+    # ---------------------------------------------------------------
+    # Historical Curve sheet
+    # ---------------------------------------------------------------
+    merged_title(
+        historical,
+        "A1:J1",
+        "1. Historical Curve and FOMC Meetings",
+    )
+    month_rows = [["Date", "ON", "1M", "2M", "3M", "6M"]]
+    for idx in month_end_indices:
+        month_rows.append(
+            [curve.dates_dt[idx]]
+            + [curve.rates[tenor][idx] for tenor in TENORS]
+        )
+    last_curve_row = 3 + len(month_rows)
+    historical.get_range(f"A4:F{last_curve_row}").values = month_rows
+    historical.get_range("A4:F4").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+    }
+    historical.get_range(f"A5:A{last_curve_row}").format.number_format = "mmm-yy"
+    historical.get_range(f"B5:F{last_curve_row}").format.number_format = "0.0000%"
+    historical.tables.add(
+        f"A4:F{last_curve_row}", True, "HistoricalCurveTable"
+    )
+    historical_chart = historical.charts.add(
+        "line", historical.get_range(f"A4:F{last_curve_row}")
+    )
+    historical_chart.title_text = "SOFR Curve History — Month-End"
+    historical_chart.has_legend = True
+    historical_chart.legend.position = "bottom"
+    historical_chart.set_position("H4", "Q20")
+
+    merged_section(
+        historical,
+        "A50:J50",
+        "Average FOMC Reaction from -1 to +1 Curve Observations",
+    )
+    fomc_summary = [
+        [
+            "Decision",
+            "Meetings",
+            "Δ ON",
+            "Δ 1M",
+            "Δ 2M",
+            "Δ 3M",
+            "Δ 6M",
+            "Average Pre-Meeting Slope",
+        ]
+    ]
+    for decision in ["Hike", "Hold", "Cut"]:
+        average_reaction = np.array(reactions[decision]).mean(axis=0)
+        average_pre = np.array(pre_patterns[decision]).mean()
+        fomc_summary.append(
+            [
+                decision,
+                len(reactions[decision]),
+                *average_reaction.tolist(),
+                average_pre,
+            ]
+        )
+    historical.get_range("A51:H54").values = fomc_summary
+    historical.get_range("A51:H51").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+        "wrap_text": True,
+    }
+    historical.get_range("C52:H54").format.number_format = (
+        "0.00;[Red](0.00);-"
+    )
+
+    # ---------------------------------------------------------------
+    # Premium sheet
+    # ---------------------------------------------------------------
+    merged_title(
+        premium,
+        "A1:J1",
+        "2. Premium Priced versus Premium Realized",
+    )
+    premium_headers = [
+        "Tenor",
+        "Observations",
+        "Avg Entry Premium",
+        "Avg Realized Edge",
+        "Median Realized Edge",
+        "Realized Volatility",
+        "Lock Win Rate",
+        "Entry/Realized Correlation",
+        "Current Premium",
+        "Current Percentile",
+    ]
+    premium.get_range("A4:J8").values = [premium_headers] + premium_summary
+    premium.get_range("A4:J4").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+        "wrap_text": True,
+        "row_height": 42,
+    }
+    premium.get_range("C5:F8").format.number_format = "0.00;[Red](0.00);-"
+    premium.get_range("G5:G8").format.number_format = "0.0%"
+    premium.get_range("H5:H8").format.number_format = "0.00"
+    premium.get_range("I5:I8").format.number_format = "0.00;[Red](0.00);-"
+    premium.get_range("J5:J8").format.number_format = "0.0"
+    premium.tables.add("A4:J8", True, "PremiumSummaryTable")
+    premium.get_range("L4:N8").values = [
+        ["Tenor", "Avg Entry Premium", "Avg Realized Edge"]
+    ] + [[row[0], row[2], row[3]] for row in premium_summary]
+    premium_chart = premium.charts.add(
+        "column", premium.get_range("L4:N8")
+    )
+    premium_chart.title_text = "Quoted Premium versus Realized Edge"
+    premium_chart.has_legend = True
+    premium_chart.legend.position = "bottom"
+    premium_chart.set_position("L10", "T25")
+
+    # ---------------------------------------------------------------
+    # Starting Periods sheet
+    # ---------------------------------------------------------------
+    merged_title(
+        starting,
+        "A1:J1",
+        "3. Returns from Different Starting Periods",
+    )
+    start_headers = [
+        "Start",
+        "Actual Start",
+        "ON",
+        "1M",
+        "2M",
+        "3M",
+        "6M",
+        "Best",
+        "Gain vs ON",
+        "Best CAGR Edge",
+    ]
+    starting.get_range("A4:J8").values = [start_headers] + start_rows
+    starting.get_range("A4:J4").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+        "wrap_text": True,
+    }
+    starting.get_range("B5:B8").format.number_format = "yyyy-mm-dd"
+    starting.get_range("C5:G8").format.number_format = "$0.000"
+    starting.get_range("I5:I8").format.number_format = (
+        "$0.000;[Red]($0.000);-"
+    )
+    starting.get_range("J5:J8").format.number_format = (
+        "0.00;[Red](0.00);-"
+    )
+    starting.tables.add("A4:J8", True, "StartingPeriodTable")
+    starting.get_range("L4:Q8").values = [
+        ["Start", "ON", "1M", "2M", "3M", "6M"]
+    ] + [[row[0], *row[2:7]] for row in start_rows]
+    starting_chart = starting.charts.add(
+        "column", starting.get_range("L4:Q8")
+    )
+    starting_chart.title_text = "Ending Value by Start Date"
+    starting_chart.has_legend = True
+    starting_chart.legend.position = "bottom"
+    starting_chart.set_position("L10", "T25")
+
+    # ---------------------------------------------------------------
+    # Risk Return sheet
+    # ---------------------------------------------------------------
+    merged_title(risk, "A1:H1", "4. Risk and Return since Jan-2023")
+    risk_headers = [
+        "Tenor",
+        "Annualized Return",
+        "Annualized Volatility",
+        "Excess vs ON (bp)",
+        "Tracking Error (bp)",
+        "Information Ratio",
+        "5th Pctl Monthly Excess (bp)",
+    ]
+    risk.get_range("A4:G9").values = [risk_headers] + risk_rows
+    risk.get_range("A4:G4").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+        "wrap_text": True,
+        "row_height": 42,
+    }
+    risk.get_range("B5:C9").format.number_format = "0.000%"
+    risk.get_range("D5:G9").format.number_format = "0.00;[Red](0.00);-"
+    risk.tables.add("A4:G9", True, "RiskReturnTable")
+    risk.get_range("I4:K8").values = [
+        ["Tenor", "Tracking Error", "Excess Return"]
+    ] + [[row[0], row[4], row[3]] for row in risk_rows[1:]]
+    risk_chart = risk.charts.add("line", risk.get_range("I4:K8"))
+    risk_chart.title_text = "Relative Risk and Return versus ON"
+    risk_chart.has_legend = True
+    risk_chart.legend.position = "bottom"
+    risk_chart.set_position("I10", "Q25")
+
+    # ---------------------------------------------------------------
+    # Efficient Frontier sheet
+    # ---------------------------------------------------------------
+    merged_title(frontier, "A1:J1", "5. Efficient Frontier by Rate Regime")
+    frontier_headers = [
+        "Scenario",
+        "Months",
+        "Best Pure Tenor",
+        "Best Pure Return (bp)",
+        "Best IR Mix",
+        "Best IR Return (bp)",
+        "Best IR Risk (bp)",
+        "Information Ratio",
+    ]
+    frontier_rows: list[list[object]] = []
+    scenarios = [
+        ("Overall", len(monthly_on_rate_changes_bps), overall_frontier)
+    ] + [
+        (regime, len(indices), regime_frontiers[regime])
+        for regime, indices in regime_indices.items()
+    ]
+    for scenario_name, observations, result in scenarios:
+        mean_vector, _efficient, _min_vol, _max_return, best_ir = result
+        best_pure_idx = int(np.argmax(mean_vector))
+        frontier_rows.append(
+            [
+                scenario_name,
+                observations,
+                TERM_TENORS[best_pure_idx],
+                float(mean_vector[best_pure_idx] * 10000.0),
+                weight_description(best_ir[2]),
+                float(best_ir[0] * 10000.0),
+                float(best_ir[1] * 10000.0),
+                float(best_ir[0] / best_ir[1]),
+            ]
+        )
+    frontier.get_range("A4:H8").values = [frontier_headers] + frontier_rows
+    frontier.get_range("A4:H4").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+        "wrap_text": True,
+        "row_height": 42,
+    }
+    frontier.get_range("D5:D8").format.number_format = "0.00;[Red](0.00);-"
+    frontier.get_range("F5:H8").format.number_format = "0.00;[Red](0.00);-"
+    frontier.get_range("E5:E8").format.wrap_text = True
+    frontier.tables.add("A4:H8", True, "FrontierSummaryTable")
+
+    merged_section(frontier, "A10:H10", "Interpretation")
+    frontier_text = [
+        "Overall frontier: 1M and 2M dominated. 3M and 6M were not efficient.",
+        "Hike / rising-rate regime: 1M had the highest information ratio; 2M had the highest excess return.",
+        "Hold / stable regime: every term tenor underperformed ON.",
+        "Cut / falling-rate regime: 6M had the highest return, but 90% 2M / 10% 6M had the best information ratio.",
+    ]
+    for row_number, text in enumerate(frontier_text, start=11):
+        frontier.merge_cells(f"A{row_number}:H{row_number}")
+        frontier.get_range(f"A{row_number}").values = [[text]]
+    frontier.get_range("A11:H14").format = {
+        "fill": LIGHT,
+        "wrap_text": True,
+        "row_height": 30,
+    }
+
+    overall_efficient = overall_frontier[1]
+    hike_efficient = regime_frontiers["Hike / Rising"][1]
+    cut_efficient = regime_frontiers["Cut / Falling"][1]
+    frontier.get_range(
+        f"J4:K{4 + len(overall_efficient)}"
+    ).values = [["Risk", "Return"]] + [
+        [point[1] * 10000.0, point[0] * 10000.0]
+        for point in overall_efficient
+    ]
+    frontier.get_range(
+        f"M4:N{4 + len(hike_efficient)}"
+    ).values = [["Risk", "Return"]] + [
+        [point[1] * 10000.0, point[0] * 10000.0]
+        for point in hike_efficient
+    ]
+    frontier.get_range(
+        f"P4:Q{4 + len(cut_efficient)}"
+    ).values = [["Risk", "Return"]] + [
+        [point[1] * 10000.0, point[0] * 10000.0]
+        for point in cut_efficient
+    ]
+
+    overall_chart = frontier.charts.add(
+        "line",
+        frontier.get_range(f"J4:K{4 + len(overall_efficient)}"),
+    )
+    overall_chart.title_text = "Overall Frontier"
+    overall_chart.has_legend = False
+    overall_chart.set_position("J18", "Q31")
+
+    hike_chart = frontier.charts.add(
+        "line",
+        frontier.get_range(f"M4:N{4 + len(hike_efficient)}"),
+    )
+    hike_chart.title_text = "Hike / Rising Frontier"
+    hike_chart.has_legend = False
+    hike_chart.set_position("J33", "Q46")
+
+    cut_chart = frontier.charts.add(
+        "line",
+        frontier.get_range(f"P4:Q{4 + len(cut_efficient)}"),
+    )
+    cut_chart.title_text = "Cut / Falling Frontier"
+    cut_chart.has_legend = False
+    cut_chart.set_position("J48", "Q61")
+
+    # ---------------------------------------------------------------
+    # Next FOMC sheet
+    # ---------------------------------------------------------------
+    merged_title(future, "A1:L1", "6. Next FOMC Meeting — Statistical Scenario")
+    future.merge_cells("A2:L2")
+    future.get_range("A2").values = [
+        [
+            "Next scheduled meeting: 28–29 Jul-2026. Current target range: "
+            "3.50%–3.75%. Scenario uses the 10-Jul-2026 curve."
+        ]
+    ]
+    future.get_range("A2:L2").format = {
+        "fill": LIGHT,
+        "font": {"italic": True, "color": DARK},
+    }
+
+    future.get_range("A4:D9").values = [
+        ["Tenor", "Rate", "Premium vs ON", "Percentile"],
+        ["ON", curve.rates["ON"][-1], 0, None],
+    ] + [
+        [
+            row[0],
+            curve.rates[row[0]][-1],
+            row[1],
+            row[2],
+        ]
+        for row in percentile_rows
+    ]
+    future.get_range("A4:D4").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+    }
+    future.get_range("B5:B9").format.number_format = "0.0000%"
+    future.get_range("C5:C9").format.number_format = "0.00;[Red](0.00);-"
+    future.get_range("D5:D9").format.number_format = "0.0"
+
+    future.get_range("F4:M7").values = [
+        [
+            "Pattern",
+            "Meetings",
+            "Avg 1M",
+            "Avg 2M",
+            "Avg 3M",
+            "Avg 6M",
+            "Avg Slope",
+            "Slope Volatility",
+        ]
+    ] + pattern_rows
+    future.get_range("F4:M4").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+        "wrap_text": True,
+    }
+    future.get_range("H5:M7").format.number_format = "0.00;[Red](0.00);-"
+
+    scenario_headers = [
+        "Scenario",
+        "Action",
+        "Δ ON",
+        "Δ 1M",
+        "Δ 2M",
+        "Δ 3M",
+        "Δ 6M",
+        "Projected ON",
+        "Projected 1M",
+        "Projected 2M",
+        "Projected 3M",
+        "Projected 6M",
+    ]
+    future.get_range("A12:L15").values = [scenario_headers] + scenario_rows
+    future.get_range("A12:L12").format = {
+        "fill": MID,
+        "font": {"bold": True},
+        "horizontal_alignment": "center",
+        "wrap_text": True,
+        "row_height": 42,
+    }
+    future.get_range("B13:G15").format.number_format = "0.00;[Red](0.00);-"
+    future.get_range("H13:L15").format.number_format = "0.0000%"
+    future.tables.add("A12:L15", True, "FutureScenarioTable")
+
+    future.get_range("N4:S8").values = [
+        ["Scenario", "ON", "1M", "2M", "3M", "6M"],
+        ["Current", *current_rates.tolist()],
+    ] + [[row[0], *row[7:12]] for row in scenario_rows]
+    future.get_range("O5:S8").format.number_format = "0.0000%"
+    future_chart = future.charts.add("line", future.get_range("N4:S8"))
+    future_chart.title_text = "Current and Immediate FOMC Scenarios"
+    future_chart.has_legend = True
+    future_chart.legend.position = "bottom"
+    future_chart.set_position("N10", "V26")
+
+    merged_section(future, "A17:L17", "Key Interpretation")
+    future_text = [
+        f"Current average term premium: {current_spreads.mean():.1f} bp. All term premiums are above the 91st percentile since 2023.",
+        "The current curve is closest to historical pre-hike patterns. This is a similarity measure, not a decision probability.",
+        f"A pure-expectations interpretation of 1M implies post-meeting ON near {implied_post_meeting_on:.3%}, roughly {implied_change_bps:.1f} bp above the 10-Jul ON rate.",
+        "Historical entry premium had weak predictive power for realized return. The 1M–6M correlation range was only 0.12–0.25.",
+        "Base-case presentation: hawkish hold, with curve-flattening risk if the expected hike is not delivered.",
+        "Portfolio implication: keep liquidity in ON/1M, use 2M as the core extension, and limit 6M to a deliberate easing view.",
+    ]
+    for row_number, text in enumerate(future_text, start=18):
+        future.merge_cells(f"A{row_number}:L{row_number}")
+        future.get_range(f"A{row_number}").values = [[text]]
+    future.get_range("A18:L23").format = {
+        "fill": LIGHT,
+        "wrap_text": True,
+        "row_height": 30,
+    }
+
+    # ---------------------------------------------------------------
+    # Sources sheet
+    # ---------------------------------------------------------------
+    merged_title(sources, "A1:F1", "Sources and Methodology")
+    source_rows = [
+        [
+            "Curve",
+            "https://github.com/the-reno/ronu-public/blob/main/curve.txt",
+        ],
+        [
+            "FOMC calendar",
+            "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+        ],
+        [
+            "June 2026 FOMC statement",
+            "https://www.federalreserve.gov/newsevents/pressreleases/monetary20260617a.htm",
+        ],
+        [
+            "July 2026 Monetary Policy Report",
+            "https://www.federalreserve.gov/monetarypolicy/2026-07-mpr-summary.htm",
+        ],
+    ]
+    sources.get_range("A4:B7").values = source_rows
+    sources.get_range("A4:A7").format.font = {"bold": True}
+    sources.get_range("B4:B7").format.font = {"color": BLUE}
+
+    merged_section(sources, "A9:F9", "Definitions")
+    definitions = [
+        [
+            "Premium priced",
+            "Quoted tenor rate minus ON on the investment date.",
+        ],
+        [
+            "Premium realized",
+            "Fixed tenor rate minus the rolled-ON equivalent rate to the same maturity.",
+        ],
+        [
+            "Volatility",
+            "Annualized standard deviation of monthly strategy returns.",
+        ],
+        [
+            "Tracking error",
+            "Annualized volatility of each tenor's monthly return minus ON.",
+        ],
+        [
+            "Efficient frontier",
+            "Long-only combinations of 1M, 2M, 3M and 6M in 5% increments.",
+        ],
+    ]
+    sources.get_range("A10:B14").values = definitions
+    sources.get_range("A10:A14").format.font = {"bold": True}
+    sources.get_range("B10:B14").format.wrap_text = True
+
+    # ---------------------------------------------------------------
+    # General formatting
+    # ---------------------------------------------------------------
+    sheets = [
+        executive,
+        historical,
+        premium,
+        starting,
+        risk,
+        frontier,
+        future,
+        sources,
+    ]
+    for sheet in sheets:
+        sheet.get_range("A1:V100").format.font = {
+            "name": "Aptos",
+            "size": 10,
+        }
+        sheet.freeze_panes.freeze_rows(2)
+
+    executive.get_range("A:A").format.column_width = 8
+    executive.get_range("B:B").format.column_width = 26
+    executive.get_range("C:J").format.column_width = 14
+    historical.get_range("A:F").format.column_width = 14
+    premium.get_range("A:J").format.column_width = 16
+    starting.get_range("A:J").format.column_width = 15
+    risk.get_range("A:G").format.column_width = 18
+    frontier.get_range("A:H").format.column_width = 18
+    future.get_range("A:M").format.column_width = 15
+    future.get_range("F:F").format.column_width = 18
+    sources.get_range("A:A").format.column_width = 24
+    sources.get_range("B:B").format.column_width = 70
+
+    SpreadsheetFile.export_xlsx(workbook).save(output_path)
+
+    error_scan = workbook.inspect(
+        {
+            "kind": "match",
+            "search_term": "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A",
+            "options": {"use_regex": True, "max_results": 100},
+            "summary": "formula error scan",
+        }
+    )
+    print(error_scan.ndjson)
+    print(f"Created: {output_path}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build the SOFR presentation workbook."
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--curve-file",
+        help="Local curve.txt path. If omitted, the GitHub raw URL is used.",
+    )
+    group.add_argument(
+        "--curve-url",
+        default=DEFAULT_CURVE_URL,
+        help=f"Curve URL. Default: {DEFAULT_CURVE_URL}",
+    )
+    parser.add_argument(
+        "--output",
+        default=DEFAULT_OUTPUT,
+        help=f"Output XLSX path. Default: {DEFAULT_OUTPUT}",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    curve_url = args.curve_url or DEFAULT_CURVE_URL
+    curve = load_curve(args.curve_file, curve_url)
+    build_workbook(curve, args.output)
+
+
+if __name__ == "__main__":
+    main()
