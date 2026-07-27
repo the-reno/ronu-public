@@ -1,14 +1,15 @@
 # SOFR VBA Model — 22jul
 
-This folder separates the process into two VBA steps:
+This folder separates the Excel process into two VBA steps:
 
-1. Build the Excel input template.
+1. Build the input template.
 2. Run the simulation after the user enters the curve.
 
-## Repository files
+## Files
 
 ### `01_Build_SOFR_Template.bas`
-Creates the input workbook structure:
+
+Creates and formats the input sheets:
 
 - `Read Me`
 - `Curve`
@@ -22,6 +23,7 @@ BuildSOFRTemplate
 ```
 
 ### `02_Run_SOFR_Simulation.bas`
+
 Runs the complete analysis and recreates:
 
 - `Executive`
@@ -39,18 +41,22 @@ Main macro:
 RunSOFRSimulation
 ```
 
-The simulation module is stored in `simulation_parts` to preserve the full VBA source in GitHub. Run this once in PowerShell to assemble it:
+The complete simulation source is stored in `simulation_parts`. Create the importable `.bas` file once by double-clicking:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\assemble_simulation.ps1
+```text
+BUILD_SIMULATION_MODULE.bat
 ```
 
-This creates `02_Run_SOFR_Simulation.bas` in the same folder.
+The batch file runs `assemble_simulation.ps1` and creates:
 
-## Excel setup
+```text
+02_Run_SOFR_Simulation.bas
+```
+
+## Initial Excel setup
 
 1. Download or clone the `22jul` folder.
-2. Run `assemble_simulation.ps1` once.
+2. Double-click `BUILD_SIMULATION_MODULE.bat`.
 3. Open a blank Excel workbook.
 4. Save it as **Excel Macro-Enabled Workbook (`.xlsm`)**.
 5. Press `Alt + F11`.
@@ -58,9 +64,15 @@ This creates `02_Run_SOFR_Simulation.bas` in the same folder.
 7. Import:
    - `01_Build_SOFR_Template.bas`
    - `02_Run_SOFR_Simulation.bas`
-8. Run `BuildSOFRTemplate`.
+8. Run:
 
-## Add the data
+```text
+BuildSOFRTemplate
+```
+
+The first macro creates the spreadsheet structure and a **Run SOFR Simulation** button.
+
+## User data
 
 Paste the curve into the `Curve` sheet with these exact headers:
 
@@ -68,13 +80,13 @@ Paste the curve into the `Curve` sheet with these exact headers:
 Date | ON | 1M | 2M | 3M | 6M
 ```
 
-Rates may be entered as either:
+Rates may be entered as either percentage points:
 
 ```text
 3.5500
 ```
 
-or:
+or Excel decimal rates:
 
 ```text
 0.0355
@@ -82,7 +94,7 @@ or:
 
 Review the optional parameters in `Config` and the policy history in `FOMC`.
 
-## Run the simulation
+## Run the analysis
 
 Run:
 
@@ -104,4 +116,4 @@ Review Config and FOMC
 Run RunSOFRSimulation whenever the data changes
 ```
 
-The Excel model is fully local. Python, internet access, external files, and Excel add-ins are not required after the VBA modules are imported.
+The model is fully local. Python, internet access, external files, Excel add-ins and external references are not required after the two VBA modules are imported.
