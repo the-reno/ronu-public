@@ -1,0 +1,259 @@
+
+Private Function ReadConfigRate(ByVal values As Object, ByVal key As String) As Double
+    If values.Exists(key) And IsNumeric(values(key)) Then ReadConfigRate = NormalizeRate(CDbl(values(key)))
+End Function
+
+
+Private Function ReadConfigText(ByVal values As Object, ByVal key As String, ByVal defaultValue As String) As String
+    If values.Exists(key) And Len(Trim$(CStr(values(key)))) > 0 Then
+        ReadConfigText = CStr(values(key))
+    Else
+        ReadConfigText = defaultValue
+    End If
+End Function
+
+
+' ============================================================================
+' WORKBOOK AND FORMATTING HELPERS
+' ============================================================================
+
+Private Function SheetExists(ByVal sheetName As String) As Boolean
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    SheetExists = Not ws Is Nothing
+    On Error GoTo 0
+End Function
+
+
+Private Function GetOrCreateSheet(ByVal sheetName As String) As Worksheet
+    If SheetExists(sheetName) Then
+        Set GetOrCreateSheet = ThisWorkbook.Worksheets(sheetName)
+    Else
+        Set GetOrCreateSheet = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        GetOrCreateSheet.Name = sheetName
+    End If
+End Function
+
+
+Private Function PrepareOutputSheet(ByVal sheetName As String, ByVal titleText As String) As Worksheet
+    Dim ws As Worksheet
+    Set ws = GetOrCreateSheet(sheetName)
+    ClearSheet ws
+    ws.Range("A1:J1").Merge
+    ws.Range("A1").Value = titleText
+    ApplyTitle ws.Range("A1:J1")
+    Set PrepareOutputSheet = ws
+End Function
+
+
+Private Sub ClearSheet(ByVal ws As Worksheet)
+    Dim i As Long
+    On Error Resume Next
+    ws.Cells.UnMerge
+    ws.Cells.Clear
+    For i = ws.ChartObjects.Count To 1 Step -1
+        ws.ChartObjects(i).Delete
+    Next i
+    For i = ws.ListObjects.Count To 1 Step -1
+        ws.ListObjects(i).Delete
+    Next i
+    For i = ws.Shapes.Count To 1 Step -1
+        ws.Shapes(i).Delete
+    Next i
+    On Error GoTo 0
+End Sub
+
+
+Private Sub ApplyTitle(ByVal target As Range)
+    With target
+        .Interior.Color = RGB(23, 54, 93)
+        .Font.Name = "Aptos"
+        .Font.Size = 16
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+        .RowHeight = 28
+    End With
+End Sub
+
+
+Private Sub ApplyHeader(ByVal target As Range)
+    With target
+        .Interior.Color = RGB(217, 234, 247)
+        .Font.Name = "Aptos"
+        .Font.Bold = True
+        .Font.Color = RGB(0, 0, 0)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .WrapText = True
+        .RowHeight = 36
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(183, 201, 214)
+        .Borders.Weight = xlThin
+    End With
+End Sub
+
+
+Private Sub WriteSection(ByVal ws As Worksheet, ByVal rangeAddress As String, ByVal textValue As String)
+    ws.Range(rangeAddress).Merge
+    ws.Range(rangeAddress).Cells(1, 1).Value = textValue
+    With ws.Range(rangeAddress)
+        .Interior.Color = RGB(23, 54, 93)
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .HorizontalAlignment = xlLeft
+    End With
+End Sub
+
+
+Private Sub WriteMergedLine(ByVal ws As Worksheet, ByVal rowNumber As Long, ByVal startColumn As Long, _
+                            ByVal endColumn As Long, ByVal textValue As String)
+    With ws.Range(ws.Cells(rowNumber, startColumn), ws.Cells(rowNumber, endColumn))
+        .Merge
+        .Cells(1, 1).Value = textValue
+        .Interior.Color = RGB(243, 246, 249)
+        .WrapText = True
+        .RowHeight = 30
+        .VerticalAlignment = xlCenter
+    End With
+End Sub
+
+
+Private Sub AddTableSafe(ByVal ws As Worksheet, ByVal sourceRange As Range, ByVal tableName As String)
+    Dim lo As ListObject
+    On Error Resume Next
+    Set lo = ws.ListObjects(tableName)
+    If Not lo Is Nothing Then lo.Delete
+    Set lo = ws.ListObjects.Add(xlSrcRange, sourceRange, , xlYes)
+    lo.Name = tableName
+    lo.TableStyle = "TableStyleMedium2"
+    On Error GoTo 0
+End Sub
+
+
+Private Sub WriteRowValues(ByVal startCell As Range, ByVal valuesArray As Variant)
+    Dim output() As Variant, i As Long, countValue As Long
+    countValue = UBound(valuesArray) - LBound(valuesArray) + 1
+    ReDim output(1 To 1, 1 To countValue)
+    For i = LBound(valuesArray) To UBound(valuesArray)
+        output(1, i - LBound(valuesArray) + 1) = valuesArray(i)
+    Next i
+    startCell.Resize(1, countValue).Value = output
+End Sub
+
+
+Private Sub WriteJaggedArray(ByVal startCell As Range, ByVal data As Variant, ByVal columnCount As Long)
+    Dim output() As Variant, r As Long, c As Long
+    ReDim output(1 To UBound(data) - LBound(data) + 1, 1 To columnCount)
+    For r = LBound(data) To UBound(data)
+        For c = 0 To columnCount - 1
+            output(r - LBound(data) + 1, c + 1) = data(r)(c)
+        Next c
+    Next r
+    startCell.Resize(UBound(output, 1), UBound(output, 2)).Value = output
+End Sub
+
+
+' ============================================================================
+' SORTING HELPERS
+' ============================================================================
+
+Private Sub QuickSortCurve(ByRef datesArray() As Double, ByRef ratesArray() As Double, _
+                           ByVal first As Long, ByVal last As Long)
+    Dim low As Long, high As Long, pivot As Double, tempDate As Double
+    Dim t As Long, tempRate As Double
+    low = first
+    high = last
+    pivot = datesArray((first + last) \ 2)
+    Do While low <= high
+        Do While datesArray(low) < pivot: low = low + 1: Loop
+        Do While datesArray(high) > pivot: high = high - 1: Loop
+        If low <= high Then
+            tempDate = datesArray(low): datesArray(low) = datesArray(high): datesArray(high) = tempDate
+            For t = 1 To TENOR_COUNT
+                tempRate = ratesArray(t, low): ratesArray(t, low) = ratesArray(t, high): ratesArray(t, high) = tempRate
+            Next t
+            low = low + 1
+            high = high - 1
+        End If
+    Loop
+    If first < high Then QuickSortCurve datesArray, ratesArray, first, high
+    If low < last Then QuickSortCurve datesArray, ratesArray, low, last
+End Sub
+
+
+Private Sub QuickSortFOMC(ByRef datesArray() As Double, ByRef decisions() As String, _
+                          ByRef actions() As Double, ByRef sepValues() As String, _
+                          ByVal first As Long, ByVal last As Long)
+    Dim low As Long, high As Long, pivot As Double, tempDate As Double
+    Dim tempText As String, tempAction As Double
+    low = first
+    high = last
+    pivot = datesArray((first + last) \ 2)
+    Do While low <= high
+        Do While datesArray(low) < pivot: low = low + 1: Loop
+        Do While datesArray(high) > pivot: high = high - 1: Loop
+        If low <= high Then
+            tempDate = datesArray(low): datesArray(low) = datesArray(high): datesArray(high) = tempDate
+            tempText = decisions(low): decisions(low) = decisions(high): decisions(high) = tempText
+            tempAction = actions(low): actions(low) = actions(high): actions(high) = tempAction
+            tempText = sepValues(low): sepValues(low) = sepValues(high): sepValues(high) = tempText
+            low = low + 1
+            high = high - 1
+        End If
+    Loop
+    If first < high Then QuickSortFOMC datesArray, decisions, actions, sepValues, first, high
+    If low < last Then QuickSortFOMC datesArray, decisions, actions, sepValues, low, last
+End Sub
+
+
+Private Sub QuickSortDouble(ByRef values() As Double, ByVal first As Long, ByVal last As Long)
+    Dim low As Long, high As Long, pivot As Double, temp As Double
+    low = first
+    high = last
+    pivot = values((first + last) \ 2)
+    Do While low <= high
+        Do While values(low) < pivot: low = low + 1: Loop
+        Do While values(high) > pivot: high = high - 1: Loop
+        If low <= high Then
+            temp = values(low): values(low) = values(high): values(high) = temp
+            low = low + 1
+            high = high - 1
+        End If
+    Loop
+    If first < high Then QuickSortDouble values, first, high
+    If low < last Then QuickSortDouble values, low, last
+End Sub
+
+
+Private Sub SortPortfoliosByRisk(ByRef risk() As Double, ByRef returns() As Double, _
+                                 ByRef weights() As Double, ByVal countValue As Long)
+    QuickSortPortfolios risk, returns, weights, 1, countValue
+End Sub
+
+
+Private Sub QuickSortPortfolios(ByRef risk() As Double, ByRef returns() As Double, _
+                                ByRef weights() As Double, ByVal first As Long, ByVal last As Long)
+    Dim low As Long, high As Long, pivot As Double
+    Dim temp As Double, t As Long
+    low = first
+    high = last
+    pivot = risk((first + last) \ 2)
+    Do While low <= high
+        Do While risk(low) < pivot: low = low + 1: Loop
+        Do While risk(high) > pivot: high = high - 1: Loop
+        If low <= high Then
+            temp = risk(low): risk(low) = risk(high): risk(high) = temp
+            temp = returns(low): returns(low) = returns(high): returns(high) = temp
+            For t = 1 To 4
+                temp = weights(t, low): weights(t, low) = weights(t, high): weights(t, high) = temp
+            Next t
+            low = low + 1
+            high = high - 1
+        End If
+    Loop
+    If first < high Then QuickSortPortfolios risk, returns, weights, first, high
+    If low < last Then QuickSortPortfolios risk, returns, weights, low, last
+End Sub
