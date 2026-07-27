@@ -1,0 +1,250 @@
+Attribute VB_Name = "SOFRSimulationRunner"
+Option Explicit
+
+' ============================================================================
+' SOFR SIMULATION AND ANALYSIS - EXCEL VBA ONLY
+'
+' Run BuildSOFRTemplate from 01_Build_SOFR_Template.bas first.
+' Then paste the curve into the Curve sheet and run RunSOFRSimulation.
+'
+' Required input sheet:
+'   Curve: Date | ON | 1M | 2M | 3M | 6M
+'
+' Supporting input sheets:
+'   Config: model settings and starting dates
+'   FOMC: Meeting Date | Decision | Action (bp) | SEP
+'
+' Rates may be entered as either 3.5500 or 0.0355.
+' No Python, add-in, external reference, or internet connection is required.
+' ============================================================================
+
+Private Const TENOR_COUNT As Long = 5
+Private Const TERM_COUNT As Long = 4
+Private Const DAY_BASIS As Double = 360#
+
+Private Const C_DARK As Long = 6108957       ' RGB(23,54,93)
+Private Const C_MID As Long = 16247513       ' RGB(217,234,247)
+Private Const C_LIGHT As Long = 16381689     ' RGB(243,246,249)
+Private Const C_WHITE As Long = 16777215
+Private Const C_BLUE As Long = 16711680      ' RGB(0,0,255) in VBA BGR storage
+Private Const C_GREEN As Long = 32768
+Private Const C_YELLOW As Long = 13434879    ' RGB(255,242,204)
+
+Private gCurveCount As Long
+Private gDates() As Double
+Private gRates() As Double                   ' (tenor, curve row)
+Private gLastIdx As Long
+Private gAnalysisStartIdx As Long
+Private gRiskStartIdx As Long
+
+Private gAnalysisStart As Double
+Private gAnalysisEnd As Double
+Private gRiskStart As Double
+Private gNotional As Double
+Private gRisingThreshold As Double
+Private gFallingThreshold As Double
+Private gWeightStep As Double
+Private gBaseCase As String
+Private gCurveSource As String
+Private gNextFOMCStart As Double
+Private gNextFOMCDecision As Double
+Private gNextPolicyEffective As Double
+Private gTargetLower As Double
+Private gTargetUpper As Double
+
+Private gStartCount As Long
+Private gStartLabels() As String
+Private gStartDates() As Double
+
+Private gFOMCCount As Long
+Private gFOMCDates() As Double
+Private gFOMCDecision() As String
+Private gFOMCAction() As Double
+Private gFOMCSEP() As String
+
+Private gMonthCount As Long
+Private gMonthDates() As Double
+Private gMonthlyReturns() As Double          ' (tenor, month)
+Private gMonthlyONChange() As Double
+
+Private gPremiumAvgEntry(2 To 5) As Double
+Private gPremiumAvgRealized(2 To 5) As Double
+Private gPremiumMedianRealized(2 To 5) As Double
+Private gPremiumVolRealized(2 To 5) As Double
+Private gPremiumWinRate(2 To 5) As Double
+Private gPremiumCorrelation(2 To 5) As Double
+Private gCurrentPremium(2 To 5) As Double
+Private gCurrentPercentile(2 To 5) As Double
+
+Private gRiskAnnReturn(1 To 5) As Double
+Private gRiskAnnVol(1 To 5) As Double
+Private gRiskExcessBp(1 To 5) As Double
+Private gRiskTrackingBp(1 To 5) As Double
+Private gRiskIR(1 To 5) As Double
+Private gRiskDownsideBp(1 To 5) As Double
+
+Private gOverallBestIRText As String
+Private gOverallBestIR As Double
+Private gCurrentAveragePremium As Double
+Private gCurrentAveragePercentile As Double
+Private gClosestPattern As String
+
+
+
+' ============================================================================
+' PUBLIC MACROS
+' ============================================================================
+
+Public Sub RunSOFRSimulation()
+
+    Dim oldCalc As XlCalculation
+    Dim started As Double
+
+    On Error GoTo CleanFail
+
+    started = Timer
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    oldCalc = Application.Calculation
+    Application.Calculation = xlCalculationManual
+    Application.DisplayAlerts = False
+
+    Application.StatusBar = "SOFR model: validating inputs..."
+    ValidateInputSheets
+    LoadCurveData
+    LoadConfiguration
+    LoadFOMCData
+    BuildMonthlyData
+
+    Application.StatusBar = "SOFR model: historical curve..."
+    BuildHistoricalCurveSheet
+
+    Application.StatusBar = "SOFR model: premium versus realized..."
+    BuildPremiumSheet
+
+    Application.StatusBar = "SOFR model: starting-period returns..."
+    BuildStartingPeriodsSheet
+
+    Application.StatusBar = "SOFR model: risk and return..."
+    BuildRiskReturnSheet
+
+    Application.StatusBar = "SOFR model: efficient frontier..."
+    BuildEfficientFrontierSheet
+
+    Application.StatusBar = "SOFR model: next FOMC scenarios..."
+    BuildNextFOMCSheet
+
+    Application.StatusBar = "SOFR model: executive summary..."
+    BuildExecutiveSheet
+    BuildSourcesSheet
+
+    ThisWorkbook.Worksheets("Executive").Activate
+    Application.CalculateFull
+
+    MsgBox "SOFR simulation completed." & vbCrLf & _
+           "Curve period: " & Format(CDate(gDates(1)), "dd-mmm-yyyy") & _
+           " to " & Format(CDate(gDates(gLastIdx)), "dd-mmm-yyyy") & vbCrLf & _
+           "Elapsed time: " & Format(Timer - started, "0.0") & " seconds", vbInformation
+
+CleanExit:
+    Application.DisplayAlerts = True
+    Application.Calculation = oldCalc
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    Exit Sub
+
+CleanFail:
+    MsgBox "SOFR simulation stopped:" & vbCrLf & Err.Description, vbCritical
+    Resume CleanExit
+
+End Sub
+
+
+' Compatibility alias for older buttons or workbooks.
+Public Sub RunSOFRAnalysis()
+    RunSOFRSimulation
+End Sub
+
+
+Private Sub ValidateInputSheets()
+
+    Dim missing As String
+
+    If Not SheetExists("Curve") Then missing = missing & vbCrLf & "- Curve"
+    If Not SheetExists("Config") Then missing = missing & vbCrLf & "- Config"
+    If Not SheetExists("FOMC") Then missing = missing & vbCrLf & "- FOMC"
+
+    If Len(missing) > 0 Then
+        Err.Raise vbObjectError + 1000, "RunSOFRSimulation", _
+                  "Required input sheets are missing:" & missing & vbCrLf & vbCrLf & _
+                  "Run BuildSOFRTemplate first."
+    End If
+
+End Sub
+
+
+' ============================================================================
+' DATA LOADING AND VALIDATION
+' ============================================================================
+
+Private Sub LoadCurveData()
+
+    Dim ws As Worksheet
+    Dim lastRow As Long, r As Long, n As Long
+    Dim tempDates() As Double, tempRates() As Double
+    Dim rateValue As Double, t As Long
+    Dim uniqueCount As Long
+
+    Set ws = ThisWorkbook.Worksheets("Curve")
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < 3 Then Err.Raise vbObjectError + 100, , "Curve requires at least two observations."
+
+    ReDim tempDates(1 To lastRow - 1)
+    ReDim tempRates(1 To TENOR_COUNT, 1 To lastRow - 1)
+
+    For r = 2 To lastRow
+        If IsDate(ws.Cells(r, 1).Value) Then
+            If RowHasAllRates(ws, r) Then
+                n = n + 1
+                tempDates(n) = CDbl(CDate(ws.Cells(r, 1).Value))
+                For t = 1 To TENOR_COUNT
+                    rateValue = CDbl(ws.Cells(r, t + 1).Value)
+                    tempRates(t, n) = NormalizeRate(rateValue)
+                Next t
+            End If
+        End If
+    Next r
+
+    If n < 2 Then Err.Raise vbObjectError + 101, , "Curve contains fewer than two complete valid rows."
+
+    QuickSortCurve tempDates, tempRates, 1, n
+
+    ReDim gDates(1 To n)
+    ReDim gRates(1 To TENOR_COUNT, 1 To n)
+
+    uniqueCount = 0
+    For r = 1 To n
+        If uniqueCount = 0 Then
+            uniqueCount = 1
+            gDates(uniqueCount) = tempDates(r)
+        ElseIf tempDates(r) <> gDates(uniqueCount) Then
+            uniqueCount = uniqueCount + 1
+            gDates(uniqueCount) = tempDates(r)
+        End If
+        For t = 1 To TENOR_COUNT
+            gRates(t, uniqueCount) = tempRates(t, r)
+        Next t
+    Next r
+
+    ReDim Preserve gDates(1 To uniqueCount)
+    ReDim Preserve gRates(1 To TENOR_COUNT, 1 To uniqueCount)
+
+    gCurveCount = uniqueCount
+    gLastIdx = uniqueCount
+
+    If gDates(gLastIdx) <= gDates(1) Then Err.Raise vbObjectError + 102, , "Curve dates are invalid."
+
+End Sub
+
+
