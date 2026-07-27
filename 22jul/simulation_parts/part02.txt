@@ -1,0 +1,250 @@
+    ws.Range("A5:A" & n + 4).NumberFormat = "mmm-yy"
+    ws.Range("B5:F" & n + 4).NumberFormat = "0.0000%;[Red](0.0000%);-"
+    AddTableSafe ws, ws.Range("A4:F" & n + 4), "HistoricalCurveTable"
+
+    Set chartObj = ws.ChartObjects.Add(ws.Range("H4").Left, ws.Range("H4").Top, 720, 300)
+    With chartObj.Chart
+        .SetSourceData ws.Range("A4:F" & n + 4)
+        .ChartType = xlLine
+        .HasTitle = True
+        .ChartTitle.Text = "SOFR Curve History - Month End"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+    End With
+
+    WriteSection ws, "A" & n + 7 & ":J" & n + 7, "Average FOMC Reaction from -1 to +1 Curve Observations"
+    BuildFOMCSummary summary
+    ws.Range("A" & n + 8).Resize(UBound(summary, 1), UBound(summary, 2)).Value = summary
+    ApplyHeader ws.Range("A" & n + 8 & ":H" & n + 8)
+    ws.Range("C" & n + 9 & ":H" & n + 11).NumberFormat = "0.00;[Red](0.00);-"
+
+    ws.Columns("A:F").ColumnWidth = 14
+    ws.Columns("H:J").ColumnWidth = 22
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+Private Sub BuildFOMCSummary(ByRef summary() As Variant)
+
+    Dim decisions As Variant, d As Long, e As Long, t As Long
+    Dim eventIdx As Long, countValue As Long, preIdx As Long
+    Dim reactionTotal(1 To 5) As Double, preTotal As Double
+    Dim decisionName As String
+
+    decisions = Array("Hike", "Hold", "Cut")
+    ReDim summary(1 To 4, 1 To 8)
+    summary(1, 1) = "Decision"
+    summary(1, 2) = "Meetings"
+    summary(1, 3) = "Delta ON (bp)"
+    summary(1, 4) = "Delta 1M (bp)"
+    summary(1, 5) = "Delta 2M (bp)"
+    summary(1, 6) = "Delta 3M (bp)"
+    summary(1, 7) = "Delta 6M (bp)"
+    summary(1, 8) = "Average Pre-Meeting Slope (bp)"
+
+    For d = 0 To 2
+        decisionName = CStr(decisions(d))
+        Erase reactionTotal
+        preTotal = 0
+        countValue = 0
+
+        For e = 1 To gFOMCCount
+            If gFOMCDecision(e) = decisionName Then
+                eventIdx = FirstCurveIndexGE(gFOMCDates(e))
+                If eventIdx > gAnalysisStartIdx + 10 And eventIdx + 1 <= gLastIdx Then
+                    countValue = countValue + 1
+                    For t = 1 To TENOR_COUNT
+                        reactionTotal(t) = reactionTotal(t) + (gRates(t, eventIdx + 1) - gRates(t, eventIdx - 1)) * 10000#
+                    Next t
+                    preIdx = eventIdx - 10
+                    For t = 2 To 5
+                        preTotal = preTotal + (gRates(t, preIdx) - gRates(1, preIdx)) * 10000# / 4#
+                    Next t
+                End If
+            End If
+        Next e
+
+        summary(d + 2, 1) = decisionName
+        summary(d + 2, 2) = countValue
+        If countValue > 0 Then
+            For t = 1 To 5
+                summary(d + 2, t + 2) = reactionTotal(t) / countValue
+            Next t
+            summary(d + 2, 8) = preTotal / countValue
+        End If
+    Next d
+
+End Sub
+
+
+' ============================================================================
+' PREMIUM PRICED VERSUS REALIZED
+' ============================================================================
+
+Private Sub BuildPremiumSheet()
+
+    Dim ws As Worksheet
+    Dim output(1 To 5, 1 To 10) As Variant
+    Dim tenorIndex As Long, i As Long, maturityIdx As Long, n As Long
+    Dim entry() As Double, realized() As Double
+    Dim fixedRate As Double, onEquivalent As Double, dayCount As Long
+    Dim winCount As Long, histSpreads() As Double, histCount As Long
+    Dim chartObj As ChartObject
+
+    Set ws = PrepareOutputSheet("Premium vs Realized", "2. Premium Priced versus Premium Realized")
+
+    output(1, 1) = "Tenor"
+    output(1, 2) = "Observations"
+    output(1, 3) = "Avg Entry Premium (bp)"
+    output(1, 4) = "Avg Realized Edge (bp)"
+    output(1, 5) = "Median Realized Edge (bp)"
+    output(1, 6) = "Realized Volatility (bp)"
+    output(1, 7) = "Lock Win Rate"
+    output(1, 8) = "Entry/Realized Correlation"
+    output(1, 9) = "Current Premium (bp)"
+    output(1, 10) = "Current Percentile"
+
+    For tenorIndex = 2 To 5
+        ReDim entry(1 To gLastIdx - gAnalysisStartIdx + 1)
+        ReDim realized(1 To gLastIdx - gAnalysisStartIdx + 1)
+        ReDim histSpreads(1 To gLastIdx - gAnalysisStartIdx + 1)
+        n = 0
+        histCount = 0
+        winCount = 0
+
+        For i = gAnalysisStartIdx To gLastIdx
+            histCount = histCount + 1
+            histSpreads(histCount) = (gRates(tenorIndex, i) - gRates(1, i)) * 10000#
+
+            maturityIdx = FirstCurveIndexGE(TargetMaturity(gDates(i), tenorIndex))
+            If maturityIdx > 0 And maturityIdx <= gLastIdx Then
+                n = n + 1
+                dayCount = CLng(gDates(maturityIdx) - gDates(i))
+                fixedRate = gRates(tenorIndex, i)
+                entry(n) = (fixedRate - gRates(1, i)) * 10000#
+                onEquivalent = (RolledONFactor(i, maturityIdx) - 1#) * DAY_BASIS / dayCount
+                realized(n) = (fixedRate - onEquivalent) * 10000#
+                If realized(n) > 0 Then winCount = winCount + 1
+            End If
+        Next i
+
+        gPremiumAvgEntry(tenorIndex) = MeanArray(entry, n)
+        gPremiumAvgRealized(tenorIndex) = MeanArray(realized, n)
+        gPremiumMedianRealized(tenorIndex) = MedianArray(realized, n)
+        gPremiumVolRealized(tenorIndex) = SampleStdArray(realized, n)
+        If n > 0 Then gPremiumWinRate(tenorIndex) = winCount / n
+        gPremiumCorrelation(tenorIndex) = CorrelationArrays(entry, realized, n)
+        gCurrentPremium(tenorIndex) = (gRates(tenorIndex, gLastIdx) - gRates(1, gLastIdx)) * 10000#
+        gCurrentPercentile(tenorIndex) = PercentileRank(histSpreads, histCount, gCurrentPremium(tenorIndex)) * 100#
+
+        output(tenorIndex, 1) = TenorName(tenorIndex)
+        output(tenorIndex, 2) = n
+        output(tenorIndex, 3) = gPremiumAvgEntry(tenorIndex)
+        output(tenorIndex, 4) = gPremiumAvgRealized(tenorIndex)
+        output(tenorIndex, 5) = gPremiumMedianRealized(tenorIndex)
+        output(tenorIndex, 6) = gPremiumVolRealized(tenorIndex)
+        output(tenorIndex, 7) = gPremiumWinRate(tenorIndex)
+        output(tenorIndex, 8) = gPremiumCorrelation(tenorIndex)
+        output(tenorIndex, 9) = gCurrentPremium(tenorIndex)
+        output(tenorIndex, 10) = gCurrentPercentile(tenorIndex)
+    Next tenorIndex
+
+    ws.Range("A4:J8").Value = output
+    ApplyHeader ws.Range("A4:J4")
+    ws.Range("C5:F8,I5:I8").NumberFormat = "0.00;[Red](0.00);-"
+    ws.Range("G5:G8").NumberFormat = "0.0%"
+    ws.Range("H5:H8").NumberFormat = "0.00"
+    ws.Range("J5:J8").NumberFormat = "0.0"
+    AddTableSafe ws, ws.Range("A4:J8"), "PremiumSummaryTable"
+
+    WriteJaggedArray ws.Range("L4"), Array( _
+        Array("Tenor", "Avg Entry Premium", "Avg Realized Edge"), _
+        Array("1M", gPremiumAvgEntry(2), gPremiumAvgRealized(2)), _
+        Array("2M", gPremiumAvgEntry(3), gPremiumAvgRealized(3)), _
+        Array("3M", gPremiumAvgEntry(4), gPremiumAvgRealized(4)), _
+        Array("6M", gPremiumAvgEntry(5), gPremiumAvgRealized(5))), 3
+
+    Set chartObj = ws.ChartObjects.Add(ws.Range("L10").Left, ws.Range("L10").Top, 600, 300)
+    With chartObj.Chart
+        .SetSourceData ws.Range("L4:N8")
+        .ChartType = xlColumnClustered
+        .HasTitle = True
+        .ChartTitle.Text = "Quoted Premium versus Realized Edge"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+    End With
+
+    WriteSection ws, "A11:J11", "Interpretation"
+    WriteMergedLine ws, 12, 1, 10, "Entry premium measures what the curve offered. Realized edge measures what the locked tenor earned versus rolling ON to the same maturity."
+    WriteMergedLine ws, 13, 1, 10, "A high current premium is a signal, not a guaranteed return. Historical correlations between quoted premium and realized edge are shown in the table."
+    WriteMergedLine ws, 14, 1, 10, "Longer tenor should be treated as additional timing and policy risk, not as a free yield pickup."
+
+    ws.Columns("A:J").ColumnWidth = 17
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+Private Function PercentileRank(ByRef values() As Double, ByVal countValue As Long, ByVal target As Double) As Double
+    Dim i As Long, below As Long
+    If countValue <= 0 Then Exit Function
+    For i = 1 To countValue
+        If values(i) <= target Then below = below + 1
+    Next i
+    PercentileRank = below / countValue
+End Function
+
+
+' ============================================================================
+' STARTING PERIODS
+' ============================================================================
+
+Private Sub BuildStartingPeriodsSheet()
+
+    Dim ws As Worksheet
+    Dim output() As Variant
+    Dim r As Long, t As Long, startIdx As Long, validCount As Long
+    Dim endingValue(1 To 5) As Double, cagr(1 To 5) As Double
+    Dim bestTenor As Long, horizonDays As Long
+    Dim chartObj As ChartObject
+
+    Set ws = PrepareOutputSheet("Starting Periods", "3. Returns from Different Starting Periods")
+
+    ReDim output(1 To gStartCount + 1, 1 To 10)
+    output(1, 1) = "Start"
+    output(1, 2) = "Actual Start"
+    output(1, 3) = "ON"
+    output(1, 4) = "1M"
+    output(1, 5) = "2M"
+    output(1, 6) = "3M"
+    output(1, 7) = "6M"
+    output(1, 8) = "Best"
+    output(1, 9) = "Gain vs ON ($/100)"
+    output(1, 10) = "Best CAGR Edge (bp)"
+
+    For r = 1 To gStartCount
+        startIdx = FirstCurveIndexGE(gStartDates(r))
+        If startIdx >= gAnalysisStartIdx And startIdx > 0 And startIdx < gLastIdx Then
+            validCount = validCount + 1
+            horizonDays = CLng(gDates(gLastIdx) - gDates(startIdx))
+            bestTenor = 1
+            For t = 1 To TENOR_COUNT
+                endingValue(t) = RollingResult(startIdx, t) * gNotional
+                cagr(t) = (endingValue(t) / gNotional) ^ (365.25 / horizonDays) - 1#
+                If endingValue(t) > endingValue(bestTenor) Then bestTenor = t
+            Next t
+
+            output(validCount + 1, 1) = gStartLabels(r)
+            output(validCount + 1, 2) = CDate(gDates(startIdx))
+            For t = 1 To TENOR_COUNT
+                output(validCount + 1, t + 2) = endingValue(t)
+            Next t
+            output(validCount + 1, 8) = TenorName(bestTenor)
+            output(validCount + 1, 9) = endingValue(bestTenor) - endingValue(1)
+            output(validCount + 1, 10) = (cagr(bestTenor) - cagr(1)) * 10000#
+        End If
+    Next r
+
