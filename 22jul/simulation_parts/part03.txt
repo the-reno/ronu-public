@@ -1,0 +1,250 @@
+    If validCount = 0 Then Err.Raise vbObjectError + 130, , "No configured starting period falls inside the curve."
+
+    ws.Range("A4").Resize(validCount + 1, 10).Value = output
+    ApplyHeader ws.Range("A4:J4")
+    ws.Range("B5:B" & validCount + 4).NumberFormat = "yyyy-mm-dd"
+    ws.Range("C5:I" & validCount + 4).NumberFormat = "$0.000;[Red]($0.000);-"
+    ws.Range("J5:J" & validCount + 4).NumberFormat = "0.00;[Red](0.00);-"
+    AddTableSafe ws, ws.Range("A4:J" & validCount + 4), "StartingPeriodTable"
+
+    ws.Range("L4:Q" & validCount + 4).Clear
+    WriteRowValues ws.Range("L4"), Array("Start", "ON", "1M", "2M", "3M", "6M")
+    For r = 1 To validCount
+        ws.Cells(r + 4, 12).Value = ws.Cells(r + 4, 1).Value
+        For t = 1 To 5
+            ws.Cells(r + 4, t + 12).Value = ws.Cells(r + 4, t + 2).Value
+        Next t
+    Next r
+
+    Set chartObj = ws.ChartObjects.Add(ws.Range("L10").Left, ws.Range("L10").Top, 600, 300)
+    With chartObj.Chart
+        .SetSourceData ws.Range("L4:Q" & validCount + 4)
+        .ChartType = xlColumnClustered
+        .HasTitle = True
+        .ChartTitle.Text = "Ending Value by Start Date"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+    End With
+
+    WriteSection ws, "A" & validCount + 7 & ":J" & validCount + 7, "Interpretation"
+    WriteMergedLine ws, validCount + 8, 1, 10, "The best tenor may change with the entry date. Compare the dollar gain versus ON, not only the ranking."
+    WriteMergedLine ws, validCount + 9, 1, 10, "A maturity ladder reduces the risk of committing all liquidity on one curve date or around one FOMC meeting."
+
+    ws.Columns("A:J").ColumnWidth = 15
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+' ============================================================================
+' RISK AND RETURN
+' ============================================================================
+
+Private Sub BuildRiskReturnSheet()
+
+    Dim ws As Worksheet
+    Dim output(1 To 6, 1 To 7) As Variant
+    Dim t As Long, m As Long
+    Dim values() As Double, excess() As Double
+    Dim annReturn As Double, annVol As Double, annExcess As Double, tracking As Double
+    Dim chartObj As ChartObject
+
+    Set ws = PrepareOutputSheet("Risk Return", "4. Risk and Return")
+
+    output(1, 1) = "Tenor"
+    output(1, 2) = "Annualized Return"
+    output(1, 3) = "Annualized Volatility"
+    output(1, 4) = "Excess vs ON (bp)"
+    output(1, 5) = "Tracking Error (bp)"
+    output(1, 6) = "Information Ratio"
+    output(1, 7) = "5th Pctl Monthly Excess (bp)"
+
+    ReDim values(1 To gMonthCount)
+    ReDim excess(1 To gMonthCount)
+
+    For t = 1 To TENOR_COUNT
+        For m = 1 To gMonthCount
+            values(m) = gMonthlyReturns(t, m)
+            excess(m) = gMonthlyReturns(t, m) - gMonthlyReturns(1, m)
+        Next m
+
+        annReturn = MeanArray(values, gMonthCount) * 12#
+        annVol = SampleStdArray(values, gMonthCount) * Sqr(12#)
+        gRiskAnnReturn(t) = annReturn
+        gRiskAnnVol(t) = annVol
+
+        If t = 1 Then
+            annExcess = 0
+            tracking = 0
+            gRiskIR(t) = 0
+            gRiskDownsideBp(t) = 0
+        Else
+            annExcess = MeanArray(excess, gMonthCount) * 12# * 10000#
+            tracking = SampleStdArray(excess, gMonthCount) * Sqr(12#) * 10000#
+            If tracking <> 0 Then gRiskIR(t) = annExcess / tracking
+            gRiskDownsideBp(t) = PercentileArray(excess, gMonthCount, 0.05) * 10000#
+        End If
+
+        gRiskExcessBp(t) = annExcess
+        gRiskTrackingBp(t) = tracking
+
+        output(t + 1, 1) = TenorName(t)
+        output(t + 1, 2) = annReturn
+        output(t + 1, 3) = annVol
+        output(t + 1, 4) = annExcess
+        output(t + 1, 5) = tracking
+        output(t + 1, 6) = IIf(t = 1, "", gRiskIR(t))
+        output(t + 1, 7) = gRiskDownsideBp(t)
+    Next t
+
+    ws.Range("A4:G9").Value = output
+    ApplyHeader ws.Range("A4:G4")
+    ws.Range("B5:C9").NumberFormat = "0.000%;[Red](0.000%);-"
+    ws.Range("D5:G9").NumberFormat = "0.00;[Red](0.00);-"
+    AddTableSafe ws, ws.Range("A4:G9"), "RiskReturnTable"
+
+    WriteJaggedArray ws.Range("I4"), Array( _
+        Array("Tenor", "Tracking Error", "Excess Return"), _
+        Array("1M", gRiskTrackingBp(2), gRiskExcessBp(2)), _
+        Array("2M", gRiskTrackingBp(3), gRiskExcessBp(3)), _
+        Array("3M", gRiskTrackingBp(4), gRiskExcessBp(4)), _
+        Array("6M", gRiskTrackingBp(5), gRiskExcessBp(5))), 3
+
+    Set chartObj = ws.ChartObjects.Add(ws.Range("I10").Left, ws.Range("I10").Top, 550, 300)
+    With chartObj.Chart
+        .SetSourceData ws.Range("I4:K8")
+        .ChartType = xlLineMarkers
+        .HasTitle = True
+        .ChartTitle.Text = "Relative Risk and Return versus ON"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+    End With
+
+    WriteSection ws, "A12:G12", "Risk Management Interpretation"
+    WriteMergedLine ws, 13, 1, 7, "Tracking error measures how much each tenor deviated from the ON strategy. Information ratio measures excess return per unit of tracking risk."
+    WriteMergedLine ws, 14, 1, 7, "Use ON and short tenor for liquidity. Use longer tenor only when the realized return compensates for timing and policy risk."
+
+    ws.Columns("A:G").ColumnWidth = 18
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+' ============================================================================
+' EFFICIENT FRONTIER
+' ============================================================================
+
+Private Sub BuildEfficientFrontierSheet()
+
+    Dim ws As Worksheet
+    Dim scenarios As Variant, mode As Long, summaryRow As Long
+    Dim output(1 To 5, 1 To 8) As Variant
+    Dim pointsStart As Long, pointsEnd As Long
+    Dim chartObj As ChartObject
+
+    Set ws = PrepareOutputSheet("Efficient Frontier", "5. Efficient Frontier by Rate Regime")
+
+    output(1, 1) = "Scenario"
+    output(1, 2) = "Months"
+    output(1, 3) = "Best Pure Tenor"
+    output(1, 4) = "Best Pure Return (bp)"
+    output(1, 5) = "Best IR Mix"
+    output(1, 6) = "Best IR Return (bp)"
+    output(1, 7) = "Best IR Risk (bp)"
+    output(1, 8) = "Information Ratio"
+
+    scenarios = Array("Overall", "Hike / Rising", "Hold / Stable", "Cut / Falling")
+    pointsStart = 4
+
+    For mode = 0 To 3
+        summaryRow = mode + 2
+        pointsEnd = BuildOneFrontier(ws, CStr(scenarios(mode)), mode, pointsStart, output, summaryRow)
+        pointsStart = pointsEnd + 3
+    Next mode
+
+    ws.Range("A4:H8").Value = output
+    ApplyHeader ws.Range("A4:H4")
+    ws.Range("D5:D8,F5:H8").NumberFormat = "0.00;[Red](0.00);-"
+    ws.Range("E5:E8").WrapText = True
+    AddTableSafe ws, ws.Range("A4:H8"), "FrontierSummaryTable"
+
+    WriteSection ws, "A10:H10", "Interpretation"
+    WriteMergedLine ws, 11, 1, 8, "The frontier contains long-only combinations of 1M, 2M, 3M and 6M. Portfolios below the frontier delivered less return for the same or greater risk."
+    WriteMergedLine ws, 12, 1, 8, "Rising, stable and falling regimes are classified from monthly ON changes using thresholds in Config."
+    WriteMergedLine ws, 13, 1, 8, "The efficient mix is a statistical allocation, not a liquidity recommendation. Operational liquidity requirements remain the first constraint."
+
+    ws.Columns("A:H").ColumnWidth = 18
+    ws.Columns("E").ColumnWidth = 28
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+Private Function BuildOneFrontier(ByVal ws As Worksheet, ByVal scenarioName As String, ByVal mode As Long, _
+                                  ByVal startRow As Long, ByRef summaryOutput() As Variant, _
+                                  ByVal summaryRow As Long) As Long
+
+    Dim selected() As Long, selectedCount As Long, m As Long, t As Long
+    Dim means(1 To 4) As Double, covariance(1 To 4, 1 To 4) As Double
+    Dim units As Long, a As Long, b As Long, c As Long, d As Long
+    Dim weights(1 To 4) As Double
+    Dim portfolioCount As Long, maxPortfolios As Long
+    Dim portReturn() As Double, portRisk() As Double, portWeights() As Double
+    Dim expectedReturn As Double, volatility As Double, varianceValue As Double
+    Dim i As Long, j As Long, bestPure As Long, bestIRIdx As Long
+    Dim efficient() As Boolean, efficientCount As Long
+    Dim bestReturnAtRisk As Double, pointRows() As Variant
+    Dim chartObj As ChartObject, chartRange As Range
+    Dim bestIR As Double, currentIR As Double
+
+    ReDim selected(1 To gMonthCount)
+    For m = 1 To gMonthCount
+        If RegimeMatch(mode, gMonthlyONChange(m)) Then
+            selectedCount = selectedCount + 1
+            selected(selectedCount) = m
+        End If
+    Next m
+
+    If selectedCount < 3 Then
+        summaryOutput(summaryRow, 1) = scenarioName
+        summaryOutput(summaryRow, 2) = selectedCount
+        summaryOutput(summaryRow, 3) = "Insufficient data"
+        BuildOneFrontier = startRow
+        Exit Function
+    End If
+
+    ComputeMeanCovariance selected, selectedCount, means, covariance
+
+    bestPure = 1
+    For t = 2 To 4
+        If means(t) > means(bestPure) Then bestPure = t
+    Next t
+
+    units = CLng(Round(1# / gWeightStep, 0))
+    If units < 2 Then units = 20
+    maxPortfolios = (units + 1) * (units + 2) * (units + 3) / 6
+    ReDim portReturn(1 To maxPortfolios)
+    ReDim portRisk(1 To maxPortfolios)
+    ReDim portWeights(1 To 4, 1 To maxPortfolios)
+
+    For a = 0 To units
+        For b = 0 To units - a
+            For c = 0 To units - a - b
+                d = units - a - b - c
+                weights(1) = a / units
+                weights(2) = b / units
+                weights(3) = c / units
+                weights(4) = d / units
+
+                expectedReturn = 0
+                varianceValue = 0
+                For i = 1 To 4
+                    expectedReturn = expectedReturn + weights(i) * means(i)
+                    For j = 1 To 4
+                        varianceValue = varianceValue + weights(i) * weights(j) * covariance(i, j)
+                    Next j
+                Next i
+                volatility = Sqr(Application.Max(0, varianceValue))
