@@ -1,0 +1,249 @@
+    WriteJaggedArray ws.Range("N4"), Array( _
+        Array("Scenario", "ON", "1M", "2M", "3M", "6M"), _
+        Array("Current", currentRate(1), currentRate(2), currentRate(3), currentRate(4), currentRate(5)), _
+        Array("Hike", scenario(2, 8), scenario(2, 9), scenario(2, 10), scenario(2, 11), scenario(2, 12)), _
+        Array("Hold", scenario(3, 8), scenario(3, 9), scenario(3, 10), scenario(3, 11), scenario(3, 12)), _
+        Array("Cut", scenario(4, 8), scenario(4, 9), scenario(4, 10), scenario(4, 11), scenario(4, 12))), 6
+
+    Set chartObj = ws.ChartObjects.Add(ws.Range("N10").Left, ws.Range("N10").Top, 600, 300)
+    With chartObj.Chart
+        .SetSourceData ws.Range("N4:S8")
+        .ChartType = xlLineMarkers
+        .HasTitle = True
+        .ChartTitle.Text = "Current Curve and Immediate FOMC Scenarios"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+    End With
+
+    gClosestPattern = ClosestPatternName(distance)
+    gCurrentAveragePremium = currentSlope
+    gCurrentAveragePercentile = (gCurrentPercentile(2) + gCurrentPercentile(3) + gCurrentPercentile(4) + gCurrentPercentile(5)) / 4#
+
+    WriteSection ws, "A17:L17", "Key Interpretation"
+    WriteMergedLine ws, 18, 1, 12, "Current average term premium: " & Format(gCurrentAveragePremium, "0.0") & " bp. Average historical percentile: " & Format(gCurrentAveragePercentile, "0.0") & "."
+    WriteMergedLine ws, 19, 1, 12, "The current curve is statistically closest to historical pre-" & LCase$(gClosestPattern) & " patterns. This is a similarity measure, not a decision probability."
+
+    If gNextPolicyEffective > gDates(gLastIdx) Then
+        totalDays = DateDiff("d", CDate(gDates(gLastIdx)), DateAdd("m", 1, CDate(gDates(gLastIdx))))
+        beforeDays = DateDiff("d", CDate(gDates(gLastIdx)), CDate(gNextPolicyEffective))
+        afterDays = totalDays - beforeDays
+        If afterDays > 0 Then
+            impliedPostON = (gRates(2, gLastIdx) * totalDays - gRates(1, gLastIdx) * beforeDays) / afterDays
+            WriteMergedLine ws, 20, 1, 12, "Pure-expectations 1M illustration: implied post-meeting ON near " & Format(impliedPostON, "0.000%") & ". This is an upper-bound signal, not a forecast."
+        End If
+    Else
+        WriteMergedLine ws, 20, 1, 12, "Add Next Policy Effective Date in Config to calculate the pure-expectations 1M illustration."
+    End If
+
+    WriteMergedLine ws, 21, 1, 12, "Base-case scenario selected in Config: " & gBaseCase & ". Refresh the curve immediately before the meeting for a live view."
+    WriteMergedLine ws, 22, 1, 12, "Portfolio implication: protect liquidity in ON/1M, use the most efficient core tenor from the historical frontier, and limit longer tenor to a deliberate policy view."
+
+    ws.Columns("A:M").ColumnWidth = 15
+    ws.Columns("F").ColumnWidth = 18
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+Private Sub BuildPatternStats(ByVal decisionName As String, ByRef output() As Variant, ByVal outputRow As Long, _
+                              ByRef aggregateMean As Double, ByRef aggregateStd As Double)
+
+    Dim e As Long, eventIdx As Long, preIdx As Long, t As Long
+    Dim countValue As Long, slopeValues() As Double, tenorTotal(2 To 5) As Double
+
+    ReDim slopeValues(1 To Application.Max(1, gFOMCCount))
+
+    For e = 1 To gFOMCCount
+        If gFOMCDecision(e) = decisionName Then
+            eventIdx = FirstCurveIndexGE(gFOMCDates(e))
+            If eventIdx > gAnalysisStartIdx + 10 And eventIdx <= gLastIdx Then
+                countValue = countValue + 1
+                preIdx = eventIdx - 10
+                For t = 2 To 5
+                    tenorTotal(t) = tenorTotal(t) + (gRates(t, preIdx) - gRates(1, preIdx)) * 10000#
+                    slopeValues(countValue) = slopeValues(countValue) + (gRates(t, preIdx) - gRates(1, preIdx)) * 10000# / 4#
+                Next t
+            End If
+        End If
+    Next e
+
+    output(outputRow, 1) = decisionName
+    output(outputRow, 2) = countValue
+    If countValue > 0 Then
+        For t = 2 To 5
+            output(outputRow, t + 1) = tenorTotal(t) / countValue
+        Next t
+        aggregateMean = MeanArray(slopeValues, countValue)
+        aggregateStd = SampleStdArray(slopeValues, countValue)
+        output(outputRow, 7) = aggregateMean
+        output(outputRow, 8) = aggregateStd
+    End If
+
+End Sub
+
+
+Private Function AverageFOMCReaction(ByVal decisionName As String, ByRef averageReaction() As Double) As Long
+
+    Dim e As Long, eventIdx As Long, t As Long, countValue As Long
+
+    For e = 1 To gFOMCCount
+        If gFOMCDecision(e) = decisionName Then
+            eventIdx = FirstCurveIndexGE(gFOMCDates(e))
+            If eventIdx > gAnalysisStartIdx And eventIdx + 1 <= gLastIdx Then
+                countValue = countValue + 1
+                For t = 1 To 5
+                    averageReaction(t) = averageReaction(t) + (gRates(t, eventIdx + 1) - gRates(t, eventIdx - 1)) * 10000#
+                Next t
+            End If
+        End If
+    Next e
+
+    If countValue > 0 Then
+        For t = 1 To 5
+            averageReaction(t) = averageReaction(t) / countValue
+        Next t
+    End If
+    AverageFOMCReaction = countValue
+
+End Function
+
+
+Private Function ClosestPatternName(ByRef distance() As Double) As String
+    Dim bestIdx As Long, i As Long
+    bestIdx = 1
+    For i = 2 To 3
+        If distance(i) < distance(bestIdx) Then bestIdx = i
+    Next i
+    Select Case bestIdx
+        Case 1: ClosestPatternName = "Hike"
+        Case 2: ClosestPatternName = "Hold"
+        Case 3: ClosestPatternName = "Cut"
+    End Select
+End Function
+
+
+' ============================================================================
+' EXECUTIVE AND SOURCES
+' ============================================================================
+
+Private Sub BuildExecutiveSheet()
+
+    Dim ws As Worksheet
+    Dim bestIRTenor As Long, lowestTrackingTenor As Long, t As Long
+
+    Set ws = PrepareOutputSheet("Executive", "SOFR Curve, Returns and Risk Management")
+
+    ws.Range("A2:J2").Merge
+    ws.Range("A2").Value = "Analysis period: " & Format(CDate(gDates(gAnalysisStartIdx)), "dd-mmm-yyyy") & _
+                           " to " & Format(CDate(gDates(gLastIdx)), "dd-mmm-yyyy") & _
+                           ". Risk statistics start on " & Format(CDate(gDates(gRiskStartIdx)), "dd-mmm-yyyy") & "."
+    ws.Range("A2:J2").Interior.Color = RGB(243, 246, 249)
+    ws.Range("A2:J2").Font.Italic = True
+
+    WriteSection ws, "A4:J4", "Recommended Storyline"
+    WriteJaggedArray ws.Range("A5"), Array( _
+        Array(1, "Historical curve", "Connect curve movements to FOMC meetings and show where repricing occurred."), _
+        Array(2, "Premium priced vs realized", "Compare the quoted tenor spread with the return actually earned versus rolling ON."), _
+        Array(3, "Different starting periods", "Show how the entry date changes the outcome of same-tenor rollover strategies."), _
+        Array(4, "Risk and return", "Compare volatility, tracking error, downside and information ratio."), _
+        Array(5, "Efficient frontier", "Identify efficient tenor combinations in rising, stable and falling-rate regimes."), _
+        Array(6, "Next meeting", "Use the last curve observation and historical FOMC patterns for scenario analysis.")), 3
+    ws.Range("A5:A10").Interior.Color = RGB(23, 54, 93)
+    ws.Range("A5:A10").Font.Color = RGB(255, 255, 255)
+    ws.Range("A5:A10").Font.Bold = True
+    ws.Range("B5:B10").Font.Bold = True
+    ws.Range("C5:C10").WrapText = True
+
+    bestIRTenor = 2
+    lowestTrackingTenor = 2
+    For t = 3 To 5
+        If gRiskIR(t) > gRiskIR(bestIRTenor) Then bestIRTenor = t
+        If gRiskTrackingBp(t) < gRiskTrackingBp(lowestTrackingTenor) Then lowestTrackingTenor = t
+    Next t
+
+    WriteSection ws, "A12:J12", "Data-Driven Conclusions"
+    WriteMergedLine ws, 13, 1, 10, TenorName(bestIRTenor) & " produced the strongest historical information ratio: " & Format(gRiskIR(bestIRTenor), "0.00") & ", with " & Format(gRiskExcessBp(bestIRTenor), "0.00") & " bp annualized excess return and " & Format(gRiskTrackingBp(bestIRTenor), "0.00") & " bp tracking error versus ON."
+    WriteMergedLine ws, 14, 1, 10, TenorName(lowestTrackingTenor) & " was the lowest-risk term extension, with " & Format(gRiskTrackingBp(lowestTrackingTenor), "0.00") & " bp annualized tracking error."
+    WriteMergedLine ws, 15, 1, 10, "The overall best historical risk-adjusted mix was " & gOverallBestIRText & ", with an information ratio of " & Format(gOverallBestIR, "0.00") & "."
+    WriteMergedLine ws, 16, 1, 10, "Latest average term premium: " & Format(gCurrentAveragePremium, "0.0") & " bp. Average historical percentile: " & Format(gCurrentAveragePercentile, "0.0") & "."
+    WriteMergedLine ws, 17, 1, 10, "The latest curve is statistically closest to historical pre-" & LCase$(gClosestPattern) & " patterns. This is not a policy probability."
+    WriteMergedLine ws, 18, 1, 10, "The model is fully local and uses only the Curve, Config and FOMC sheets saved in this workbook."
+
+    WriteSection ws, "A20:J20", "Risk Management Approach"
+    WriteJaggedArray ws.Range("A21"), Array( _
+        Array("Liquidity core", "ON / 1M", "Prioritize liquidity and minimize tracking risk."), _
+        Array("Core yield extension", TenorName(bestIRTenor), "Use the strongest historical information ratio as a reference, subject to liquidity constraints."), _
+        Array("Directional position", "Longer tenor", "Use only when the policy view justifies additional timing and tracking risk."), _
+        Array("Implementation", "Ladder", "Diversify rollover dates and avoid concentration in one meeting outcome.")), 3
+    ws.Range("A21:A24").Font.Bold = True
+    ws.Range("B21:B24").Interior.Color = RGB(255, 242, 204)
+    ws.Range("B21:B24").Font.Bold = True
+    ws.Range("C21:C24").WrapText = True
+
+    ws.Columns("A").ColumnWidth = 20
+    ws.Columns("B").ColumnWidth = 28
+    ws.Columns("C:J").ColumnWidth = 14
+    ws.Rows("5:24").RowHeight = 30
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+Private Sub BuildSourcesSheet()
+
+    Dim ws As Worksheet
+    Set ws = PrepareOutputSheet("Sources", "Sources and Methodology")
+
+    WriteJaggedArray ws.Range("A4"), Array( _
+        Array("Curve", gCurveSource), _
+        Array("FOMC calendar", "User-maintained FOMC sheet"), _
+        Array("Rate convention", "Rates normalized from percentage points or decimal rates"), _
+        Array("Calculation", "Excel VBA; ACT/360; same-tenor rollover")), 2
+    ws.Range("A4:A7").Font.Bold = True
+
+    WriteSection ws, "A9:F9", "Definitions"
+    WriteJaggedArray ws.Range("A10"), Array( _
+        Array("Premium priced", "Quoted tenor rate minus ON on the investment date."), _
+        Array("Premium realized", "Fixed tenor rate minus the rolled-ON equivalent rate to the same effective maturity."), _
+        Array("Volatility", "Annualized standard deviation of monthly strategy returns."), _
+        Array("Tracking error", "Annualized volatility of each tenor monthly return minus ON."), _
+        Array("Efficient frontier", "Long-only combinations of 1M, 2M, 3M and 6M using the Config weight step."), _
+        Array("FOMC scenario", "Average historical -1 to +1 observation curve reaction by Hike, Hold or Cut.")), 2
+    ws.Range("A10:A15").Font.Bold = True
+    ws.Range("B10:B15").WrapText = True
+
+    ws.Columns("A").ColumnWidth = 24
+    ws.Columns("B").ColumnWidth = 80
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+' ============================================================================
+' CONFIG HELPERS
+' ============================================================================
+
+Private Function ReadConfigDate(ByVal values As Object, ByVal key As String, ByVal defaultValue As Double) As Double
+    If values.Exists(key) And IsDate(values(key)) Then
+        ReadConfigDate = CDbl(CDate(values(key)))
+    Else
+        ReadConfigDate = defaultValue
+    End If
+End Function
+
+
+Private Function ReadConfigOptionalDate(ByVal values As Object, ByVal key As String) As Double
+    If values.Exists(key) And IsDate(values(key)) Then ReadConfigOptionalDate = CDbl(CDate(values(key)))
+End Function
+
+
+Private Function ReadConfigNumber(ByVal values As Object, ByVal key As String, ByVal defaultValue As Double) As Double
+    If values.Exists(key) And IsNumeric(values(key)) Then
+        ReadConfigNumber = CDbl(values(key))
+    Else
+        ReadConfigNumber = defaultValue
+    End If
+End Function
