@@ -1,0 +1,964 @@
+Attribute VB_Name = "SOFR_Deposit_Model"
+Option Explicit
+
+'===============================================================================
+' SOFR DEPOSIT MODEL — US ACT/360
+'
+' PURPOSE
+'   Rebuild a maturity-based comparison of locked term deposits versus rolling
+'   overnight cash using a user-supplied daily curve.
+'
+' INPUT SHEET
+'   Sheet name: Curve
+'   Row 1 headers (case-insensitive): Date, ON, 1M, 3M, 6M
+'   Rates must be entered as percentages, e.g. 5.25 means 5.25%.
+'
+' CORE METHODOLOGY
+'   For each historical start date and tenor:
+'     1. Lock the term rate observed on the start date.
+'     2. Contractual maturity = start date + tenor calendar months.
+'     3. Actual maturity = first available curve date on or after contractual
+'        maturity.
+'     4. Locked term factor = 1 + term rate * actual days / 360.
+'     5. Rolling ON factor compounds each ON fixing over the calendar days until
+'        the next available curve observation, capped at actual maturity.
+'     6. Compare annualized locked term return with annualized rolled ON return
+'        only after the full tenor has matured.
+'
+' OUTPUTS
+'   Maturity Analysis — one row per matured deposit outcome.
+'   Dashboard         — summary table and maturity scatter charts.
+'
+' RUN
+'   Press Alt+F8 and run UpdateSOFRDepositModel.
+'===============================================================================
+
+Private Const CURVE_SHEET As String = "Curve"
+Private Const ANALYSIS_SHEET As String = "Maturity Analysis"
+Private Const DASHBOARD_SHEET As String = "Dashboard"
+Private Const HEADER_ROW As Long = 1
+Private Const FIRST_DATA_ROW As Long = 2
+Private gDashboardStage As String
+
+Private Type CurveColumns
+    DateCol As Long
+    ONCol As Long
+    M1Col As Long
+    M3Col As Long
+    M6Col As Long
+End Type
+
+Public Sub UpdateSOFRDepositModel()
+    Dim stage As String
+    Dim calcMode As XlCalculation
+    Dim screenState As Boolean, eventsState As Boolean, alertsState As Boolean
+
+    On Error GoTo CleanFail
+
+    screenState = Application.ScreenUpdating
+    eventsState = Application.EnableEvents
+    alertsState = Application.DisplayAlerts
+    calcMode = Application.Calculation
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+
+    stage = "Locating Curve sheet"
+    Dim wsCurve As Worksheet
+    Set wsCurve = GetWorksheet(CURVE_SHEET)
+    If wsCurve Is Nothing Then
+        Err.Raise vbObjectError + 1000, , _
+            "Sheet '" & CURVE_SHEET & "' was not found. Create it with headers: Date, ON, 1M, 3M, 6M."
+    End If
+
+    stage = "Resolving curve columns"
+    Dim cols As CurveColumns
+    ResolveCurveColumns wsCurve, cols
+
+    Dim dates() As Double
+    Dim onRates() As Double
+    Dim rate1M() As Double
+    Dim rate3M() As Double
+    Dim rate6M() As Double
+    Dim n As Long
+
+    stage = "Loading and validating curve data"
+    LoadAndValidateCurve wsCurve, cols, dates, onRates, rate1M, rate3M, rate6M, n
+
+    stage = "Preparing output worksheets"
+    Dim wsAnalysis As Worksheet, wsDashboard As Worksheet
+    Set wsAnalysis = ResetWorksheet(ANALYSIS_SHEET)
+    Set wsDashboard = ResetWorksheet(DASHBOARD_SHEET)
+
+    stage = "Calculating matured deposit outcomes"
+    BuildAnalysis wsAnalysis, dates, onRates, rate1M, rate3M, rate6M, n
+    stage = "Building dashboard, tables, and charts"
+    BuildDashboard wsDashboard, wsAnalysis
+
+    stage = "Validating dashboard structure"
+    AssertDashboardStructure wsDashboard
+
+    wsDashboard.Activate
+    wsDashboard.Range("A1").Select
+    MsgBox "SOFR deposit model updated successfully." & vbCrLf & _
+           "The dashboard contains three maturity-based scatter charts and a complete summary table.", _
+           vbInformation, "SOFR Deposit Model"
+
+CleanExit:
+    Application.ScreenUpdating = screenState
+    Application.EnableEvents = eventsState
+    Application.DisplayAlerts = alertsState
+    Application.Calculation = calcMode
+    Exit Sub
+
+CleanFail:
+    MsgBox "SOFR deposit model was not updated." & vbCrLf & vbCrLf & _
+           "Stage: " & stage & IIf(Len(gDashboardStage) > 0, vbCrLf & "Dashboard step: " & gDashboardStage, "") & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, vbCritical, "SOFR Deposit Model"
+    Resume CleanExit
+End Sub
+
+Private Function GetWorksheet(ByVal sheetName As String) As Worksheet
+    On Error Resume Next
+    Set GetWorksheet = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+End Function
+
+Private Function ResetWorksheet(ByVal sheetName As String) As Worksheet
+    Dim ws As Worksheet
+    Set ws = GetWorksheet(sheetName)
+
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        ws.Name = sheetName
+    Else
+        ws.Cells.Clear
+        Do While ws.ChartObjects.Count > 0
+            ws.ChartObjects(1).Delete
+        Loop
+        Do While ws.Shapes.Count > 0
+            ws.Shapes(1).Delete
+        Loop
+    End If
+
+    ws.Cells.Font.Name = "Arial"
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+    Set ResetWorksheet = ws
+End Function
+
+Private Sub ResolveCurveColumns(ByVal ws As Worksheet, ByRef result As CurveColumns)
+    result.DateCol = FindHeaderColumn(ws, "DATE")
+    result.ONCol = FindHeaderColumn(ws, "ON")
+    result.M1Col = FindHeaderColumn(ws, "1M")
+    result.M3Col = FindHeaderColumn(ws, "3M")
+    result.M6Col = FindHeaderColumn(ws, "6M")
+
+    If result.DateCol = 0 Or result.ONCol = 0 Or result.M1Col = 0 Or _
+       result.M3Col = 0 Or result.M6Col = 0 Then
+        Err.Raise vbObjectError + 1001, , _
+            "Curve headers are incomplete. Required headers in row 1: Date, ON, 1M, 3M, 6M."
+    End If
+End Sub
+
+Private Function FindHeaderColumn(ByVal ws As Worksheet, ByVal target As String) As Long
+    Dim lastCol As Long, c As Long, headerText As String
+    lastCol = ws.Cells(HEADER_ROW, ws.Columns.Count).End(xlToLeft).Column
+
+    For c = 1 To lastCol
+        headerText = UCase$(Trim$(CStr(ws.Cells(HEADER_ROW, c).Value2)))
+        headerText = Replace(headerText, " ", "")
+        If headerText = target Then
+            FindHeaderColumn = c
+            Exit Function
+        End If
+    Next c
+End Function
+
+Private Sub LoadAndValidateCurve( _
+    ByVal ws As Worksheet, _
+    ByRef cols As CurveColumns, _
+    ByRef dates() As Double, _
+    ByRef onRates() As Double, _
+    ByRef rate1M() As Double, _
+    ByRef rate3M() As Double, _
+    ByRef rate6M() As Double, _
+    ByRef n As Long)
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, cols.DateCol).End(xlUp).Row
+    If lastRow < FIRST_DATA_ROW Then
+        Err.Raise vbObjectError + 1002, , "The Curve sheet contains no observations."
+    End If
+
+    Dim maxRows As Long
+    maxRows = lastRow - FIRST_DATA_ROW + 1
+    ReDim dates(1 To maxRows)
+    ReDim onRates(1 To maxRows)
+    ReDim rate1M(1 To maxRows)
+    ReDim rate3M(1 To maxRows)
+    ReDim rate6M(1 To maxRows)
+
+    Dim r As Long, d As Double
+    Dim previousDate As Double
+    n = 0
+
+    For r = FIRST_DATA_ROW To lastRow
+        If Len(Trim$(CStr(ws.Cells(r, cols.DateCol).Value))) > 0 Then
+            If Not IsDate(ws.Cells(r, cols.DateCol).Value) Then
+                Err.Raise vbObjectError + 1003, , "Invalid date in Curve row " & r & "."
+            End If
+
+            d = CDbl(CDate(ws.Cells(r, cols.DateCol).Value))
+            If n > 0 And d <= previousDate Then
+                Err.Raise vbObjectError + 1004, , _
+                    "Curve dates must be unique and strictly increasing. Check row " & r & "."
+            End If
+
+            ValidateRateCell ws.Cells(r, cols.ONCol), "ON", r
+            ValidateRateCell ws.Cells(r, cols.M1Col), "1M", r
+            ValidateRateCell ws.Cells(r, cols.M3Col), "3M", r
+            ValidateRateCell ws.Cells(r, cols.M6Col), "6M", r
+
+            n = n + 1
+            dates(n) = d
+            onRates(n) = CDbl(ws.Cells(r, cols.ONCol).Value2) / 100#
+            rate1M(n) = CDbl(ws.Cells(r, cols.M1Col).Value2) / 100#
+            rate3M(n) = CDbl(ws.Cells(r, cols.M3Col).Value2) / 100#
+            rate6M(n) = CDbl(ws.Cells(r, cols.M6Col).Value2) / 100#
+            previousDate = d
+        End If
+    Next r
+
+    If n < 3 Then
+        Err.Raise vbObjectError + 1005, , "At least three dated observations are required."
+    End If
+
+    ReDim Preserve dates(1 To n)
+    ReDim Preserve onRates(1 To n)
+    ReDim Preserve rate1M(1 To n)
+    ReDim Preserve rate3M(1 To n)
+    ReDim Preserve rate6M(1 To n)
+End Sub
+
+Private Sub ValidateRateCell(ByVal cell As Range, ByVal tenor As String, ByVal rowNumber As Long)
+    If Len(Trim$(CStr(cell.Value))) = 0 Or Not IsNumeric(cell.Value2) Then
+        Err.Raise vbObjectError + 1006, , _
+            "Missing or nonnumeric " & tenor & " rate in Curve row " & rowNumber & "."
+    End If
+End Sub
+
+Private Sub BuildAnalysis( _
+    ByVal ws As Worksheet, _
+    ByRef dates() As Double, _
+    ByRef onRates() As Double, _
+    ByRef rate1M() As Double, _
+    ByRef rate3M() As Double, _
+    ByRef rate6M() As Double, _
+    ByVal n As Long)
+
+    Dim headers As Variant
+    headers = Array( _
+        "Entry Date", "Tenor", "Contractual Maturity", "Actual Maturity", _
+        "Actual Days", "Entry ON Rate", "Locked Term Rate", _
+        "Quoted Premium (bp)", "Locked Term Factor", "Rolled ON Factor", _
+        "Annualized Locked Return", "Annualized Rolled ON Return", _
+        "Realized Premium (bp)", "Premium Shortfall (bp)", _
+        "Capture Ratio", "Beat Rolling ON")
+
+    Dim c As Long
+    For c = LBound(headers) To UBound(headers)
+        ws.Cells(1, c + 1).Value = headers(c)
+    Next c
+
+    Dim output() As Variant
+    ReDim output(1 To n * 3, 1 To 16)
+
+    Dim tenors As Variant
+    tenors = Array("1M", "3M", "6M")
+
+    Dim i As Long, t As Long, outRow As Long
+    Dim months As Long, termRate As Double
+    Dim contractMaturity As Double, maturityIndex As Long, actualMaturity As Double
+    Dim actualDays As Long, termFactor As Double, onFactor As Double
+    Dim annualTerm As Double, annualON As Double
+    Dim quotedPremium As Double, realizedPremium As Double, shortfall As Double
+    Dim captureRatio As Variant
+
+    outRow = 0
+
+    For t = LBound(tenors) To UBound(tenors)
+        Select Case CStr(tenors(t))
+            Case "1M": months = 1
+            Case "3M": months = 3
+            Case "6M": months = 6
+        End Select
+
+        For i = 1 To n
+            contractMaturity = CDbl(DateAdd("m", months, CDate(dates(i))))
+            maturityIndex = FirstIndexOnOrAfter(dates, n, contractMaturity)
+
+            'Only fully matured observations are included.
+            If maturityIndex > 0 Then
+                actualMaturity = dates(maturityIndex)
+                actualDays = CLng(actualMaturity - dates(i))
+
+                If actualDays > 0 Then
+                    Select Case CStr(tenors(t))
+                        Case "1M": termRate = rate1M(i)
+                        Case "3M": termRate = rate3M(i)
+                        Case "6M": termRate = rate6M(i)
+                    End Select
+
+                    termFactor = 1# + termRate * actualDays / 360#
+                    onFactor = RolledONFactor(i, maturityIndex, dates, onRates)
+                    annualTerm = (termFactor - 1#) * 360# / actualDays
+                    annualON = (onFactor - 1#) * 360# / actualDays
+                    quotedPremium = (termRate - onRates(i)) * 10000#
+                    realizedPremium = (annualTerm - annualON) * 10000#
+                    shortfall = realizedPremium - quotedPremium
+
+                    If Abs(quotedPremium) >= 0.01 Then
+                        captureRatio = realizedPremium / quotedPremium
+                    Else
+                        captureRatio = Empty
+                    End If
+
+                    outRow = outRow + 1
+                    output(outRow, 1) = CDate(dates(i))
+                    output(outRow, 2) = CStr(tenors(t))
+                    output(outRow, 3) = CDate(contractMaturity)
+                    output(outRow, 4) = CDate(actualMaturity)
+                    output(outRow, 5) = actualDays
+                    output(outRow, 6) = onRates(i)
+                    output(outRow, 7) = termRate
+                    output(outRow, 8) = quotedPremium
+                    output(outRow, 9) = termFactor
+                    output(outRow, 10) = onFactor
+                    output(outRow, 11) = annualTerm
+                    output(outRow, 12) = annualON
+                    output(outRow, 13) = realizedPremium
+                    output(outRow, 14) = shortfall
+                    output(outRow, 15) = captureRatio
+                    output(outRow, 16) = IIf(realizedPremium > 0#, "Yes", "No")
+                End If
+            End If
+        Next i
+    Next t
+
+    If outRow = 0 Then
+        Err.Raise vbObjectError + 1007, , _
+            "No fully matured 1M, 3M, or 6M observations could be calculated."
+    End If
+
+    Dim finalOutput() As Variant
+    Dim rr As Long, cc As Long
+    ReDim finalOutput(1 To outRow, 1 To 16)
+    For rr = 1 To outRow
+        For cc = 1 To 16
+            finalOutput(rr, cc) = output(rr, cc)
+        Next cc
+    Next rr
+
+    ws.Range("A2").Resize(outRow, 16).Value = finalOutput
+
+    With ws.Range("A1:P1")
+        .Interior.Color = RGB(21, 54, 95)
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .WrapText = True
+        .RowHeight = 34
+    End With
+
+    ws.Range("A2:A" & outRow + 1).NumberFormat = "mm/dd/yyyy"
+    ws.Range("C2:D" & outRow + 1).NumberFormat = "mm/dd/yyyy"
+    ws.Range("E2:E" & outRow + 1).NumberFormat = "0"
+    ws.Range("F2:G" & outRow + 1).NumberFormat = "0.0000%"
+    ws.Range("H2:H" & outRow + 1).NumberFormat = "0.00;[Red](0.00);-"
+    ws.Range("I2:J" & outRow + 1).NumberFormat = "0.000000"
+    ws.Range("K2:L" & outRow + 1).NumberFormat = "0.0000%"
+    ws.Range("M2:N" & outRow + 1).NumberFormat = "0.00;[Red](0.00);-"
+    ws.Range("O2:O" & outRow + 1).NumberFormat = "0.00x;[Red](0.00x);-"
+
+    ws.Range("A2:P" & outRow + 1).Borders.Color = RGB(225, 230, 237)
+    ws.Range("A2:P" & outRow + 1).Borders.LineStyle = xlContinuous
+    ws.Range("A2:P" & outRow + 1).Borders.Weight = xlHairline
+
+    ws.Range("A1:P" & outRow + 1).AutoFilter
+    ws.Rows(1).AutoFilter
+    ws.Range("A1:P" & outRow + 1).Columns.AutoFit
+    ws.Columns("A:D").ColumnWidth = 15
+    ws.Columns("F:O").ColumnWidth = 18
+    ws.Columns("P:P").ColumnWidth = 13
+
+    ws.Activate
+    ActiveWindow.FreezePanes = False
+    ws.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+End Sub
+
+Private Function FirstIndexOnOrAfter(ByRef dates() As Double, ByVal n As Long, ByVal targetDate As Double) As Long
+    Dim lo As Long, hi As Long, mid As Long, answer As Long
+    lo = 1
+    hi = n
+    answer = 0
+
+    Do While lo <= hi
+        mid = (lo + hi) \ 2
+        If dates(mid) >= targetDate Then
+            answer = mid
+            hi = mid - 1
+        Else
+            lo = mid + 1
+        End If
+    Loop
+
+    FirstIndexOnOrAfter = answer
+End Function
+
+Private Function RolledONFactor( _
+    ByVal startIndex As Long, _
+    ByVal maturityIndex As Long, _
+    ByRef dates() As Double, _
+    ByRef onRates() As Double) As Double
+
+    Dim factor As Double
+    Dim j As Long, dayCount As Long
+    factor = 1#
+
+    'The ON fixing on dates(j) accrues until the next observed date. The final
+    'interval ends on the actual maturity date, which is dates(maturityIndex).
+    For j = startIndex To maturityIndex - 1
+        dayCount = CLng(dates(j + 1) - dates(j))
+        If dayCount <= 0 Then
+            Err.Raise vbObjectError + 1008, , "Invalid ON accrual interval in curve data."
+        End If
+        factor = factor * (1# + onRates(j) * dayCount / 360#)
+    Next j
+
+    RolledONFactor = factor
+End Function
+
+Private Sub BuildDashboard(ByVal ws As Worksheet, ByVal wsAnalysis As Worksheet)
+    gDashboardStage = "Preparing dashboard canvas"
+
+    Dim navy As Long, lightBlue As Long, muted As Long
+    navy = RGB(21, 54, 95)
+    lightBlue = RGB(216, 236, 250)
+    muted = RGB(95, 99, 104)
+
+    'Set the canvas before adding any charts. Chart positions are then anchored
+    'to worksheet ranges rather than hard-coded pixel coordinates.
+    With ws
+        .Cells.UnMerge
+        .Cells.ClearFormats
+        .Cells.Font.Name = "Arial"
+        .Columns("A:A").ColumnWidth = 4
+        .Columns("B:I").ColumnWidth = 12
+        .Columns("J:N").ColumnWidth = 13
+        .Columns("O:O").ColumnWidth = 2
+        .Rows("1:52").RowHeight = 18
+        .Rows(1).RowHeight = 38
+        .Rows(2).RowHeight = 24
+        .Rows("4:7").RowHeight = 20
+    End With
+
+    On Error Resume Next
+    Application.DisplayDrawingObjects = xlDisplayShapes
+    On Error GoTo 0
+
+    gDashboardStage = "Writing title and methodology"
+    With ws.Range("A1:N1")
+        .Merge
+        .Value = "Slide 2 | Was the quoted term premium actually realized at maturity?"
+        .Font.Size = 24
+        .Font.Bold = True
+        .Font.Color = navy
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+    End With
+
+    With ws.Range("A2:N2")
+        .Merge
+        .Value = "US deposit simulation | Each observation is evaluated only after the full tenor matures | Locked term return vs rolled ON over the same actual maturity"
+        .Font.Size = 10
+        .Font.Color = muted
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+    End With
+
+    With ws.Range("A4:I7")
+        .Merge
+        .Value = "CORRECT COMPARISON" & vbLf & _
+                 "For each historical start date, lock the term rate and hold it to maturity. " & _
+                 "Over the same exact calendar period, compound rolling ON under ACT/360. " & _
+                 "Compare annualized returns only after maturity." & vbLf & _
+                 "No daily rate-to-rate comparison. Each observation is one completed deposit outcome."
+        .WrapText = True
+        .VerticalAlignment = xlCenter
+        .Interior.Color = RGB(247, 250, 253)
+        .Borders.Color = RGB(190, 210, 234)
+        .Font.Size = 10
+        .Font.Color = RGB(35, 35, 35)
+    End With
+
+    gDashboardStage = "Building summary table"
+    BuildSummaryTable ws, wsAnalysis
+
+    gDashboardStage = "Building chart helper data"
+    BuildHelperData ws, wsAnalysis
+
+    gDashboardStage = "Building maturity scatter charts"
+    BuildScatterCharts ws
+
+    With ws.Range("A49:N49")
+        .Merge
+        .Value = "Source: user-provided SOFR curve; US deposit methodology under ACT/360. Realized results use only fully matured observations and are assigned to their original investment dates."
+        .Font.Size = 8
+        .Font.Color = muted
+        .VerticalAlignment = xlCenter
+    End With
+
+    'The helper data remains in the workbook but is hidden from the presentation.
+    ws.Columns("P:AH").Hidden = True
+
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+    ActiveWindow.Zoom = 70
+    ws.Range("A1").Select
+
+    gDashboardStage = vbNullString
+End Sub
+
+Private Sub BuildSummaryTable(ByVal ws As Worksheet, ByVal wsAnalysis As Worksheet)
+    Dim navy As Long, lightBlue As Long
+    navy = RGB(21, 54, 95)
+    lightBlue = RGB(216, 236, 250)
+
+    With ws.Range("J4:N4")
+        .Merge
+        .Value = "Evidence summary"
+        .Font.Size = 16
+        .Font.Bold = True
+        .Font.Color = navy
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+    End With
+
+    Dim headers As Variant, c As Long
+    headers = Array("Tenor", "Avg quoted", "Avg realized", "Beat ON", "Observations")
+    For c = 0 To 4
+        ws.Cells(6, 10 + c).Value = headers(c)
+    Next c
+
+    With ws.Range("J6:N6")
+        .Interior.Color = navy
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
+
+    ws.Range("J7").Value = "ON"
+    ws.Range("J8").Value = "1M"
+    ws.Range("J9").Value = "3M"
+    ws.Range("J10").Value = "6M"
+    ws.Range("K7").Value = 0#
+    ws.Range("L7").Value = 0#
+    ws.Range("M7").Value = 0#
+    ws.Range("N7").Value = "-"
+
+    Dim tenors As Variant
+    tenors = Array("1M", "3M", "6M")
+
+    Dim lastRow As Long
+    lastRow = wsAnalysis.Cells(wsAnalysis.Rows.Count, "A").End(xlUp).Row
+
+    Dim r As Long, tenor As String
+    For r = 0 To 2
+        tenor = CStr(tenors(r))
+        ws.Cells(8 + r, 11).Value = AverageIfTenor(wsAnalysis, lastRow, tenor, 8)
+        ws.Cells(8 + r, 12).Value = AverageIfTenor(wsAnalysis, lastRow, tenor, 13)
+        ws.Cells(8 + r, 13).Value = WinRateIfTenor(wsAnalysis, lastRow, tenor)
+        ws.Cells(8 + r, 14).Value = CountIfTenor(wsAnalysis, lastRow, tenor)
+    Next r
+
+    With ws.Range("J6:N10")
+        .Borders.Color = RGB(210, 220, 232)
+        .Borders.LineStyle = xlContinuous
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
+    ws.Range("J7:J10").Font.Bold = True
+    ws.Range("K7:L10").NumberFormat = "0.00;[Red]-0.00;-"
+    ws.Range("M7:M10").NumberFormat = "0.0%"
+    ws.Range("N8:N10").NumberFormat = "0"
+
+    With ws.Range("J12:N16")
+        .Merge
+        .Value = "How to read the chart" & vbLf & _
+                 "Each dot is one completed deposit. Dots on the 45° line mean the quoted premium was fully realized. Dots below it earned less than quoted versus rolling ON."
+        StyleDashboardBox ws.Range("J12:N16"), navy
+    End With
+
+    With ws.Range("J18:N22")
+        .Merge
+        .Value = "Treasury implication" & vbLf & _
+                 "The comparison occurs only at maturity. A higher quoted rate does not automatically produce a better realized outcome."
+        StyleDashboardBox ws.Range("J18:N22"), navy
+    End With
+
+    With ws.Range("J24:N29")
+        .Merge
+        .Value = "Takeaway: quoted term premium is visible at trade date, but realized advantage versus ON is known only after the full tenor has run."
+        .WrapText = True
+        .VerticalAlignment = xlCenter
+        .Interior.Color = lightBlue
+        .Font.Bold = True
+        .Font.Size = 11
+        .Font.Color = navy
+        .Borders.Color = lightBlue
+    End With
+End Sub
+
+Private Sub StyleDashboardBox(ByVal rng As Range, ByVal navy As Long)
+    With rng
+        .WrapText = True
+        .VerticalAlignment = xlTop
+        .HorizontalAlignment = xlLeft
+        .Interior.Color = RGB(255, 255, 255)
+        .Borders.Color = RGB(210, 220, 232)
+        .Font.Size = 10
+        .Font.Color = navy
+    End With
+End Sub
+
+Private Function AverageIfTenor(ByVal ws As Worksheet, ByVal lastRow As Long, ByVal tenor As String, ByVal valueCol As Long) As Double
+    Dim r As Long, total As Double, count As Long
+    For r = 2 To lastRow
+        If CStr(ws.Cells(r, 2).Value2) = tenor Then
+            If Not IsError(ws.Cells(r, valueCol).Value) And IsNumeric(ws.Cells(r, valueCol).Value2) Then
+                total = total + CDbl(ws.Cells(r, valueCol).Value2)
+                count = count + 1
+            End If
+        End If
+    Next r
+    If count > 0 Then AverageIfTenor = total / count
+End Function
+
+Private Function WinRateIfTenor(ByVal ws As Worksheet, ByVal lastRow As Long, ByVal tenor As String) As Double
+    Dim r As Long, wins As Long, count As Long
+    For r = 2 To lastRow
+        If CStr(ws.Cells(r, 2).Value2) = tenor Then
+            If Not IsError(ws.Cells(r, 13).Value) And IsNumeric(ws.Cells(r, 13).Value2) Then
+                count = count + 1
+                If CDbl(ws.Cells(r, 13).Value2) > 0# Then wins = wins + 1
+            End If
+        End If
+    Next r
+    If count > 0 Then WinRateIfTenor = wins / count
+End Function
+
+Private Function CountIfTenor(ByVal ws As Worksheet, ByVal lastRow As Long, ByVal tenor As String) As Long
+    Dim r As Long, count As Long
+    For r = 2 To lastRow
+        If CStr(ws.Cells(r, 2).Value2) = tenor Then count = count + 1
+    Next r
+    CountIfTenor = count
+End Function
+
+Private Sub BuildHelperData(ByVal ws As Worksheet, ByVal wsAnalysis As Worksheet)
+    Dim lastRow As Long
+    lastRow = wsAnalysis.Cells(wsAnalysis.Rows.Count, "A").End(xlUp).Row
+
+    Dim tenors As Variant
+    tenors = Array("1M", "3M", "6M")
+
+    Dim t As Long, sourceRow As Long, targetRow As Long, startCol As Long
+    Dim tenor As String
+
+    For t = 0 To 2
+        tenor = CStr(tenors(t))
+        startCol = 16 + t * 6 'P, V, AB
+
+        ws.Cells(1, startCol).Value = tenor & " Entry Date"
+        ws.Cells(1, startCol + 1).Value = "Quoted Premium (bp)"
+        ws.Cells(1, startCol + 2).Value = "Realized Premium (bp)"
+        ws.Cells(1, startCol + 3).Value = "45° X"
+        ws.Cells(1, startCol + 4).Value = "45° Y"
+        ws.Cells(1, startCol + 5).Value = "Maturity Date"
+
+        targetRow = 2
+        For sourceRow = 2 To lastRow
+            If CStr(wsAnalysis.Cells(sourceRow, 2).Value2) = tenor Then
+                ws.Cells(targetRow, startCol).Value = wsAnalysis.Cells(sourceRow, 1).Value
+                ws.Cells(targetRow, startCol + 1).Value = wsAnalysis.Cells(sourceRow, 8).Value
+                ws.Cells(targetRow, startCol + 2).Value = wsAnalysis.Cells(sourceRow, 13).Value
+                ws.Cells(targetRow, startCol + 5).Value = wsAnalysis.Cells(sourceRow, 4).Value
+                targetRow = targetRow + 1
+            End If
+        Next sourceRow
+
+        Dim minVal As Double, maxVal As Double, v As Double, scanRow As Long
+        If targetRow > 2 Then
+            minVal = 1E+308
+            maxVal = -1E+308
+            For scanRow = 2 To targetRow - 1
+                If IsNumeric(ws.Cells(scanRow, startCol + 1).Value2) Then
+                    v = CDbl(ws.Cells(scanRow, startCol + 1).Value2)
+                    If v < minVal Then minVal = v
+                    If v > maxVal Then maxVal = v
+                End If
+                If IsNumeric(ws.Cells(scanRow, startCol + 2).Value2) Then
+                    v = CDbl(ws.Cells(scanRow, startCol + 2).Value2)
+                    If v < minVal Then minVal = v
+                    If v > maxVal Then maxVal = v
+                End If
+            Next scanRow
+
+            If minVal = 1E+308 Or maxVal = -1E+308 Then
+                minVal = -1#
+                maxVal = 1#
+            ElseIf minVal = maxVal Then
+                minVal = minVal - 1#
+                maxVal = maxVal + 1#
+            End If
+
+            ws.Cells(2, startCol + 3).Value = minVal
+            ws.Cells(2, startCol + 4).Value = minVal
+            ws.Cells(3, startCol + 3).Value = maxVal
+            ws.Cells(3, startCol + 4).Value = maxVal
+        End If
+    Next t
+End Sub
+
+Private Sub BuildScatterCharts(ByVal ws As Worksheet)
+    Dim tenors As Variant, chartRanges As Variant
+    tenors = Array("1M", "3M", "6M")
+    chartRanges = Array("A9:I20", "A22:I33", "A35:I46")
+
+    Dim t As Long, startCol As Long, lastRow As Long, pointCount As Long
+    Dim chartObj As ChartObject, ch As Chart, s As Series
+    Dim anchor As Range, minVal As Double, maxVal As Double, pad As Double
+    Dim xData() As Variant, yData() As Variant
+    Dim lineX(1 To 2) As Variant, lineY(1 To 2) As Variant
+    Dim r As Long, p As Long
+
+    'Always clear prior chart objects before rebuilding.
+    Do While ws.ChartObjects.Count > 0
+        ws.ChartObjects(1).Delete
+    Loop
+
+    For t = 0 To 2
+        startCol = 16 + t * 6 'P, V, AB
+        lastRow = ws.Cells(ws.Rows.Count, startCol + 1).End(xlUp).Row
+        If lastRow < 2 Then
+            Err.Raise vbObjectError + 1010, , _
+                "No quoted/realized helper data available for " & CStr(tenors(t)) & "."
+        End If
+
+        'Build numeric arrays. This is deliberately independent of hidden helper
+        'columns: Excel may otherwise show blank charts when PlotVisibleOnly=True.
+        pointCount = 0
+        For r = 2 To lastRow
+            If IsNumeric(ws.Cells(r, startCol + 1).Value2) And _
+               IsNumeric(ws.Cells(r, startCol + 2).Value2) Then
+                pointCount = pointCount + 1
+            End If
+        Next r
+
+        If pointCount = 0 Then
+            Err.Raise vbObjectError + 1011, , _
+                "No numeric completed-deposit observations were found for " & CStr(tenors(t)) & "."
+        End If
+
+        ReDim xData(1 To pointCount)
+        ReDim yData(1 To pointCount)
+        p = 0
+        For r = 2 To lastRow
+            If IsNumeric(ws.Cells(r, startCol + 1).Value2) And _
+               IsNumeric(ws.Cells(r, startCol + 2).Value2) Then
+                p = p + 1
+                xData(p) = CDbl(ws.Cells(r, startCol + 1).Value2)
+                yData(p) = CDbl(ws.Cells(r, startCol + 2).Value2)
+            End If
+        Next r
+
+        minVal = CDbl(ws.Cells(2, startCol + 3).Value2)
+        maxVal = CDbl(ws.Cells(3, startCol + 3).Value2)
+        lineX(1) = minVal
+        lineX(2) = maxVal
+        lineY(1) = minVal
+        lineY(2) = maxVal
+
+        Set anchor = ws.Range(CStr(chartRanges(t)))
+        Set chartObj = ws.ChartObjects.Add( _
+            Left:=anchor.Left, Top:=anchor.Top, Width:=anchor.Width, Height:=anchor.Height)
+        chartObj.Name = "MaturityScatter_" & CStr(tenors(t))
+        chartObj.Placement = xlMoveAndSize
+        chartObj.PrintObject = True
+        chartObj.Visible = True
+
+        Set ch = chartObj.Chart
+        ch.ChartType = xlXYScatter
+        ch.PlotVisibleOnly = False
+        ch.HasTitle = True
+        ch.ChartTitle.Text = CStr(tenors(t)) & " | Quoted at entry vs realized at maturity"
+        ch.HasLegend = True
+        ch.Legend.Position = xlLegendPositionBottom
+
+        Do While ch.SeriesCollection.Count > 0
+            ch.SeriesCollection(1).Delete
+        Loop
+
+        Set s = ch.SeriesCollection.NewSeries
+        s.Name = "Completed deposits"
+        s.XValues = xData
+        s.Values = yData
+        s.MarkerStyle = xlMarkerStyleCircle
+        s.MarkerSize = 3
+        s.Format.Line.Visible = msoFalse
+        s.MarkerForegroundColor = RGB(47, 94, 158)
+        s.MarkerBackgroundColor = RGB(47, 94, 158)
+
+        Set s = ch.SeriesCollection.NewSeries
+        s.Name = "Full capture (45°)"
+        s.XValues = lineX
+        s.Values = lineY
+        s.ChartType = xlXYScatterLinesNoMarkers
+        s.Format.Line.ForeColor.RGB = RGB(70, 70, 70)
+        s.Format.Line.DashStyle = msoLineDash
+        s.Format.Line.Weight = 1.25
+
+        pad = (maxVal - minVal) * 0.08
+        If pad <= 0# Then pad = 1#
+
+        With ch.Axes(xlCategory)
+            .HasTitle = True
+            .AxisTitle.Text = "Quoted premium at entry (bp)"
+            .MinimumScale = minVal - pad
+            .MaximumScale = maxVal + pad
+            .CrossesAt = 0
+            .HasMajorGridlines = True
+            .MajorGridlines.Format.Line.ForeColor.RGB = RGB(225, 230, 237)
+        End With
+
+        With ch.Axes(xlValue)
+            .HasTitle = True
+            .AxisTitle.Text = "Realized premium at maturity (bp)"
+            .MinimumScale = minVal - pad
+            .MaximumScale = maxVal + pad
+            .CrossesAt = 0
+            .HasMajorGridlines = True
+            .MajorGridlines.Format.Line.ForeColor.RGB = RGB(225, 230, 237)
+        End With
+
+        ch.ChartArea.Format.Line.Visible = msoFalse
+        ch.ChartArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+        ch.PlotArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+    Next t
+End Sub
+
+Private Sub AssertDashboardStructure(ByVal ws As Worksheet)
+    Dim expectedCharts As Variant
+    Dim expectedTenors As Variant
+    Dim helperColumns As Variant
+    Dim i As Long
+    Dim co As ChartObject
+
+    If ws Is Nothing Then
+        Err.Raise vbObjectError + 1020, , "Dashboard worksheet reference is missing."
+    End If
+
+    expectedCharts = Array("MaturityScatter_1M", "MaturityScatter_3M", "MaturityScatter_6M")
+    expectedTenors = Array("ON", "1M", "3M", "6M")
+    helperColumns = Array(16, 22, 28) 'P, V, AB — 1M, 3M, 6M only
+
+    If ws.ChartObjects.Count <> 3 Then
+        Err.Raise vbObjectError + 1021, , _
+            "Expected exactly 3 maturity scatter charts (1M, 3M, 6M), but found " & _
+            ws.ChartObjects.Count & "."
+    End If
+
+    For i = LBound(expectedCharts) To UBound(expectedCharts)
+        Set co = Nothing
+        On Error Resume Next
+        Set co = ws.ChartObjects(CStr(expectedCharts(i)))
+        On Error GoTo 0
+
+        If co Is Nothing Then
+            Err.Raise vbObjectError + 1022, , _
+                "Missing dashboard chart: " & CStr(expectedCharts(i)) & "."
+        End If
+
+        If co.Visible = False Then
+            Err.Raise vbObjectError + 1023, , _
+                "Dashboard chart is hidden: " & CStr(expectedCharts(i)) & "."
+        End If
+
+        If co.Width < 250 Or co.Height < 120 Then
+            Err.Raise vbObjectError + 1024, , _
+                "Dashboard chart has an invalid size: " & CStr(expectedCharts(i)) & "."
+        End If
+
+        If co.Chart.SeriesCollection.Count <> 2 Then
+            Err.Raise vbObjectError + 1028, , _
+                "Dashboard chart does not contain both scatter and 45-degree series: " & _
+                CStr(expectedCharts(i)) & "."
+        End If
+
+        If co.Chart.SeriesCollection(1).Points.Count = 0 Then
+            Err.Raise vbObjectError + 1029, , _
+                "Dashboard chart contains no plotted completed-deposit points: " & _
+                CStr(expectedCharts(i)) & "."
+        End If
+    Next i
+
+    For i = LBound(expectedTenors) To UBound(expectedTenors)
+        If UCase$(Trim$(CStr(ws.Cells(7 + i, 10).Value2))) <> CStr(expectedTenors(i)) Then
+            Err.Raise vbObjectError + 1025, , _
+                "Evidence summary tenor row " & (7 + i) & " must be " & _
+                CStr(expectedTenors(i)) & "."
+        End If
+    Next i
+
+    For i = LBound(helperColumns) To UBound(helperColumns)
+        If UCase$(Trim$(CStr(ws.Cells(1, CLng(helperColumns(i))).Value2))) <> _
+           CStr(expectedTenors(i + 1)) & " ENTRY DATE" Then
+            Err.Raise vbObjectError + 1026, , _
+                "Helper data is missing for " & CStr(expectedTenors(i + 1)) & "."
+        End If
+    Next i
+
+    If Application.WorksheetFunction.CountIf(ws.Range("J7:J10"), "2M") > 0 Then
+        Err.Raise vbObjectError + 1027, , _
+            "The dashboard must use only ON, 1M, 3M, and 6M. A 2M row was found."
+    End If
+End Sub
+
+'Run this after importing the module when you want a fast structural test without
+'altering the user's Curve data. It validates that the dashboard has the expected
+'chart objects and summary rows after UpdateSOFRDepositModel has completed.
+Public Sub ValidateSOFRDashboard()
+    On Error GoTo TestFail
+
+    Dim ws As Worksheet
+    Set ws = GetWorksheet(DASHBOARD_SHEET)
+    If ws Is Nothing Then Err.Raise vbObjectError + 1020, , "Dashboard sheet does not exist."
+
+    AssertDashboardStructure ws
+
+    MsgBox "Dashboard structural test passed:" & vbCrLf & _
+           "• 3 visible maturity scatter charts" & vbCrLf & _
+           "• Complete 1M, 3M, and 6M summary rows" & vbCrLf & _
+           "• Helper data retained and hidden", vbInformation, "SOFR Deposit Model"
+    Exit Sub
+
+TestFail:
+    MsgBox "Dashboard structural test failed." & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, vbCritical, "SOFR Deposit Model"
+End Sub
