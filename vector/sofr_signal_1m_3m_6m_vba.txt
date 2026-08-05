@@ -1,0 +1,1050 @@
+' SOFR CURVE-SIGNAL SLIDE — EXCEL VBA
+' ===================================
+'
+' Purpose
+' -------
+' Build a presentation-style Excel output for 1M, 3M and 6M showing:
+'
+'     X-axis: tenor minus ON spread at the decision date, in bp
+'     Y-axis: realized tenor excess return versus compounded ON, in bp
+'
+' For each tenor the output displays:
+'
+'     - a scatter plot;
+'     - a linear-fit line;
+'     - correlation;
+'     - R-squared;
+'     - percentage of realized start dates when the tenor beat ON;
+'     - a short data-driven interpretation.
+'
+' Requirements
+' ------------
+' 1. Paste this entire file into a standard module in the curve workbook.
+' 2. R_CURVE must already exist as a Public VBA function in that workbook.
+' 3. The curve range must contain headers: Date, ON, 1M, 3M and 6M.
+' 4. Edit only the USER SETTINGS section, then run:
+'
+'        Build_Slide2_1M_3M_6M
+'
+' The macro creates or refreshes two dedicated sheets:
+'
+'     Signal_Data     calculation and audit data
+'     Slide2_Signal   presentation-style three-panel output
+'
+' The curve source range is read only and is not modified.
+
+
+Option Explicit
+
+'======================================================================
+' BUILD SLIDE 2: INITIAL SPREAD VS REALIZED EXCESS RETURN
+' Tenors: 1M, 3M and 6M
+'======================================================================
+Public Sub Build_Slide2_1M_3M_6M()
+
+    '==================================================================
+    ' USER SETTINGS
+    '==================================================================
+
+    Const SOURCE_SHEET As String = "Curve"
+
+    ' Use either SOURCE_RANGE or SOURCE_TOP_LEFT:
+    ' - If SOURCE_RANGE is not blank, that exact range is used.
+    ' - If SOURCE_RANGE is blank, CurrentRegion from SOURCE_TOP_LEFT is used.
+    Const SOURCE_RANGE As String = ""
+    Const SOURCE_TOP_LEFT As String = "A1"
+
+    Const DATA_SHEET As String = "Signal_Data"
+    Const SLIDE_SHEET As String = "Slide2_Signal"
+
+    ' 0 = snap backward to the previous available curve date
+    ' 1 = snap forward to the next available curve date
+    Const ROLL_ADJ As Long = 0
+
+    Const SLIDE_TITLE As String = _
+        "Starting term spreads were not reliable standalone return signals"
+
+    ' Optional PDF export of the presentation sheet.
+    ' Leave False when only the Excel output is needed.
+    Const EXPORT_PDF As Boolean = False
+
+    ' Leave blank to save beside the workbook as:
+    ' SOFR_Slide2_1M_3M_6M.pdf
+    Const PDF_PATH As String = ""
+
+
+    '==================================================================
+    ' VARIABLES
+    '==================================================================
+
+    Dim wb As Workbook
+    Dim wsSource As Worksheet
+    Dim wsData As Worksheet
+    Dim wsSlide As Worksheet
+    Dim curveRange As Range
+    Dim curveData As Variant
+
+    Dim tenors As Variant
+    Dim tenorStart(0 To 2) As Long
+    Dim tenorEnd(0 To 2) As Long
+
+    Dim globalXMin As Double
+    Dim globalXMax As Double
+    Dim globalYMin As Double
+    Dim globalYMax As Double
+
+    Dim xAxisMin As Double
+    Dim xAxisMax As Double
+    Dim yAxisMin As Double
+    Dim yAxisMax As Double
+
+    Dim oldCalc As XlCalculation
+    Dim finalPdfPath As String
+
+
+    '==================================================================
+    ' PREPARE EXCEL
+    '==================================================================
+
+    On Error GoTo CleanFail
+
+    Set wb = ThisWorkbook
+    Set wsSource = wb.Worksheets(SOURCE_SHEET)
+
+    If Len(Trim$(SOURCE_RANGE)) > 0 Then
+        Set curveRange = wsSource.Range(SOURCE_RANGE)
+    Else
+        Set curveRange = wsSource.Range(SOURCE_TOP_LEFT).CurrentRegion
+    End If
+
+    If curveRange.Rows.Count < 2 Then
+        Err.Raise vbObjectError + 100, , _
+            "The selected curve range contains no data rows."
+    End If
+
+    curveData = curveRange.Value2
+    ValidateCurve curveData
+
+    If ROLL_ADJ <> 0 And ROLL_ADJ <> 1 Then
+        Err.Raise vbObjectError + 101, , _
+            "ROLL_ADJ must be 0 or 1."
+    End If
+
+    oldCalc = Application.Calculation
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+
+    Set wsData = GetOrCreateOutputSheet(wb, DATA_SHEET)
+    Set wsSlide = GetOrCreateOutputSheet(wb, SLIDE_SHEET)
+
+    ClearOutputSheet wsData
+    ClearOutputSheet wsSlide
+
+    tenors = Array("1M", "3M", "6M")
+
+    globalXMin = 1E+99
+    globalXMax = -1E+99
+    globalYMin = 1E+99
+    globalYMax = -1E+99
+
+
+    '==================================================================
+    ' BUILD AUDITABLE DATASET
+    '==================================================================
+
+    BuildSignalDataset _
+        wb:=wb, _
+        curveRange:=curveRange, _
+        curveData:=curveData, _
+        wsData:=wsData, _
+        tenors:=tenors, _
+        rollAdj:=ROLL_ADJ, _
+        tenorStart:=tenorStart, _
+        tenorEnd:=tenorEnd, _
+        globalXMin:=globalXMin, _
+        globalXMax:=globalXMax, _
+        globalYMin:=globalYMin, _
+        globalYMax:=globalYMax
+
+    If globalXMin = 1E+99 Or globalYMin = 1E+99 Then
+        Err.Raise vbObjectError + 102, , _
+            "No fully realized tenor observations were produced."
+    End If
+
+
+    '==================================================================
+    ' USE COMMON AXES SO THE THREE PANELS ARE COMPARABLE
+    '==================================================================
+
+    xAxisMin = FloorToStep(globalXMin - 5, 20)
+    xAxisMax = CeilToStep(globalXMax + 5, 20)
+    yAxisMin = FloorToStep(globalYMin - 2, 10)
+    yAxisMax = CeilToStep(globalYMax + 2, 10)
+
+    If xAxisMin >= 0 Then xAxisMin = -20
+    If xAxisMax <= 0 Then xAxisMax = 20
+    If yAxisMin >= 0 Then yAxisMin = -10
+    If yAxisMax <= 0 Then yAxisMax = 10
+
+
+    '==================================================================
+    ' BUILD PRESENTATION SHEET
+    '==================================================================
+
+    BuildPresentationSheet _
+        wsSlide:=wsSlide, _
+        wsData:=wsData, _
+        tenors:=tenors, _
+        tenorStart:=tenorStart, _
+        tenorEnd:=tenorEnd, _
+        xAxisMin:=xAxisMin, _
+        xAxisMax:=xAxisMax, _
+        yAxisMin:=yAxisMin, _
+        yAxisMax:=yAxisMax, _
+        slideTitle:=SLIDE_TITLE
+
+
+    '==================================================================
+    ' OPTIONAL PDF EXPORT
+    '==================================================================
+
+    If EXPORT_PDF Then
+
+        finalPdfPath = Trim$(PDF_PATH)
+
+        If Len(finalPdfPath) = 0 Then
+            If Len(wb.Path) = 0 Then
+                Err.Raise vbObjectError + 103, , _
+                    "Save the workbook or enter an absolute PDF_PATH."
+            End If
+
+            finalPdfPath = wb.Path & Application.PathSeparator & _
+                "SOFR_Slide2_1M_3M_6M.pdf"
+        End If
+
+        wsSlide.ExportAsFixedFormat _
+            Type:=xlTypePDF, _
+            Filename:=finalPdfPath, _
+            Quality:=xlQualityStandard, _
+            IncludeDocProperties:=True, _
+            IgnorePrintAreas:=False, _
+            OpenAfterPublish:=False
+
+    End If
+
+
+CleanExit:
+
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    wsSlide.Activate
+    ActiveWindow.DisplayGridlines = False
+    ActiveWindow.Zoom = 80
+
+    If EXPORT_PDF Then
+        MsgBox "Slide 2 analysis completed." & vbCrLf & vbCrLf & _
+               "PDF: " & finalPdfPath, vbInformation
+    Else
+        MsgBox "Slide 2 analysis completed.", vbInformation
+    End If
+
+    Exit Sub
+
+
+CleanFail:
+
+    On Error Resume Next
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    On Error GoTo 0
+
+    MsgBox "Slide 2 was not created:" & vbCrLf & Err.Description, _
+           vbExclamation
+
+End Sub
+
+
+'======================================================================
+' BUILD THE LONG-FORM DATASET USED BY ALL THREE CHARTS
+'======================================================================
+Private Sub BuildSignalDataset( _
+    ByVal wb As Workbook, _
+    ByVal curveRange As Range, _
+    ByVal curveData As Variant, _
+    ByVal wsData As Worksheet, _
+    ByVal tenors As Variant, _
+    ByVal rollAdj As Long, _
+    ByRef tenorStart() As Long, _
+    ByRef tenorEnd() As Long, _
+    ByRef globalXMin As Double, _
+    ByRef globalXMax As Double, _
+    ByRef globalYMin As Double, _
+    ByRef globalYMax As Double)
+
+    Dim colDate As Long
+    Dim colON As Long
+    Dim colTerm As Long
+
+    Dim rowCount As Long
+    Dim outputRow As Long
+    Dim blockRows As Long
+
+    Dim t As Long
+    Dim i As Long
+    Dim tenor As String
+    Dim months As Long
+
+    Dim startDate As Double
+    Dim lastCurveDate As Double
+    Dim targetDate As Double
+    Dim maturity As Variant
+    Dim factorTerm As Variant
+    Dim factorON As Variant
+
+    Dim onRate As Variant
+    Dim termRate As Variant
+    Dim spreadBp As Double
+    Dim excessBp As Double
+
+    Dim blockData() As Variant
+
+
+    colDate = FindHeader(curveData, "Date")
+    colON = FindHeader(curveData, "ON")
+
+    If colDate = 0 Or colON = 0 Then
+        Err.Raise vbObjectError + 110, , _
+            "The curve must contain Date and ON headers."
+    End If
+
+    lastCurveDate = CDbl(curveData(UBound(curveData, 1), colDate))
+    rowCount = UBound(curveData, 1) - 1
+
+
+    ' Column order is intentionally stable because chart ranges reference it.
+    wsData.Range("A1:J1").Value = Array( _
+        "StartDate", _
+        "Tenor", _
+        "ON", _
+        "TermRate", _
+        "InitialSpread_bp", _
+        "Maturity", _
+        "FactorTerm", _
+        "FactorON", _
+        "ExcessReturn_bp", _
+        "Valid")
+
+    outputRow = 2
+
+    For t = LBound(tenors) To UBound(tenors)
+
+        tenor = CStr(tenors(t))
+        months = TenorMonths(tenor)
+        colTerm = FindHeader(curveData, tenor)
+
+        If colTerm = 0 Then
+            Err.Raise vbObjectError + 111, , _
+                "The curve does not contain the " & tenor & " header."
+        End If
+
+        ReDim blockData(1 To rowCount, 1 To 10)
+
+        tenorStart(t) = outputRow
+
+        For i = 2 To UBound(curveData, 1)
+
+            blockRows = i - 1
+
+            If IsNumeric(curveData(i, colDate)) Then
+
+                startDate = CDbl(curveData(i, colDate))
+                onRate = curveData(i, colON)
+                termRate = curveData(i, colTerm)
+
+                blockData(blockRows, 1) = CDate(startDate)
+                blockData(blockRows, 2) = tenor
+                blockData(blockRows, 3) = onRate
+                blockData(blockRows, 4) = termRate
+                blockData(blockRows, 10) = 0
+
+                If IsNumeric(onRate) And IsNumeric(termRate) Then
+
+                    spreadBp = (CDbl(termRate) - CDbl(onRate)) * 10000#
+
+                    targetDate = CDbl(DateAdd("m", months, CDate(startDate)))
+
+                    ' Only use start dates with a fully observable horizon.
+                    If targetDate <= lastCurveDate Then
+
+                        maturity = RunCurve( _
+                            wb, startDate, curveRange, tenor, rollAdj, _
+                            "DATE", 0, targetDate)
+
+                        If IsDate(maturity) Or IsNumeric(maturity) Then
+
+                            factorTerm = RunCurve( _
+                                wb, startDate, curveRange, tenor, rollAdj, _
+                                "FACTOR", 0, maturity)
+
+                            factorON = RunCurve( _
+                                wb, startDate, curveRange, "ON", rollAdj, _
+                                "FACTOR", 0, maturity)
+
+                            If IsNumeric(factorTerm) And IsNumeric(factorON) Then
+
+                                excessBp = _
+                                    (CDbl(factorTerm) - CDbl(factorON)) * 10000#
+
+                                ' Keep X and Y populated as a matched pair.
+                                ' This makes CORREL/RSQ ignore unfinished horizons safely.
+                                blockData(blockRows, 5) = spreadBp
+                                blockData(blockRows, 6) = CDate(CDbl(maturity))
+                                blockData(blockRows, 7) = CDbl(factorTerm)
+                                blockData(blockRows, 8) = CDbl(factorON)
+                                blockData(blockRows, 9) = excessBp
+                                blockData(blockRows, 10) = 1
+
+                                UpdateMinimum globalXMin, spreadBp
+                                UpdateMaximum globalXMax, spreadBp
+                                UpdateMinimum globalYMin, excessBp
+                                UpdateMaximum globalYMax, excessBp
+
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+
+        Next i
+
+        wsData.Cells(outputRow, 1).Resize(rowCount, 10).Value = blockData
+
+        tenorEnd(t) = outputRow + rowCount - 1
+        outputRow = tenorEnd(t) + 1
+
+    Next t
+
+    FormatDataSheet wsData, outputRow - 1
+
+End Sub
+
+
+'======================================================================
+' BUILD THE PRESENTATION-STYLE THREE-PANEL OUTPUT
+'======================================================================
+Private Sub BuildPresentationSheet( _
+    ByVal wsSlide As Worksheet, _
+    ByVal wsData As Worksheet, _
+    ByVal tenors As Variant, _
+    ByRef tenorStart() As Long, _
+    ByRef tenorEnd() As Long, _
+    ByVal xAxisMin As Double, _
+    ByVal xAxisMax As Double, _
+    ByVal yAxisMin As Double, _
+    ByVal yAxisMax As Double, _
+    ByVal slideTitle As String)
+
+    Dim NAVY As Long
+    Dim CHARCOAL As Long
+    Dim GRAY_TEXT As Long
+    Dim GRID As Long
+
+    Dim t As Long
+    Dim panelLeft As Double
+    Dim panelWidth As Double
+    Dim chartTop As Double
+    Dim chartHeight As Double
+
+    Dim xRange As Range
+    Dim yRange As Range
+
+    Dim observationCount As Long
+    Dim corr As Double
+    Dim rSquared As Double
+    Dim hitRate As Double
+    Dim commentText As String
+
+    Dim chartObject As ChartObject
+    Dim chart As Chart
+    Dim series As Series
+    Dim trend As Trendline
+
+    Dim titleShape As Shape
+    Dim panelTitle As Shape
+    Dim statsShape As Shape
+    Dim commentShape As Shape
+    Dim footerShape As Shape
+
+
+    NAVY = RGB(23, 54, 93)
+    CHARCOAL = RGB(37, 42, 49)
+    GRAY_TEXT = RGB(117, 123, 133)
+    GRID = RGB(236, 238, 240)
+
+    ' The cell grid establishes a stable 16:9-style print canvas.
+    wsSlide.Cells.Interior.Color = vbWhite
+    wsSlide.Columns("A:Z").ColumnWidth = 6.4
+    wsSlide.Rows("1:38").RowHeight = 18
+
+    AddSolidRule wsSlide, 18, 18, 82, 3, NAVY
+
+    Set titleShape = AddTextShape( _
+        wsSlide, "SlideTitle", slideTitle, _
+        18, 28, 1160, 42, 26, CHARCOAL, True)
+
+    AddTextShape _
+        wsSlide, "ChartContext", _
+        "Initial tenor spread versus subsequent matched-horizon excess return", _
+        22, 72, 650, 22, 12, GRAY_TEXT, False
+
+    panelWidth = 370
+    chartTop = 126
+    chartHeight = 318
+
+    For t = LBound(tenors) To UBound(tenors)
+
+        panelLeft = 18 + (t * 392)
+
+        Set xRange = wsData.Range( _
+            wsData.Cells(tenorStart(t), 5), _
+            wsData.Cells(tenorEnd(t), 5))
+
+        Set yRange = wsData.Range( _
+            wsData.Cells(tenorStart(t), 9), _
+            wsData.Cells(tenorEnd(t), 9))
+
+        observationCount = WorksheetFunction.Count(yRange)
+
+        If observationCount < 2 Then
+            Err.Raise vbObjectError + 120, , _
+                "Insufficient realized observations for " & CStr(tenors(t)) & "."
+        End If
+
+        corr = WorksheetFunction.Correl(xRange, yRange)
+        rSquared = WorksheetFunction.RSq(yRange, xRange)
+        hitRate = WorksheetFunction.CountIf(yRange, ">0") / observationCount
+
+        Set panelTitle = AddTextShape( _
+            wsSlide, "PanelTitle_" & CStr(tenors(t)), _
+            CStr(tenors(t)), _
+            panelLeft, 98, 70, 28, 18, CHARCOAL, True)
+
+        Set statsShape = AddTextShape( _
+            wsSlide, "Stats_" & CStr(tenors(t)), _
+            "Corr " & FormatSigned(corr, "0.00") & _
+            "   |   R² " & Format(rSquared, "0%") & _
+            "   |   Beat ON " & Format(hitRate, "0%"), _
+            panelLeft + 78, 99, panelWidth - 78, 26, 11, GRAY_TEXT, False)
+
+
+        '--------------------------------------------------------------
+        ' SCATTER CHART
+        '--------------------------------------------------------------
+
+        Set chartObject = wsSlide.ChartObjects.Add( _
+            Left:=panelLeft, _
+            Top:=chartTop, _
+            Width:=panelWidth, _
+            Height:=chartHeight)
+
+        chartObject.Name = "SignalChart_" & CStr(tenors(t))
+        Set chart = chartObject.Chart
+
+        chart.ChartType = xlXYScatter
+        chart.HasLegend = False
+        chart.HasTitle = False
+
+        chart.ChartArea.Format.Fill.ForeColor.RGB = vbWhite
+        chart.ChartArea.Format.Line.Visible = msoFalse
+        chart.PlotArea.Format.Fill.ForeColor.RGB = vbWhite
+        chart.PlotArea.Format.Line.Visible = msoFalse
+
+        Set series = chart.SeriesCollection.NewSeries
+        series.Name = CStr(tenors(t)) & " observations"
+        series.XValues = xRange
+        series.Values = yRange
+        series.MarkerStyle = xlMarkerStyleCircle
+        series.MarkerSize = 3
+        series.MarkerForegroundColor = RGB(170, 179, 188)
+        series.MarkerBackgroundColor = RGB(170, 179, 188)
+        series.Format.Line.Visible = msoFalse
+
+
+        ' Horizontal zero line.
+        Set series = chart.SeriesCollection.NewSeries
+        series.Name = "Zero return"
+        series.XValues = Array(xAxisMin, xAxisMax)
+        series.Values = Array(0, 0)
+        series.ChartType = xlXYScatterLinesNoMarkers
+        series.Format.Line.ForeColor.RGB = RGB(148, 155, 164)
+        series.Format.Line.Weight = 1
+
+
+        ' Vertical zero line.
+        Set series = chart.SeriesCollection.NewSeries
+        series.Name = "Zero spread"
+        series.XValues = Array(0, 0)
+        series.Values = Array(yAxisMin, yAxisMax)
+        series.ChartType = xlXYScatterLinesNoMarkers
+        series.Format.Line.ForeColor.RGB = RGB(148, 155, 164)
+        series.Format.Line.Weight = 1
+
+
+        ' Add the linear fit to the observation series only.
+        Set trend = chart.SeriesCollection(1).Trendlines.Add(Type:=xlLinear)
+        trend.Name = "Linear fit"
+        trend.Format.Line.ForeColor.RGB = NAVY
+        trend.Format.Line.Weight = 2.25
+
+
+        ' Common axes permit a direct visual comparison across tenors.
+        With chart.Axes(xlCategory)
+            .MinimumScale = xAxisMin
+            .MaximumScale = xAxisMax
+            .MajorUnit = 40
+            .HasTitle = True
+            .AxisTitle.Text = CStr(tenors(t)) & " - ON spread | bp"
+            .AxisTitle.Font.Name = "Arial"
+            .AxisTitle.Font.Size = 10
+            .TickLabels.Font.Name = "Arial"
+            .TickLabels.Font.Size = 9
+            .TickLabels.Font.Color = GRAY_TEXT
+            .Format.Line.ForeColor.RGB = RGB(183, 189, 196)
+            .HasMajorGridlines = False
+        End With
+
+        With chart.Axes(xlValue)
+            .MinimumScale = yAxisMin
+            .MaximumScale = yAxisMax
+            .MajorUnit = 10
+            .HasTitle = True
+            .AxisTitle.Text = "Realized excess return | bp"
+            .AxisTitle.Font.Name = "Arial"
+            .AxisTitle.Font.Size = 10
+            .TickLabels.Font.Name = "Arial"
+            .TickLabels.Font.Size = 9
+            .TickLabels.Font.Color = GRAY_TEXT
+            .Format.Line.Visible = msoFalse
+            .HasMajorGridlines = True
+            .MajorGridlines.Format.Line.ForeColor.RGB = GRID
+            .MajorGridlines.Format.Line.Weight = 0.75
+        End With
+
+        chart.ChartArea.Font.Name = "Arial"
+
+
+        '--------------------------------------------------------------
+        ' SHORT COMMENT BELOW EACH PANEL
+        '--------------------------------------------------------------
+
+        commentText = BuildInterpretation( _
+            CStr(tenors(t)), corr, rSquared, hitRate)
+
+        Set commentShape = AddTextShape( _
+            wsSlide, "Comment_" & CStr(tenors(t)), _
+            commentText, _
+            panelLeft, 448, panelWidth, 55, 11, GRAY_TEXT, False)
+
+    Next t
+
+
+    ' One portfolio-level implication; the presenter can explain details.
+    AddSolidRule wsSlide, 18, 525, 1154, 1, GRID
+
+    AddTextShape _
+        wsSlide, "DecisionImplicationLabel", _
+        "DECISION IMPLICATION", _
+        20, 542, 210, 22, 11, GRAY_TEXT, True
+
+    AddTextShape _
+        wsSlide, "DecisionImplication", _
+        "Use the starting spread as context—not as a standalone rule for extending tenor.", _
+        20, 565, 1080, 34, 18, CHARCOAL, True
+
+    Set footerShape = AddTextShape( _
+        wsSlide, "MethodologyFooter", _
+        "Matched horizons; daily start dates overlap, so observations are not independent trials.", _
+        20, 628, 720, 20, 9, GRAY_TEXT, False)
+
+    AddTextShape _
+        wsSlide, "SourceFooter", _
+        "Source: curve data in this workbook; calculations use R_CURVE", _
+        800, 628, 372, 20, 9, GRAY_TEXT, False, True
+
+
+    ' Print/PDF layout.
+    With wsSlide.PageSetup
+        .Orientation = xlLandscape
+        .Zoom = False
+        .FitToPagesWide = 1
+        .FitToPagesTall = 1
+        .LeftMargin = Application.InchesToPoints(0.2)
+        .RightMargin = Application.InchesToPoints(0.2)
+        .TopMargin = Application.InchesToPoints(0.2)
+        .BottomMargin = Application.InchesToPoints(0.2)
+        .HeaderMargin = 0
+        .FooterMargin = 0
+        .CenterHorizontally = True
+        .CenterVertically = True
+        .PrintArea = "$A$1:$Z$36"
+    End With
+
+    wsSlide.Activate
+    ActiveWindow.DisplayGridlines = False
+
+End Sub
+
+
+'======================================================================
+' SHORT, DATA-DRIVEN COMMENT FOR EACH TENOR
+'======================================================================
+Private Function BuildInterpretation( _
+    ByVal tenor As String, _
+    ByVal corr As Double, _
+    ByVal rSquared As Double, _
+    ByVal hitRate As Double) As String
+
+    Dim relationship As String
+    Dim outcome As String
+
+    If rSquared < 0.1 Then
+        relationship = _
+            "The starting spread explained little of subsequent performance."
+    ElseIf corr < -0.15 Then
+        relationship = _
+            "Wider spreads were associated with weaker realized outcomes."
+    ElseIf corr > 0.15 Then
+        relationship = _
+            "Wider spreads were associated with stronger realized outcomes."
+    Else
+        relationship = _
+            "The relationship between spread and outcome was modest."
+    End If
+
+    outcome = tenor & " beat ON in " & Format(hitRate, "0%") & _
+              " of fully realized starts."
+
+    BuildInterpretation = relationship & " " & outcome
+
+End Function
+
+
+'======================================================================
+' CALL R_CURVE FROM THE SOURCE WORKBOOK
+' Application.Run avoids hard-linking this module to a particular file name.
+'======================================================================
+Private Function RunCurve( _
+    ByVal wb As Workbook, _
+    ByVal startDate As Double, _
+    ByVal curveRange As Range, _
+    ByVal tenor As String, _
+    ByVal rollAdj As Long, _
+    ByVal outputType As String, _
+    ByVal rowSelector As Long, _
+    ByVal maturity As Variant) As Variant
+
+    RunCurve = Application.Run( _
+        "'" & wb.Name & "'!R_CURVE", _
+        startDate, _
+        curveRange, _
+        tenor, _
+        rollAdj, _
+        outputType, _
+        rowSelector, _
+        maturity)
+
+End Function
+
+
+'======================================================================
+' VALIDATE THE CURVE TABLE
+'======================================================================
+Private Sub ValidateCurve(ByVal data As Variant)
+
+    Dim colDate As Long
+    Dim i As Long
+    Dim priorDate As Double
+    Dim currentDate As Double
+
+    If Not IsArray(data) Then
+        Err.Raise vbObjectError + 130, , "Invalid curve range."
+    End If
+
+    colDate = FindHeader(data, "Date")
+
+    If colDate = 0 Then
+        Err.Raise vbObjectError + 131, , _
+            "The curve table does not contain a Date header."
+    End If
+
+    For i = 2 To UBound(data, 1)
+
+        If Not IsNumeric(data(i, colDate)) Then
+            Err.Raise vbObjectError + 132, , _
+                "Invalid curve date on source row " & i & "."
+        End If
+
+        currentDate = CDbl(data(i, colDate))
+
+        If i > 2 Then
+            If currentDate <= priorDate Then
+                Err.Raise vbObjectError + 133, , _
+                    "Curve dates must be strictly ascending."
+            End If
+        End If
+
+        priorDate = currentDate
+
+    Next i
+
+End Sub
+
+
+'======================================================================
+' FIND A COLUMN BY HEADER NAME
+'======================================================================
+Private Function FindHeader( _
+    ByVal data As Variant, _
+    ByVal headerName As String) As Long
+
+    Dim j As Long
+
+    FindHeader = 0
+
+    For j = 1 To UBound(data, 2)
+        If UCase$(Trim$(CStr(data(1, j)))) = _
+           UCase$(Trim$(headerName)) Then
+
+            FindHeader = j
+            Exit Function
+        End If
+    Next j
+
+End Function
+
+
+'======================================================================
+' TENOR TO MONTH COUNT
+'======================================================================
+Private Function TenorMonths(ByVal tenor As String) As Long
+
+    Select Case UCase$(Trim$(tenor))
+        Case "1M": TenorMonths = 1
+        Case "3M": TenorMonths = 3
+        Case "6M": TenorMonths = 6
+        Case Else
+            Err.Raise vbObjectError + 140, , _
+                "Unsupported tenor: " & tenor
+    End Select
+
+End Function
+
+
+'======================================================================
+' OUTPUT-SHEET HELPERS
+'======================================================================
+Private Function GetOrCreateOutputSheet( _
+    ByVal wb As Workbook, _
+    ByVal sheetName As String) As Worksheet
+
+    On Error Resume Next
+    Set GetOrCreateOutputSheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+
+    If GetOrCreateOutputSheet Is Nothing Then
+        Set GetOrCreateOutputSheet = wb.Worksheets.Add( _
+            After:=wb.Worksheets(wb.Worksheets.Count))
+        GetOrCreateOutputSheet.Name = sheetName
+    End If
+
+End Function
+
+
+Private Sub ClearOutputSheet(ByVal ws As Worksheet)
+
+    Dim i As Long
+
+    ws.Cells.Clear
+
+    For i = ws.Shapes.Count To 1 Step -1
+        ws.Shapes(i).Delete
+    Next i
+
+End Sub
+
+
+'======================================================================
+' FORMAT THE AUDIT DATA
+'======================================================================
+Private Sub FormatDataSheet( _
+    ByVal ws As Worksheet, _
+    ByVal lastRow As Long)
+
+    With ws
+
+        .Rows(1).Font.Bold = True
+        .Rows(1).Interior.Color = RGB(23, 54, 93)
+        .Rows(1).Font.Color = vbWhite
+
+        .Range("A2:A" & lastRow).NumberFormat = "dd-mmm-yyyy"
+        .Range("F2:F" & lastRow).NumberFormat = "dd-mmm-yyyy"
+
+        .Range("C2:D" & lastRow).NumberFormat = "0.0000%"
+        .Range("G2:H" & lastRow).NumberFormat = "0.000000"
+        .Range("E2:E" & lastRow).NumberFormat = "0.0"
+        .Range("I2:I" & lastRow).NumberFormat = "0.0"
+        .Range("J2:J" & lastRow).NumberFormat = "0"
+
+        .Columns("A:J").AutoFit
+        .Columns("B").HorizontalAlignment = xlCenter
+        .Columns("C:J").HorizontalAlignment = xlRight
+
+        .Activate
+        ActiveWindow.DisplayGridlines = False
+        ActiveWindow.FreezePanes = False
+        .Range("A2").Select
+        ActiveWindow.FreezePanes = True
+
+    End With
+
+End Sub
+
+
+'======================================================================
+' PRESENTATION SHAPE HELPERS
+'======================================================================
+Private Function AddTextShape( _
+    ByVal ws As Worksheet, _
+    ByVal shapeName As String, _
+    ByVal textValue As String, _
+    ByVal leftPos As Double, _
+    ByVal topPos As Double, _
+    ByVal shapeWidth As Double, _
+    ByVal shapeHeight As Double, _
+    ByVal fontSize As Double, _
+    ByVal fontColor As Long, _
+    ByVal makeBold As Boolean, _
+    Optional ByVal alignRight As Boolean = False) As Shape
+
+    Dim shp As Shape
+
+    Set shp = ws.Shapes.AddTextbox( _
+        Orientation:=msoTextOrientationHorizontal, _
+        Left:=leftPos, _
+        Top:=topPos, _
+        Width:=shapeWidth, _
+        Height:=shapeHeight)
+
+    shp.Name = shapeName
+    shp.Fill.Visible = msoFalse
+    shp.Line.Visible = msoFalse
+
+    With shp.TextFrame2
+        .MarginLeft = 0
+        .MarginRight = 0
+        .MarginTop = 0
+        .MarginBottom = 0
+        .WordWrap = msoTrue
+        .VerticalAnchor = msoAnchorMiddle
+
+        .TextRange.Text = textValue
+        .TextRange.Font.Name = "Arial"
+        .TextRange.Font.Size = fontSize
+        .TextRange.Font.Fill.ForeColor.RGB = fontColor
+
+        If makeBold Then
+            .TextRange.Font.Bold = msoTrue
+        Else
+            .TextRange.Font.Bold = msoFalse
+        End If
+
+        If alignRight Then
+            .TextRange.ParagraphFormat.Alignment = msoAlignRight
+        Else
+            .TextRange.ParagraphFormat.Alignment = msoAlignLeft
+        End If
+    End With
+
+    Set AddTextShape = shp
+
+End Function
+
+
+Private Sub AddSolidRule( _
+    ByVal ws As Worksheet, _
+    ByVal leftPos As Double, _
+    ByVal topPos As Double, _
+    ByVal ruleWidth As Double, _
+    ByVal ruleHeight As Double, _
+    ByVal ruleColor As Long)
+
+    Dim shp As Shape
+
+    Set shp = ws.Shapes.AddShape( _
+        Type:=msoShapeRectangle, _
+        Left:=leftPos, _
+        Top:=topPos, _
+        Width:=ruleWidth, _
+        Height:=ruleHeight)
+
+    shp.Fill.ForeColor.RGB = ruleColor
+    shp.Line.Visible = msoFalse
+
+End Sub
+
+
+'======================================================================
+' NUMERIC HELPERS
+'======================================================================
+Private Sub UpdateMinimum(ByRef currentValue As Double, ByVal newValue As Double)
+    If newValue < currentValue Then currentValue = newValue
+End Sub
+
+
+Private Sub UpdateMaximum(ByRef currentValue As Double, ByVal newValue As Double)
+    If newValue > currentValue Then currentValue = newValue
+End Sub
+
+
+Private Function FloorToStep( _
+    ByVal value As Double, _
+    ByVal stepSize As Double) As Double
+
+    FloorToStep = Int(value / stepSize) * stepSize
+
+End Function
+
+
+Private Function CeilToStep( _
+    ByVal value As Double, _
+    ByVal stepSize As Double) As Double
+
+    CeilToStep = -Int(-value / stepSize) * stepSize
+
+End Function
+
+
+Private Function FormatSigned( _
+    ByVal value As Double, _
+    ByVal formatCode As String) As String
+
+    Dim formatted As String
+
+    formatted = Format(value, formatCode)
+
+    ' Use a typographic minus sign in the presentation layer.
+    If Left$(formatted, 1) = "-" Then
+        formatted = ChrW(&H2212) & Mid$(formatted, 2)
+    End If
+
+    FormatSigned = formatted
+
+End Function
+
