@@ -1,0 +1,489 @@
+Option Explicit
+
+'====================================================================
+' BUILD TENOR EXCESS-RETURN DISTRIBUTION + BOX PLOT
+'
+' Purpose:
+'   Build the data behind the distribution chart:
+'       1M vs ON
+'       3M vs ON
+'       6M vs ON
+'
+'   Each tenor return is compared with compounded ON over the
+'   EXACT SAME start date and adjusted maturity.
+'
+'   R_CURVE must already be available in VBA.
+'
+' Source curve must include headers:
+'   Date | ON | 1M | 3M | 6M
+'
+' The macro:
+'   1. Reads the curve
+'   2. Uses R_CURVE to calculate matched-horizon factors
+'   3. Stores excess returns in bp
+'   4. Creates an Excel Box & Whisker chart
+'
+'====================================================================
+
+Public Sub Build_Tenor_Distribution_Chart()
+
+    '==============================================================
+    ' USER SETTINGS
+    '==============================================================
+
+    Dim SOURCE_SHEET As String
+    Dim SOURCE_RANGE As String
+
+    Dim OUTPUT_SHEET As String
+    Dim OUTPUT_CELL As String
+
+    Dim CHART_CELL As String
+
+    Dim ROLL_ADJ As Long
+
+    SOURCE_SHEET = "Curve"
+    SOURCE_RANGE = "A1:E1128"
+
+    OUTPUT_SHEET = "Analysis"
+    OUTPUT_CELL = "Q1"
+
+    ' Top-left position of the chart
+    CHART_CELL = "U2"
+
+    ' 0 = previous available curve date
+    ' 1 = next available curve date
+    ROLL_ADJ = 0
+
+
+    '==============================================================
+    ' VARIABLES
+    '==============================================================
+
+    Dim wsSource As Worksheet
+    Dim wsOutput As Worksheet
+
+    Dim tbl As Range
+    Dim outCell As Range
+
+    Dim v As Variant
+
+    Dim colDate As Long
+
+    Dim i As Long
+    Dim r As Long
+
+    Dim startDate As Double
+    Dim lastCurveDate As Double
+
+    Dim excess1M As Variant
+    Dim excess3M As Variant
+    Dim excess6M As Variant
+
+    Dim lastOutRow As Long
+
+    Dim chartObj As ChartObject
+    Dim chartRange As Range
+
+
+    '==============================================================
+    ' SET SOURCE / OUTPUT
+    '==============================================================
+
+    Set wsSource = ThisWorkbook.Worksheets(SOURCE_SHEET)
+    Set wsOutput = ThisWorkbook.Worksheets(OUTPUT_SHEET)
+
+    Set tbl = wsSource.Range(SOURCE_RANGE)
+    Set outCell = wsOutput.Range(OUTPUT_CELL)
+
+    v = tbl.Value2
+
+
+    '==============================================================
+    ' FIND DATE COLUMN
+    '==============================================================
+
+    colDate = FindHeaderDistribution(v, "Date")
+
+    If colDate = 0 Then
+        MsgBox "Date header not found.", vbExclamation
+        Exit Sub
+    End If
+
+
+    '==============================================================
+    ' LAST CURVE DATE
+    '==============================================================
+
+    lastCurveDate = CDbl(v(UBound(v, 1), colDate))
+
+
+    '==============================================================
+    ' CLEAR OLD DATA
+    '==============================================================
+
+    wsOutput.Range( _
+        outCell, _
+        outCell.Offset(UBound(v, 1) + 5, 3) _
+    ).ClearContents
+
+
+    '==============================================================
+    ' HEADERS
+    '==============================================================
+
+    outCell.Offset(0, 0).Value = "StartDate"
+    outCell.Offset(0, 1).Value = "1M Excess vs ON (bp)"
+    outCell.Offset(0, 2).Value = "3M Excess vs ON (bp)"
+    outCell.Offset(0, 3).Value = "6M Excess vs ON (bp)"
+
+
+    '==============================================================
+    ' BUILD DATASET
+    '==============================================================
+
+    r = 1
+
+    For i = 2 To UBound(v, 1)
+
+        If IsNumeric(v(i, colDate)) Then
+
+            startDate = CDbl(v(i, colDate))
+
+            outCell.Offset(r, 0).Value = CDate(startDate)
+
+
+            '------------------------------------------------------
+            ' 1M EXCESS RETURN
+            '------------------------------------------------------
+
+            excess1M = MatchedExcessReturn( _
+                startDate, _
+                tbl, _
+                "1M", _
+                1, _
+                ROLL_ADJ, _
+                lastCurveDate)
+
+            If IsNumeric(excess1M) Then
+                outCell.Offset(r, 1).Value = CDbl(excess1M)
+            End If
+
+
+            '------------------------------------------------------
+            ' 3M EXCESS RETURN
+            '------------------------------------------------------
+
+            excess3M = MatchedExcessReturn( _
+                startDate, _
+                tbl, _
+                "3M", _
+                3, _
+                ROLL_ADJ, _
+                lastCurveDate)
+
+            If IsNumeric(excess3M) Then
+                outCell.Offset(r, 2).Value = CDbl(excess3M)
+            End If
+
+
+            '------------------------------------------------------
+            ' 6M EXCESS RETURN
+            '------------------------------------------------------
+
+            excess6M = MatchedExcessReturn( _
+                startDate, _
+                tbl, _
+                "6M", _
+                6, _
+                ROLL_ADJ, _
+                lastCurveDate)
+
+            If IsNumeric(excess6M) Then
+                outCell.Offset(r, 3).Value = CDbl(excess6M)
+            End If
+
+        End If
+
+        r = r + 1
+
+    Next i
+
+
+    '==============================================================
+    ' FORMAT DATA
+    '==============================================================
+
+    lastOutRow = outCell.Row + r - 1
+
+    wsOutput.Range( _
+        outCell, _
+        outCell.Offset(0, 3) _
+    ).Font.Bold = True
+
+    wsOutput.Range( _
+        outCell.Offset(1, 0), _
+        wsOutput.Cells(lastOutRow, outCell.Column) _
+    ).NumberFormat = "dd-mmm-yyyy"
+
+    wsOutput.Range( _
+        outCell.Offset(1, 1), _
+        wsOutput.Cells(lastOutRow, outCell.Column + 3) _
+    ).NumberFormat = "0.0"
+
+
+    '==============================================================
+    ' DELETE PREVIOUS CHART CREATED BY THIS MACRO
+    '==============================================================
+
+    On Error Resume Next
+    wsOutput.ChartObjects("TenorDistributionChart").Delete
+    On Error GoTo 0
+
+
+    '==============================================================
+    ' CREATE BOX & WHISKER CHART
+    '
+    ' Excel chart type 121 = Box & Whisker
+    '==============================================================
+
+    Set chartRange = wsOutput.Range( _
+        outCell.Offset(0, 1), _
+        wsOutput.Cells(lastOutRow, outCell.Column + 3) _
+    )
+
+    Set chartObj = wsOutput.ChartObjects.Add( _
+        Left:=wsOutput.Range(CHART_CELL).Left, _
+        Top:=wsOutput.Range(CHART_CELL).Top, _
+        Width:=620, _
+        Height:=360)
+
+    chartObj.Name = "TenorDistributionChart"
+
+
+    With chartObj.Chart
+
+        .SetSourceData Source:=chartRange
+
+        ' Box & Whisker
+        .ChartType = 121
+
+        .HasTitle = True
+
+        .ChartTitle.Text = _
+            "Longer tenor materially increased outcome dispersion"
+
+        .HasLegend = False
+
+
+        '----------------------------------------------------------
+        ' Y AXIS
+        '----------------------------------------------------------
+
+        With .Axes(xlValue)
+
+            .HasTitle = True
+            .AxisTitle.Text = "Realized excess return vs ON (bp)"
+
+            .MajorGridlines.Format.Line.ForeColor.RGB = _
+                RGB(225, 225, 225)
+
+            .MajorGridlines.Format.Line.Weight = 0.5
+
+        End With
+
+
+        '----------------------------------------------------------
+        ' X AXIS
+        '----------------------------------------------------------
+
+        With .Axes(xlCategory)
+
+            .HasTitle = False
+
+        End With
+
+
+        '----------------------------------------------------------
+        ' CLEAN CHART AREA
+        '----------------------------------------------------------
+
+        .ChartArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+        .ChartArea.Format.Line.Visible = msoFalse
+
+        .PlotArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+        .PlotArea.Format.Line.Visible = msoFalse
+
+
+        '----------------------------------------------------------
+        ' TITLE FORMAT
+        '----------------------------------------------------------
+
+        With .ChartTitle.Format.TextFrame2.TextRange.Font
+
+            .Size = 15
+            .Bold = msoTrue
+            .Fill.ForeColor.RGB = RGB(35, 35, 35)
+
+        End With
+
+
+        '----------------------------------------------------------
+        ' SERIES FORMAT
+        '
+        ' Keep restrained / presentation style.
+        '----------------------------------------------------------
+
+        Dim s As Series
+
+        For Each s In .SeriesCollection
+
+            s.Format.Fill.ForeColor.RGB = RGB(23, 54, 93)
+            s.Format.Fill.Transparency = 15
+
+            s.Format.Line.ForeColor.RGB = RGB(23, 54, 93)
+            s.Format.Line.Weight = 1
+
+        Next s
+
+    End With
+
+
+    MsgBox _
+        "Distribution dataset and chart created.", _
+        vbInformation
+
+End Sub
+
+
+'====================================================================
+' MATCHED EXCESS RETURN
+'
+' Returns:
+'   Term return - compounded ON return
+'   expressed in basis points
+'
+' Example:
+'   +15 = term investment beat ON by 15 bp
+'   -20 = ON beat term investment by 20 bp
+'
+'====================================================================
+
+Private Function MatchedExcessReturn( _
+    ByVal startDate As Double, _
+    ByVal tbl As Range, _
+    ByVal tenor As String, _
+    ByVal monthsForward As Long, _
+    ByVal rollAdj As Long, _
+    ByVal lastCurveDate As Double) As Variant
+
+    Dim targetMat As Double
+
+    Dim maturity As Variant
+
+    Dim factorTerm As Variant
+    Dim factorON As Variant
+
+
+    MatchedExcessReturn = Empty
+
+
+    '--------------------------------------------------------------
+    ' TARGET MATURITY
+    '--------------------------------------------------------------
+
+    targetMat = CDbl(DateAdd( _
+        "m", _
+        monthsForward, _
+        CDate(startDate)))
+
+
+    ' Full historical period must exist
+    If targetMat > lastCurveDate Then Exit Function
+
+
+    '--------------------------------------------------------------
+    ' ACTUAL MATURITY FROM R_CURVE
+    '--------------------------------------------------------------
+
+    maturity = R_CURVE( _
+        startDate, _
+        tbl, _
+        tenor, _
+        rollAdj, _
+        "DATE", _
+        0, _
+        targetMat)
+
+
+    If Not IsNumeric(maturity) And Not IsDate(maturity) Then
+        Exit Function
+    End If
+
+
+    '--------------------------------------------------------------
+    ' TERM FACTOR
+    '--------------------------------------------------------------
+
+    factorTerm = R_CURVE( _
+        startDate, _
+        tbl, _
+        tenor, _
+        rollAdj, _
+        "FACTOR", _
+        0, _
+        maturity)
+
+
+    '--------------------------------------------------------------
+    ' ON FACTOR OVER EXACT SAME PERIOD
+    '--------------------------------------------------------------
+
+    factorON = R_CURVE( _
+        startDate, _
+        tbl, _
+        "ON", _
+        rollAdj, _
+        "FACTOR", _
+        0, _
+        maturity)
+
+
+    If Not IsNumeric(factorTerm) Then Exit Function
+    If Not IsNumeric(factorON) Then Exit Function
+
+
+    '--------------------------------------------------------------
+    ' EXCESS RETURN IN BASIS POINTS
+    '--------------------------------------------------------------
+
+    MatchedExcessReturn = _
+        (CDbl(factorTerm) - CDbl(factorON)) * 10000
+
+End Function
+
+
+'====================================================================
+' FIND HEADER
+'====================================================================
+
+Private Function FindHeaderDistribution( _
+    ByVal v As Variant, _
+    ByVal headerName As String) As Long
+
+    Dim j As Long
+
+    FindHeaderDistribution = 0
+
+    For j = 1 To UBound(v, 2)
+
+        If UCase(Trim(CStr(v(1, j)))) = _
+           UCase(Trim(headerName)) Then
+
+            FindHeaderDistribution = j
+            Exit Function
+
+        End If
+
+    Next j
+
+End Function
