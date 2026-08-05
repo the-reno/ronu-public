@@ -1,0 +1,420 @@
+Option Explicit
+
+'=======================================================================
+' RATES ENGINE - one function, vector access to the curve   (FINAL)
+'
+'   R_CURVE(start, table, tenor, adj, [type], [n], [maturity])
+'
+'   start    : anchor date. Must lie inside the curve span. Rolls are
+'              start +1, +2, .. tenor periods, snapped onto curve dates.
+'   table    : header-inclusive curve block. Row 1 = headers ("Date",
+'              "ON","1M",...), column 1 = dates strictly ascending.
+'              In curve_v2.xlsm the workbook name RateTable points at it.
+'   tenor    : ONE string driving BOTH the roll step and the rate column:
+'              "ON" (= 1 day), "1D", "1M", "3M", "2Y", ...
+'   adj      : 1 = snap forward to next curve date, 0 = back to previous
+'   type     : "ALL" (default) -> Date | Rate | Days | Factor matrix
+'              with a header row on the full spill; "DATE"/"RATE"/
+'              "DAYS"/"FACTOR" -> that column as a vector; "HELP" ->
+'              spills a usage card (other args ignored).
+'   n        : which schedule row: omitted = all rows (spills);
+'              1 = START; 2 = first roll; ... ; 0 = MATURITY (Factor
+'              there is the TOTAL); -1 = one before last.
+'   maturity : OPTIONAL deal maturity.
+'              OMITTED -> NATURAL maturity: every roll gets a FULL tenor
+'              period. The last roll inside the curve (its rate is fixed
+'              there) runs one whole tenor beyond the curve end - e.g.
+'              last 1M roll 2-Jul-26 accrues 31 days to 2-Aug-26. The
+'              maturity row shows that date and the TOTAL factor; its
+'              Rate is the fixing there if the date happens to lie on
+'              the curve, blank otherwise (nothing is fixed past the
+'              curve).
+'              GIVEN -> snapped onto the curve WITH THE SAME adj RULE as
+'              the rolls; schedule, stub and factor run to that snapped
+'              date (rolls never pass it). Must land inside the curve
+'              and after start.
+'
+'   ROW SEMANTICS (forward-looking, every row self-audits):
+'     Date   = a schedule date; row 1 = start, last row = MATURITY.
+'     Rate   = the rate fixed ON that date, earned over the period
+'              starting there. On the maturity row it is informational
+'              only (no period starts there).
+'     Days   = actual calendar days of the period starting there, incl.
+'              weekends/holidays/gaps. Maturity row = 0, so
+'              SUM(Days) = maturity - start for EVERY tenor.
+'     Factor = cumulative ACT/360 growth from start TO that date.
+'              Row 1 = 1. Every next row checks in-sheet:
+'                Factor(next) = Factor * (1 + Rate * Days / 360)
+'              Last row's Factor = TOTAL growth start -> maturity.
+'
+'   ON / GAP CONVENTION:
+'     With "ON" the schedule lands on every curve date; Days spans the
+'     actual gap (Fri row: 3). The rate accrues SIMPLE over the gap -
+'     weekend carry at the last fixing, no daily compounding across
+'     non-business days (standard SOFR convention). Holes in the curve
+'     data are treated the same way. Natural maturity for ON = last
+'     curve date + 1 day.
+'
+'   NATURAL MATURITY CONVENTION:
+'     The final date = last roll + one tenor (deal-confirm logic: value
+'     date + tenor), applied ONCE and terminally - all interior rolls
+'     stay anchored on start, so no drift can cascade. The alternative
+'     (next anchored target from start) differs only in the final
+'     Days/date, never in earlier rows.
+'
+'   Examples:
+'     =R_CURVE(B2,RateTable,"1M",0)                    natural maturity
+'     =R_CURVE(B2,RateTable,"1M",0,"FACTOR",0)*1e6     1mm to natural maturity
+'     =R_CURVE(B2,RateTable,"1M",0,"ALL",,C2)          to the maturity in C2
+'     =R_CURVE(B2,RateTable,"1M",0,"DATE",0)           the maturity date itself
+'     =R_CURVE(B2,RateTable,"1M",0,"HELP")             in-sheet manual
+'
+'   Run R_CURVE_Register once (Alt+F8) to load the argument help into
+'   the Function Wizard (fx); Auto_Open re-registers on every open.
+'
+'   Errors: #START #TENOR #ADJ #TYPE #TABLE #ORDER #NODATE #MAT #RATE #N
+'   Missing rate cell: that Rate shows #RATE and every Factor AFTER it
+'   is #RATE - the engine never compounds through a hole. A start
+'   outside the curve span is #NODATE, never silently re-anchored.
+'=======================================================================
+
+Function R_CURVE(ByVal start As Variant, table As Range, ByVal tenor As Variant, _
+                 ByVal adj As Variant, Optional ByVal outType As String = "ALL", _
+                 Optional ByVal n As Variant, Optional ByVal maturity As Variant) As Variant
+    Dim v As Variant, nR As Long, nC As Long, nD As Long
+    Dim d() As Double, col As Long
+    Dim f As String, q As Long, s As Double, t As String
+    Dim sched() As Long, cnt As Long, matIdx As Long, matS As Double
+    Dim m As Long, dS() As Double, rt() As Variant, dy() As Variant, fc() As Variant
+    Dim g As Double, bad As Boolean, r As Variant
+    Dim i As Long, k As Long, tgt As Double
+    Dim out() As Variant, j As Long
+
+    ' ---- type first: HELP short-circuits everything else ----
+    t = UCase(Trim(outType))
+    If t = "HELP" Then R_CURVE = HelpBlock(): Exit Function
+    If t <> "ALL" And t <> "DATE" And t <> "RATE" And t <> "DAYS" And t <> "FACTOR" Then
+        R_CURVE = "#TYPE": Exit Function
+    End If
+
+    ' ---- validate the scalar inputs ----
+    s = ToSerial(start)
+    If s < 0 Then R_CURVE = "#START": Exit Function
+    If Not ParseTenor(tenor, f, q) Then R_CURVE = "#TENOR": Exit Function
+    If Not IsNumeric(adj) Then R_CURVE = "#ADJ": Exit Function
+    If CDbl(adj) <> 0 And CDbl(adj) <> 1 Then R_CURVE = "#ADJ": Exit Function
+
+    ' ---- read the table once, validate it ----
+    v = table.Value2
+    If Not IsArray(v) Then R_CURVE = "#TABLE": Exit Function
+    nR = UBound(v, 1): nC = UBound(v, 2)
+    If nR < 2 Or nC < 2 Then R_CURVE = "#TABLE": Exit Function
+    If VarType(v(1, 1)) <> vbString Then R_CURVE = "#TABLE": Exit Function
+
+    nD = nR - 1
+    ReDim d(1 To nD)
+    For i = 2 To nR
+        If IsEmpty(v(i, 1)) Or Not IsNumeric(v(i, 1)) Then R_CURVE = "#TABLE": Exit Function
+        d(i - 1) = CDbl(v(i, 1))
+        If d(i - 1) <= 0 Then R_CURVE = "#TABLE": Exit Function
+        If i > 2 Then
+            If d(i - 1) <= d(i - 2) Then R_CURVE = "#ORDER": Exit Function
+        End If
+    Next i
+
+    ' ---- start must lie inside the curve span (never re-anchored) ----
+    If s < d(1) Or s > d(nD) Then R_CURVE = "#NODATE": Exit Function
+
+    ' ---- find the tenor column ----
+    col = 0
+    For i = 2 To nC
+        If VarType(v(1, i)) = vbString Then
+            If UCase(Trim(v(1, i))) = UCase(Trim(CStr(tenor))) Then col = i: Exit For
+        End If
+    Next i
+    If col = 0 Then R_CURVE = "#TENOR": Exit Function
+
+    ReDim sched(1 To nD)
+
+    If IsMissing(maturity) Then
+        ' ============ NATURAL MATURITY: full final tenor period ========
+        ' Rolls inside the curve; the last one accrues one whole tenor
+        ' beyond the curve end (its rate is already fixed there).
+        cnt = 0: k = 0
+        Do
+            tgt = Target(s, f, k * q)
+            If tgt > d(nD) Then Exit Do
+            i = Snap(d, nD, tgt, CDbl(adj) = 1)
+            If i > 0 Then
+                If cnt = 0 Then
+                    cnt = 1: sched(1) = i
+                ElseIf i <> sched(cnt) Then
+                    cnt = cnt + 1: sched(cnt) = i
+                End If
+            End If
+            k = k + 1
+        Loop
+        If cnt < 1 Then R_CURVE = "#NODATE": Exit Function
+        matS = Target(d(sched(cnt)), f, q)               ' last roll + one full tenor
+        m = cnt + 1                                      ' + maturity row
+        ReDim dS(1 To m): ReDim rt(1 To m): ReDim dy(1 To m): ReDim fc(1 To m)
+        g = 1: bad = False: fc(1) = 1
+        For i = 1 To cnt
+            dS(i) = d(sched(i))
+            r = v(sched(i) + 1, col)                     ' rate fixed at this roll
+            If IsEmpty(r) Or Not IsNumeric(r) Then
+                rt(i) = "#RATE": bad = True
+            Else
+                rt(i) = CDbl(r)
+            End If
+            If i < cnt Then dy(i) = d(sched(i + 1)) - d(sched(i)) Else dy(i) = matS - d(sched(i))
+            If bad Then
+                fc(i + 1) = "#RATE"
+            Else
+                g = g * (1 + CDbl(r) * dy(i) / 360)
+                fc(i + 1) = g
+            End If
+        Next i
+        dS(m) = matS: rt(m) = "": dy(m) = 0
+        i = Snap(d, nD, matS, True)                      ' show the fixing if maturity is on the curve
+        If i > 0 Then
+            If d(i) = matS Then If IsNumeric(v(i + 1, col)) Then rt(m) = CDbl(v(i + 1, col))
+        End If
+    Else
+        ' ============ EXPLICIT MATURITY: snapped per adj, stub =========
+        matS = ToSerial(maturity)
+        If matS < 0 Then R_CURVE = "#MAT": Exit Function
+        If matS > d(nD) Then R_CURVE = "#MAT": Exit Function
+        matIdx = Snap(d, nD, matS, CDbl(adj) = 1)        ' the rollover convention
+        If matIdx = 0 Then R_CURVE = "#MAT": Exit Function
+        matS = d(matIdx)
+        If matS <= s Then R_CURVE = "#MAT": Exit Function
+
+        cnt = 0: k = 0
+        Do
+            tgt = Target(s, f, k * q)
+            If tgt > matS Then Exit Do
+            i = Snap(d, nD, tgt, CDbl(adj) = 1)
+            If i > 0 And i <= matIdx Then
+                If cnt = 0 Then
+                    cnt = 1: sched(1) = i
+                ElseIf i <> sched(cnt) Then
+                    cnt = cnt + 1: sched(cnt) = i
+                End If
+            End If
+            k = k + 1
+        Loop
+        If cnt >= 1 Then
+            If sched(cnt) < matIdx Then cnt = cnt + 1: sched(cnt) = matIdx
+        End If
+        If cnt < 2 Then R_CURVE = "#NODATE": Exit Function
+        m = cnt
+        ReDim dS(1 To m): ReDim rt(1 To m): ReDim dy(1 To m): ReDim fc(1 To m)
+        g = 1: bad = False: fc(1) = 1
+        For i = 1 To m
+            dS(i) = d(sched(i))
+            r = v(sched(i) + 1, col)                     ' rate at this schedule date
+            If IsEmpty(r) Or Not IsNumeric(r) Then
+                rt(i) = "#RATE"
+                If i < m Then bad = True                 ' a hole before maturity kills compounding
+            Else
+                rt(i) = CDbl(r)
+            End If
+            If i < m Then
+                dy(i) = d(sched(i + 1)) - d(sched(i))    ' actual days incl. weekends/gaps
+                If bad Then
+                    fc(i + 1) = "#RATE"
+                Else
+                    g = g * (1 + CDbl(r) * dy(i) / 360)
+                    fc(i + 1) = g
+                End If
+            Else
+                dy(i) = 0                                ' maturity: nothing remains
+            End If
+        Next i
+    End If
+
+    ' ---- return what was asked ----
+    If IsMissing(n) Then
+        If t = "ALL" Then
+            ReDim out(0 To m, 1 To 4)                    ' row 0 = headers
+            out(0, 1) = "Date": out(0, 2) = "Rate"
+            out(0, 3) = "Days": out(0, 4) = "Factor"
+            For i = 1 To m
+                out(i, 1) = CDate(dS(i))
+                out(i, 2) = rt(i)
+                out(i, 3) = dy(i)
+                out(i, 4) = fc(i)
+            Next i
+        Else
+            ReDim out(1 To m, 1 To 1)
+            For i = 1 To m
+                out(i, 1) = OnePick(t, dS(i), rt(i), dy(i), fc(i))
+            Next i
+        End If
+        R_CURVE = out
+    Else
+        j = PickIdx(n, m)                                ' 1 = start row, 0 = maturity
+        If j = 0 Then R_CURVE = "#N": Exit Function
+        If t = "ALL" Then
+            ReDim out(1 To 1, 1 To 4)
+            out(1, 1) = CDate(dS(j))
+            out(1, 2) = rt(j)
+            out(1, 3) = dy(j)
+            out(1, 4) = fc(j)
+            R_CURVE = out
+        Else
+            R_CURVE = OnePick(t, dS(j), rt(j), dy(j), fc(j))
+        End If
+    End If
+End Function
+
+'======================================================================
+' R_CURVE_Register - loads function + argument help into the Function
+' Wizard (fx). Auto_Open re-runs it every time the workbook opens.
+'======================================================================
+Public Sub R_CURVE_Register()
+    On Error GoTo fail
+    If Not ThisWorkbook Is ActiveWorkbook Then ThisWorkbook.Activate   ' MacroOptions targets the ACTIVE workbook
+    Application.MacroOptions Macro:="R_CURVE", _
+        Description:="Rate curve vectors from Start to Maturity: schedule dates, rate fixed at each date, actual days, cumulative ACT/360 factor. Every roll gets a full tenor period. Use OutType HELP for the manual.", _
+        Category:="Rates Engine", _
+        ArgumentDescriptions:=Array( _
+            "Anchor date inside the curve span. Row 1 of the output IS this date (Factor 1). Rolls = Start +1,+2,.. tenor periods snapped to curve dates.", _
+            "Curve block INCLUDING the header row. Row 1: Date, ON, 1M, 3M.. Column 1: dates strictly ascending. E.g. RateTable.", _
+            "One string sets BOTH the roll step and the rate column: ""ON"" (=1 day), ""1D"", ""1M"", ""3M"", ""2Y"" ..", _
+            "Snap rule for rolled dates AND an explicit maturity: 1 = forward to the NEXT curve date, 0 = back to the PREVIOUS.", _
+            "What to return: ""ALL"" = Date|Rate|Days|Factor matrix with headers (default); ""DATE"", ""RATE"", ""DAYS"", ""FACTOR"" = that vector; ""HELP"" = manual.", _
+            "Which row: omit = spill ALL rows. 1 = Start, 2 = first roll.. 0 = MATURITY (Factor = total), -1 = one before last..", _
+            "Optional. OMIT = natural maturity: the last roll runs one FULL tenor beyond the curve at its fixed rate. GIVEN = snapped per adj; runs to it.")
+    MsgBox "R_CURVE help registered. Close and reopen the Function Arguments dialog to see it.", vbInformation
+    Exit Sub
+fail:
+    MsgBox "Registration FAILED: " & Err.Number & " - " & Err.Description, vbExclamation
+End Sub
+
+Public Sub Auto_Open()
+    On Error Resume Next          ' never block opening over cosmetics
+    If Not ThisWorkbook Is ActiveWorkbook Then ThisWorkbook.Activate
+    Application.MacroOptions Macro:="R_CURVE", _
+        Description:="Rate curve vectors from Start to Maturity: schedule dates, rate fixed at each date, actual days, cumulative ACT/360 factor. Every roll gets a full tenor period. Use OutType HELP for the manual."
+    On Error GoTo 0
+End Sub
+
+'----------------------------------------------------------------------
+' small helpers - each does one obvious thing
+'----------------------------------------------------------------------
+
+' the in-sheet manual, spilled as a 2-column block
+Private Function HelpBlock() As Variant
+    Dim h(1 To 19, 1 To 2) As Variant
+    h(1, 1) = "R_CURVE":    h(1, 2) = "Vector access to a rate curve. One row per schedule date: START .. rolls .. MATURITY."
+    h(2, 1) = "syntax":     h(2, 2) = "=R_CURVE(start, table, tenor, adj, [type], [n], [maturity])"
+    h(3, 1) = "start":      h(3, 2) = "Anchor date inside the curve span = row 1. Rolls = start +1,+2,.. tenor periods, snapped."
+    h(4, 1) = "table":      h(4, 2) = "Curve block incl. headers. Row 1: Date, ON, 1M, 3M.. Col 1: dates ascending."
+    h(5, 1) = "tenor":      h(5, 2) = "One string drives BOTH the roll step and the rate column: ON, 1D, 1M, 3M, 2Y.."
+    h(6, 1) = "adj":        h(6, 2) = "1 = snap forward, 0 = snap back. Applies to every roll and an explicit maturity."
+    h(7, 1) = "maturity":   h(7, 2) = "Omit = last roll runs one FULL tenor beyond the curve (rate already fixed). Given = snapped per adj."
+    h(8, 1) = "type ALL":   h(8, 2) = "Date | Rate | Days | Factor audit matrix with a header row (default)."
+    h(9, 1) = "type X":     h(9, 2) = "DATE, RATE, DAYS or FACTOR returns just that column as a vector (no header)."
+    h(10, 1) = "Rate":      h(10, 2) = "Fixed ON that date, earned over the period starting there. Maturity row: informational."
+    h(11, 1) = "Days":      h(11, 2) = "Actual days to the next row incl. weekends/gaps. Maturity row = 0. SUM = maturity - start."
+    h(12, 1) = "Factor":    h(12, 2) = "Cumulative ACT/360 growth AT that date. Start = 1. Maturity = TOTAL."
+    h(13, 1) = "audit":     h(13, 2) = "Every row checks in-sheet: FactorNext = Factor x (1 + Rate x Days/360)."
+    h(14, 1) = "last roll": h(14, 2) = "Example: last 1M roll 2-Jul-26 accrues 31 days to 2-Aug-26 at its fixed rate."
+    h(15, 1) = "n":         h(15, 2) = "Omit = spill all. 1 = start, 2 = first roll.. 0 = maturity, -1 = before last."
+    h(16, 1) = "example":   h(16, 2) = "=R_CURVE(B2,RateTable,""1M"",0,""FACTOR"",0)*1000000 grows 1mm to maturity."
+    h(17, 1) = "ON gaps":   h(17, 2) = "With ON, Fri Days = 3: weekend carries at Fri's rate, simple ACT/360 (SOFR convention)."
+    h(18, 1) = "errors":    h(18, 2) = "#START #TENOR #ADJ #TYPE #TABLE #ORDER #NODATE #MAT #RATE #N - loud, never silent."
+    h(19, 1) = "wizard":    h(19, 2) = "Run R_CURVE_Register once (Alt+F8) to load argument help into the fx wizard."
+    HelpBlock = h
+End Function
+
+' pick the value matching the requested type
+Private Function OnePick(ByVal t As String, ByVal dateSerial As Double, _
+                         ByVal rate As Variant, ByVal dd As Variant, _
+                         ByVal fact As Variant) As Variant
+    Select Case t
+        Case "DATE":   OnePick = CDate(dateSerial)
+        Case "RATE":   OnePick = rate
+        Case "DAYS":   OnePick = dd
+        Case "FACTOR": OnePick = fact
+    End Select
+End Function
+
+' any date-ish value -> serial, -1 = invalid
+Private Function ToSerial(ByVal x As Variant) As Double
+    On Error GoTo bad
+    If IsObject(x) Then x = x.Value
+    If IsError(x) Then GoTo bad
+    If IsArray(x) Then GoTo bad
+    If IsNumeric(x) Then
+        If CDbl(x) > 0 Then ToSerial = CDbl(x) Else ToSerial = -1
+    ElseIf IsDate(x) Then
+        ToSerial = CDbl(CDate(x))
+    Else
+        ToSerial = -1
+    End If
+    Exit Function
+bad:
+    ToSerial = -1
+End Function
+
+' "ON"/"1D"/"1M"/"2Y" -> frequency char + quantity (>= 1)
+Private Function ParseTenor(ByVal tenor As Variant, ByRef f As String, ByRef q As Long) As Boolean
+    Dim t As String, num As String
+    ParseTenor = False
+    If IsError(tenor) Then Exit Function
+    t = UCase(Trim(CStr(tenor)))
+    If t = "ON" Then f = "D": q = 1: ParseTenor = True: Exit Function
+    If Len(t) < 2 Then Exit Function
+    f = Right(t, 1)
+    If f <> "D" And f <> "M" And f <> "Y" Then Exit Function
+    num = Left(t, Len(t) - 1)
+    If num Like "*[!0-9]*" Then Exit Function
+    q = CLng(num)
+    If q < 1 Then Exit Function
+    ParseTenor = True
+End Function
+
+' serial of a date + k periods, always anchored on the given date
+Private Function Target(ByVal startSerial As Double, ByVal f As String, ByVal periods As Long) As Double
+    Select Case f
+        Case "D": Target = startSerial + periods
+        Case "M": Target = CDbl(DateAdd("m", periods, CDate(startSerial)))
+        Case "Y": Target = CDbl(DateAdd("yyyy", periods, CDate(startSerial)))
+    End Select
+End Function
+
+' snap a target onto the curve dates. 0 = outside the span
+Private Function Snap(d() As Double, ByVal nD As Long, ByVal tgt As Double, _
+                      ByVal snapNext As Boolean) As Long
+    Dim i As Long
+    Snap = 0
+    If tgt < d(1) Or tgt > d(nD) Then Exit Function
+    If snapNext Then
+        For i = 1 To nD
+            If d(i) >= tgt Then Snap = i: Exit Function
+        Next i
+    Else
+        For i = nD To 1 Step -1
+            If d(i) <= tgt Then Snap = i: Exit Function
+        Next i
+    End If
+End Function
+
+' resolve the row picker n over m rows: 1..m from top, 0 last, negatives
+' back from last. 0 = invalid / out of range.
+Private Function PickIdx(ByVal n As Variant, ByVal m As Long) As Long
+    Dim p As Long
+    PickIdx = 0
+    If VarType(n) = vbBoolean Then Exit Function
+    If Not IsNumeric(n) Then Exit Function
+    If CDbl(n) <> Int(CDbl(n)) Then Exit Function
+    p = CLng(n)
+    If p >= 1 Then
+        If p <= m Then PickIdx = p
+    Else
+        If m + p >= 1 Then PickIdx = m + p
+    End If
+End Function
