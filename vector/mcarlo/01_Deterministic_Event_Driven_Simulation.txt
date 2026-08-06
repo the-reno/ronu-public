@@ -1,0 +1,1248 @@
+Option Explicit
+
+'====================================================================
+' DETERMINISTIC EVENT-DRIVEN CASH SIMULATION
+'
+' Purpose
+' -------
+' Simulate how CPI / Payroll / FOMC information changes the expected
+' Fed path, how that reprices newly available 1M / 3M / 6M rates,
+' and how $100 invested in rolling ON / 1M / 3M / 6M strategies
+' evolves through one year.
+'
+' Core commitments
+' ----------------
+' 1. CPI / Payroll shocks change EXPECTATIONS, not actual ON.
+' 2. Actual ON changes only when an actual FOMC policy move occurs.
+' 3. Existing locked investments do not reprice when sentiment changes.
+'    New market rates affect a strategy only when it rolls / reinvests.
+' 4. Term rates are generated from the expected future policy path.
+' 5. Strategy returns continue to use the existing R_CURVE engine.
+' 6. User inputs live on a single Sim_Control tab.
+'
+' Dependency
+' ----------
+' Existing workbook function:
+'     R_CURVE(start, table, tenor, adj, type, n, maturity)
+'
+' Workflow
+' --------
+' First time only:
+'     Create_Simple_Simulation_Model
+'
+' Thereafter:
+'     edit Sim_Control and click RUN SIMULATION
+'
+' False Hawkish test:
+'     Run_False_Hawkish_Scenario
+'====================================================================
+
+
+'====================================================================
+' USER ENTRY POINT - INITIAL SETUP
+'====================================================================
+
+Sub Create_Simple_Simulation_Model()
+
+    Dim ws As Worksheet
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("Sim_Control")
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        SIM_CreateControlSheet
+    End If
+
+    Run_Simulation
+
+End Sub
+
+
+'====================================================================
+' MAIN ONE-CLICK SIMULATION
+'====================================================================
+
+Sub Run_Simulation()
+
+    Dim ws As Worksheet
+    Dim wsCurve As Worksheet
+
+    Dim startDate As Date
+    Dim endDate As Date
+
+    Dim capital As Double
+    Dim actualON As Double
+
+    Dim premium1M As Double
+    Dim premium3M As Double
+    Dim premium6M As Double
+
+    Dim lastEventRow As Long
+    Dim nFomc As Long
+
+    Dim fomcDates() As Date
+    Dim expectedMoves() As Double
+    Dim actualMoves() As Double
+
+    Dim d As Date
+
+    Dim i As Long
+    Dim j As Long
+    Dim f As Long
+
+    Dim outRow As Long
+    Dim lastCurveRow As Long
+
+    Dim eventText As String
+
+    Dim rate1M As Double
+    Dim rate3M As Double
+    Dim rate6M As Double
+
+    Dim next1 As Double
+    Dim next2 As Double
+    Dim next3 As Double
+
+    Dim factorON As Double
+    Dim factor1M As Double
+    Dim factor3M As Double
+    Dim factor6M As Double
+
+    Dim tableRange As Range
+    Dim ch As ChartObject
+    Dim s As Series
+
+
+    Set ws = ThisWorkbook.Worksheets("Sim_Control")
+
+    startDate = ws.Range("B3").Value
+    endDate = ws.Range("B4").Value
+
+    capital = ws.Range("B5").Value
+    actualON = ws.Range("B6").Value
+
+    premium1M = ws.Range("B8").Value
+    premium3M = ws.Range("B9").Value
+    premium6M = ws.Range("B10").Value
+
+
+    '----------------------------------------------------------------
+    ' Sort event table
+    '----------------------------------------------------------------
+
+    lastEventRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+
+    With ws.Sort
+        .SortFields.Clear
+        .SortFields.Add _
+            Key:=ws.Range("A14:A" & lastEventRow), _
+            SortOn:=xlSortOnValues, _
+            Order:=xlAscending
+
+        .SetRange ws.Range("A13:I" & lastEventRow)
+        .Header = xlYes
+        .Apply
+    End With
+
+
+    '----------------------------------------------------------------
+    ' Count active FOMC meetings
+    '----------------------------------------------------------------
+
+    nFomc = 0
+
+    For i = 14 To lastEventRow
+        If UCase(Trim(ws.Cells(i, 2).Value)) = "FOMC" _
+           And ws.Cells(i, 8).Value = True Then
+            nFomc = nFomc + 1
+        End If
+    Next i
+
+    If nFomc = 0 Then
+        MsgBox "No active FOMC meetings found.", vbCritical
+        Exit Sub
+    End If
+
+
+    '----------------------------------------------------------------
+    ' Load FOMC arrays
+    ' C = Initial expected move (bp)
+    ' D = Actual policy move (bp)
+    '----------------------------------------------------------------
+
+    ReDim fomcDates(1 To nFomc)
+    ReDim expectedMoves(1 To nFomc)
+    ReDim actualMoves(1 To nFomc)
+
+    f = 0
+
+    For i = 14 To lastEventRow
+
+        If UCase(Trim(ws.Cells(i, 2).Value)) = "FOMC" _
+           And ws.Cells(i, 8).Value = True Then
+
+            f = f + 1
+
+            fomcDates(f) = ws.Cells(i, 1).Value
+            expectedMoves(f) = Val(ws.Cells(i, 3).Value) / 10000
+            actualMoves(f) = Val(ws.Cells(i, 4).Value) / 10000
+
+        End If
+
+    Next i
+
+
+    '----------------------------------------------------------------
+    ' Create / reset calculation sheet
+    '----------------------------------------------------------------
+
+    Set wsCurve = SIM_GetOrCreateSheet("Sim_Curve")
+
+    wsCurve.Cells.Clear
+
+    For Each ch In wsCurve.ChartObjects
+        ch.Delete
+    Next ch
+
+
+    ' A:E deliberately match the R_CURVE input structure.
+
+    wsCurve.Range("A1:J1").Value = Array( _
+        "Date", _
+        "ON", _
+        "1M", _
+        "3M", _
+        "6M", _
+        "Event", _
+        "Next FOMC", _
+        "2nd FOMC", _
+        "3rd FOMC", _
+        "Cum Next 3")
+
+    outRow = 2
+
+
+    '================================================================
+    ' DAILY SIMULATION
+    '================================================================
+
+    For d = startDate To endDate
+
+        If Weekday(d, vbMonday) <= 5 Then
+
+            '--------------------------------------------------------
+            ' 1. Actual policy decision
+            '
+            ' Actual ON changes only when policy is actually changed.
+            '--------------------------------------------------------
+
+            For i = 1 To nFomc
+
+                If fomcDates(i) = d Then
+
+                    actualON = actualON + actualMoves(i)
+
+                    'Today's expected move is now resolved.
+                    expectedMoves(i) = 0
+
+                End If
+
+            Next i
+
+
+            '--------------------------------------------------------
+            ' 2. Information events change EXPECTATIONS
+            '
+            ' CPI / Payroll / FOMC guidance do not mechanically
+            ' change actual ON.
+            '--------------------------------------------------------
+
+            eventText = ""
+
+            For j = 14 To lastEventRow
+
+                If IsDate(ws.Cells(j, 1).Value) Then
+
+                    If ws.Cells(j, 1).Value = d _
+                       And ws.Cells(j, 8).Value = True Then
+
+                        If eventText <> "" Then
+                            eventText = eventText & " / "
+                        End If
+
+                        eventText = eventText & ws.Cells(j, 2).Value
+
+                        SIM_ApplyExpectationShock _
+                            d, _
+                            Val(ws.Cells(j, 5).Value), _
+                            Val(ws.Cells(j, 6).Value), _
+                            Val(ws.Cells(j, 7).Value), _
+                            fomcDates, _
+                            expectedMoves, _
+                            nFomc
+
+                    End If
+
+                End If
+
+            Next j
+
+
+            '--------------------------------------------------------
+            ' 3. Build newly available term curve from the expected
+            '    policy path.
+            '--------------------------------------------------------
+
+            rate1M = _
+                SIM_ExpectedAverageRate( _
+                    d, _
+                    DateAdd("m", 1, d), _
+                    actualON, _
+                    fomcDates, _
+                    expectedMoves, _
+                    nFomc) _
+                + premium1M
+
+            rate3M = _
+                SIM_ExpectedAverageRate( _
+                    d, _
+                    DateAdd("m", 3, d), _
+                    actualON, _
+                    fomcDates, _
+                    expectedMoves, _
+                    nFomc) _
+                + premium3M
+
+            rate6M = _
+                SIM_ExpectedAverageRate( _
+                    d, _
+                    DateAdd("m", 6, d), _
+                    actualON, _
+                    fomcDates, _
+                    expectedMoves, _
+                    nFomc) _
+                + premium6M
+
+
+            SIM_GetNextThreeExpectedMoves _
+                d, _
+                fomcDates, _
+                expectedMoves, _
+                nFomc, _
+                next1, _
+                next2, _
+                next3
+
+
+            '--------------------------------------------------------
+            ' Daily curve output
+            '--------------------------------------------------------
+
+            wsCurve.Cells(outRow, 1).Value = d
+
+            wsCurve.Cells(outRow, 2).Value = actualON
+            wsCurve.Cells(outRow, 3).Value = rate1M
+            wsCurve.Cells(outRow, 4).Value = rate3M
+            wsCurve.Cells(outRow, 5).Value = rate6M
+
+            wsCurve.Cells(outRow, 6).Value = eventText
+
+            wsCurve.Cells(outRow, 7).Value = next1 * 10000
+            wsCurve.Cells(outRow, 8).Value = next2 * 10000
+            wsCurve.Cells(outRow, 9).Value = next3 * 10000
+            wsCurve.Cells(outRow, 10).Value = _
+                (next1 + next2 + next3) * 10000
+
+            outRow = outRow + 1
+
+        End If
+
+    Next d
+
+    lastCurveRow = outRow - 1
+
+    wsCurve.Columns("A").NumberFormat = "dd-mmm-yyyy"
+    wsCurve.Columns("B:E").NumberFormat = "0.000%"
+    wsCurve.Columns("G:J").NumberFormat = "0.0"
+    wsCurve.Columns.AutoFit
+
+
+    '================================================================
+    ' TERMINAL STRATEGY RETURNS - EXISTING R_CURVE ENGINE
+    '================================================================
+
+    Set tableRange = wsCurve.Range("A1:E" & lastCurveRow)
+
+    factorON = R_CURVE( _
+        startDate, tableRange, "ON", 0, "FACTOR", 0, endDate)
+
+    factor1M = R_CURVE( _
+        startDate, tableRange, "1M", 0, "FACTOR", 0, endDate)
+
+    factor3M = R_CURVE( _
+        startDate, tableRange, "3M", 0, "FACTOR", 0, endDate)
+
+    factor6M = R_CURVE( _
+        startDate, tableRange, "6M", 0, "FACTOR", 0, endDate)
+
+
+    '----------------------------------------------------------------
+    ' Terminal result table on the control sheet
+    '----------------------------------------------------------------
+
+    ws.Range("K1:O20").ClearContents
+
+    ws.Range("K1:O1").Value = Array( _
+        "Strategy", _
+        "Initial Capital", _
+        "Final Wealth", _
+        "1Y Return", _
+        "Excess vs ON (bp)")
+
+    SIM_WriteResult ws, 2, "ON", capital, factorON, factorON
+    SIM_WriteResult ws, 3, "1M", capital, factor1M, factorON
+    SIM_WriteResult ws, 4, "3M", capital, factor3M, factorON
+    SIM_WriteResult ws, 5, "6M", capital, factor6M, factorON
+
+    ws.Range("L2:M5").NumberFormat = "0.0000"
+    ws.Range("N2:N5").NumberFormat = "0.000%"
+    ws.Range("O2:O5").NumberFormat = "0.0"
+
+    ws.Range("K7").Value = "Scenario"
+    ws.Range("L7").Value = ws.Range("B2").Value
+
+    ws.Range("K8").Value = "Starting ON"
+    ws.Range("L8").Value = ws.Range("B6").Value
+    ws.Range("L8").NumberFormat = "0.00%"
+
+
+    '----------------------------------------------------------------
+    ' Build cumulative $100 wealth paths automatically.
+    '----------------------------------------------------------------
+
+    SIM_BuildWealthPath _
+        ws, _
+        wsCurve, _
+        startDate, _
+        endDate, _
+        capital, _
+        tableRange, _
+        lastCurveRow
+
+
+    '================================================================
+    ' RATE CHART - MARKET PERCEPTION / AVAILABLE RATES
+    '================================================================
+
+    On Error Resume Next
+    ws.ChartObjects("SimulationRateChart").Delete
+    On Error GoTo 0
+
+    Set ch = ws.ChartObjects.Add( _
+        Left:=ws.Range("K10").Left, _
+        Top:=ws.Range("K10").Top, _
+        Width:=780, _
+        Height:=420)
+
+    ch.Name = "SimulationRateChart"
+
+    With ch.Chart
+
+        .ChartType = xlLine
+
+        For i = 2 To 5
+
+            Set s = .SeriesCollection.NewSeries
+
+            s.Name = wsCurve.Cells(1, i).Value
+            s.XValues = wsCurve.Range("A2:A" & lastCurveRow)
+            s.Values = wsCurve.Range( _
+                wsCurve.Cells(2, i), _
+                wsCurve.Cells(lastCurveRow, i))
+            s.MarkerStyle = xlMarkerStyleNone
+
+        Next i
+
+        .HasTitle = True
+        .ChartTitle.Text = _
+            "Simulated Rate Path - " & ws.Range("B2").Value
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        With .Axes(xlCategory)
+            .TickLabels.NumberFormat = "mmm-yy"
+        End With
+
+        With .Axes(xlValue)
+            .HasTitle = True
+            .AxisTitle.Text = "Rate"
+            .TickLabels.NumberFormat = "0.00%"
+        End With
+
+    End With
+
+    ws.Columns("A:O").AutoFit
+
+    MsgBox _
+        "Simulation complete." & vbCrLf & _
+        "All key results are on Sim_Control.", _
+        vbInformation
+
+End Sub
+
+
+'====================================================================
+' FALSE HAWKISH VALIDATION SCENARIO
+'
+' Economic story
+' --------------
+' Jan CPI: market prices three 25bp hikes.
+' Feb FOMC: first expected hike is not delivered.
+' Mar Payroll: remaining hikes are removed.
+' Actual ON therefore stays unchanged while term rates temporarily
+' reprice. Rolling strategies only benefit / suffer when they reinvest.
+'====================================================================
+
+Sub Run_False_Hawkish_Scenario()
+
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim i As Long
+    Dim f As Long
+
+    Dim fomcDates(1 To 8) As Date
+
+    Set ws = ThisWorkbook.Worksheets("Sim_Control")
+
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+
+    ws.Range("B2").Value = "False Hawkish"
+
+    ws.Range("B3").Value = DateSerial(2027, 1, 4)
+    ws.Range("B4").Value = DateSerial(2027, 12, 31)
+    ws.Range("B5").Value = 100
+    ws.Range("B6").Value = 0.045
+
+    ws.Range("B8").Value = 0
+    ws.Range("B9").Value = 0
+    ws.Range("B10").Value = 0
+
+
+    'Reset all scenario-specific moves and shocks.
+
+    For i = 14 To lastRow
+
+        ws.Cells(i, 3).Value = 0
+        ws.Cells(i, 4).Value = 0
+
+        ws.Cells(i, 5).Value = 0
+        ws.Cells(i, 6).Value = 0
+        ws.Cells(i, 7).Value = 0
+
+        ws.Cells(i, 8).Value = True
+
+        Select Case UCase(Trim(ws.Cells(i, 2).Value))
+
+            Case "CPI"
+                ws.Cells(i, 9).Value = "No shock"
+
+            Case "PAYROLL"
+                ws.Cells(i, 9).Value = "No shock"
+
+            Case "FOMC"
+                ws.Cells(i, 9).Value = "No policy change"
+
+        End Select
+
+    Next i
+
+
+    'Illustrative FOMC calendar - deliberately not historical.
+
+    fomcDates(1) = DateSerial(2027, 2, 17)
+    fomcDates(2) = DateSerial(2027, 3, 31)
+    fomcDates(3) = DateSerial(2027, 5, 12)
+    fomcDates(4) = DateSerial(2027, 6, 23)
+    fomcDates(5) = DateSerial(2027, 8, 4)
+    fomcDates(6) = DateSerial(2027, 9, 15)
+    fomcDates(7) = DateSerial(2027, 10, 27)
+    fomcDates(8) = DateSerial(2027, 12, 8)
+
+    f = 0
+
+    For i = 14 To lastRow
+
+        If UCase(Trim(ws.Cells(i, 2).Value)) = "FOMC" Then
+
+            f = f + 1
+
+            If f <= 8 Then
+
+                ws.Cells(i, 1).Value = fomcDates(f)
+                ws.Cells(i, 3).Value = 0
+                ws.Cells(i, 4).Value = 0
+                ws.Cells(i, 9).Value = _
+                    "Fed does not deliver expected hike"
+
+            End If
+
+        End If
+
+    Next i
+
+
+    'January CPI: price three future 25bp hikes.
+
+    For i = 14 To lastRow
+
+        If UCase(Trim(ws.Cells(i, 2).Value)) = "CPI" Then
+
+            If Month(ws.Cells(i, 1).Value) = 1 Then
+
+                ws.Cells(i, 5).Value = 25
+                ws.Cells(i, 6).Value = 25
+                ws.Cells(i, 7).Value = 25
+                ws.Cells(i, 9).Value = _
+                    "Strong CPI: market prices three hikes"
+
+                Exit For
+
+            End If
+
+        End If
+
+    Next i
+
+
+    'March Payroll: remove the two remaining expected hikes.
+
+    For i = 14 To lastRow
+
+        If UCase(Trim(ws.Cells(i, 2).Value)) = "PAYROLL" Then
+
+            If Month(ws.Cells(i, 1).Value) = 3 Then
+
+                ws.Cells(i, 5).Value = -25
+                ws.Cells(i, 6).Value = -25
+                ws.Cells(i, 7).Value = 0
+                ws.Cells(i, 9).Value = _
+                    "Weak Payroll: remaining hikes removed"
+
+                Exit For
+
+            End If
+
+        End If
+
+    Next i
+
+    Run_Simulation
+
+End Sub
+
+
+'====================================================================
+' CREATE SINGLE CONTROL TAB
+'====================================================================
+
+Private Sub SIM_CreateControlSheet()
+
+    Dim ws As Worksheet
+    Dim fomcDates(1 To 8) As Date
+
+    Dim r As Long
+    Dim i As Long
+    Dim m As Long
+
+    Dim d As Date
+    Dim btn As Shape
+
+    Set ws = SIM_GetOrCreateSheet("Sim_Control")
+
+    ws.Cells.Clear
+
+
+    '----------------------------------------------------------------
+    ' General inputs
+    '----------------------------------------------------------------
+
+    ws.Range("A1:B1").Value = Array("Simulation Input", "Value")
+
+    ws.Range("A2").Value = "Scenario"
+    ws.Range("B2").Value = "Hawkish CPI"
+
+    ws.Range("A3").Value = "Start Date"
+    ws.Range("B3").Value = DateSerial(2027, 1, 4)
+
+    ws.Range("A4").Value = "End Date"
+    ws.Range("B4").Value = DateSerial(2027, 12, 31)
+
+    ws.Range("A5").Value = "Starting Capital"
+    ws.Range("B5").Value = 100
+
+    ws.Range("A6").Value = "Starting ON"
+    ws.Range("B6").Value = 0.045
+
+    ws.Range("A8").Value = "1M Premium"
+    ws.Range("B8").Value = 0
+
+    ws.Range("A9").Value = "3M Premium"
+    ws.Range("B9").Value = 0
+
+    ws.Range("A10").Value = "6M Premium"
+    ws.Range("B10").Value = 0
+
+    ws.Range("B3:B4").NumberFormat = "dd-mmm-yyyy"
+    ws.Range("B6:B10").NumberFormat = "0.000%"
+
+
+    '----------------------------------------------------------------
+    ' Unified event table
+    '----------------------------------------------------------------
+
+    ws.Range("A13:I13").Value = Array( _
+        "Date", _
+        "Event", _
+        "Initial Expected Move (bp)", _
+        "Actual Policy Move (bp)", _
+        "Shock Next FOMC (bp)", _
+        "Shock 2nd FOMC (bp)", _
+        "Shock 3rd FOMC (bp)", _
+        "Active", _
+        "Note")
+
+    r = 14
+
+
+    'Illustrative FOMC dates for initial Hawkish CPI test.
+
+    fomcDates(1) = DateSerial(2027, 2, 3)
+    fomcDates(2) = DateSerial(2027, 3, 17)
+    fomcDates(3) = DateSerial(2027, 4, 28)
+    fomcDates(4) = DateSerial(2027, 6, 16)
+    fomcDates(5) = DateSerial(2027, 7, 28)
+    fomcDates(6) = DateSerial(2027, 9, 22)
+    fomcDates(7) = DateSerial(2027, 11, 3)
+    fomcDates(8) = DateSerial(2027, 12, 15)
+
+    For i = 1 To 8
+
+        ws.Cells(r, 1).Value = fomcDates(i)
+        ws.Cells(r, 2).Value = "FOMC"
+        ws.Cells(r, 3).Value = 0
+
+        If i <= 3 Then
+            ws.Cells(r, 4).Value = 25
+        Else
+            ws.Cells(r, 4).Value = 0
+        End If
+
+        ws.Cells(r, 5).Value = 0
+        ws.Cells(r, 6).Value = 0
+        ws.Cells(r, 7).Value = 0
+
+        ws.Cells(r, 8).Value = True
+        ws.Cells(r, 9).Value = "Policy decision"
+
+        r = r + 1
+
+    Next i
+
+
+    'Monthly CPI - illustrative release date = 15th, weekend -> Monday.
+
+    For m = 1 To 12
+
+        d = SIM_NextBusinessDay(DateSerial(2027, m, 15))
+
+        ws.Cells(r, 1).Value = d
+        ws.Cells(r, 2).Value = "CPI"
+        ws.Cells(r, 3).Value = 0
+        ws.Cells(r, 4).Value = 0
+
+        If m = 1 Then
+
+            ws.Cells(r, 5).Value = 25
+            ws.Cells(r, 6).Value = 25
+            ws.Cells(r, 7).Value = 25
+            ws.Cells(r, 9).Value = _
+                "Strong CPI: three hikes priced"
+
+        Else
+
+            ws.Cells(r, 5).Value = 0
+            ws.Cells(r, 6).Value = 0
+            ws.Cells(r, 7).Value = 0
+            ws.Cells(r, 9).Value = "No shock"
+
+        End If
+
+        ws.Cells(r, 8).Value = True
+
+        r = r + 1
+
+    Next m
+
+
+    'Monthly Payroll - first Friday.
+
+    For m = 1 To 12
+
+        d = SIM_FirstFriday(2027, m)
+
+        ws.Cells(r, 1).Value = d
+        ws.Cells(r, 2).Value = "Payroll"
+        ws.Cells(r, 3).Value = 0
+        ws.Cells(r, 4).Value = 0
+        ws.Cells(r, 5).Value = 0
+        ws.Cells(r, 6).Value = 0
+        ws.Cells(r, 7).Value = 0
+        ws.Cells(r, 8).Value = True
+        ws.Cells(r, 9).Value = "No shock"
+
+        r = r + 1
+
+    Next m
+
+
+    With ws.Sort
+
+        .SortFields.Clear
+        .SortFields.Add _
+            Key:=ws.Range("A14:A" & r - 1), _
+            SortOn:=xlSortOnValues, _
+            Order:=xlAscending
+
+        .SetRange ws.Range("A13:I" & r - 1)
+        .Header = xlYes
+        .Apply
+
+    End With
+
+    ws.Columns("A").NumberFormat = "dd-mmm-yyyy"
+    ws.Columns("C:G").NumberFormat = "0.0"
+
+
+    '----------------------------------------------------------------
+    ' Instructions
+    '----------------------------------------------------------------
+
+    ws.Range("D2").Value = "How to use"
+    ws.Range("D3").Value = "1. Edit assumptions or events below."
+    ws.Range("D4").Value = "2. Click RUN SIMULATION."
+    ws.Range("D5").Value = _
+        "CPI/Payroll shocks change expectations only."
+    ws.Range("D6").Value = _
+        "Actual Policy Move changes ON on FOMC date."
+
+
+    '----------------------------------------------------------------
+    ' Run button
+    '----------------------------------------------------------------
+
+    On Error Resume Next
+    ws.Shapes("RunSimulationButton").Delete
+    On Error GoTo 0
+
+    Set btn = ws.Shapes.AddShape( _
+        msoShapeRoundedRectangle, _
+        ws.Range("D8").Left, _
+        ws.Range("D8").Top, _
+        150, _
+        35)
+
+    btn.Name = "RunSimulationButton"
+    btn.TextFrame.Characters.Text = "RUN SIMULATION"
+    btn.OnAction = "Run_Simulation"
+
+    ws.Columns("A:O").AutoFit
+
+End Sub
+
+
+'====================================================================
+' BUILD DAILY CUMULATIVE WEALTH PATH
+'
+' This is the CFO outcome chart.
+'
+' Market rates can move immediately after an information shock, but
+' locked strategies continue earning their previously fixed rate until
+' their scheduled rollover. R_CURVE remains the return engine.
+'====================================================================
+
+Private Sub SIM_BuildWealthPath( _
+    ByVal wsControl As Worksheet, _
+    ByVal wsCurve As Worksheet, _
+    ByVal startDate As Date, _
+    ByVal endDate As Date, _
+    ByVal capital As Double, _
+    ByVal tableRange As Range, _
+    ByVal lastCurveRow As Long)
+
+    Dim i As Long
+    Dim lastRow As Long
+
+    Dim currentDate As Date
+
+    Dim fON As Double
+    Dim f1M As Double
+    Dim f3M As Double
+    Dim f6M As Double
+
+    Dim ch As ChartObject
+    Dim s As Series
+
+
+    wsCurve.Range("K:N").ClearContents
+
+    wsCurve.Range("K1:N1").Value = Array( _
+        "ON Wealth", _
+        "1M Wealth", _
+        "3M Wealth", _
+        "6M Wealth")
+
+    lastRow = wsCurve.Cells(wsCurve.Rows.Count, "A").End(xlUp).Row
+
+    Application.ScreenUpdating = False
+
+    For i = 2 To lastRow
+
+        currentDate = wsCurve.Cells(i, 1).Value
+
+        If currentDate <= startDate Then
+
+            fON = 1
+            f1M = 1
+            f3M = 1
+            f6M = 1
+
+        Else
+
+            fON = R_CURVE( _
+                startDate, tableRange, "ON", 0, "FACTOR", 0, currentDate)
+
+            f1M = R_CURVE( _
+                startDate, tableRange, "1M", 0, "FACTOR", 0, currentDate)
+
+            f3M = R_CURVE( _
+                startDate, tableRange, "3M", 0, "FACTOR", 0, currentDate)
+
+            f6M = R_CURVE( _
+                startDate, tableRange, "6M", 0, "FACTOR", 0, currentDate)
+
+        End If
+
+        wsCurve.Cells(i, 11).Value = capital * fON
+        wsCurve.Cells(i, 12).Value = capital * f1M
+        wsCurve.Cells(i, 13).Value = capital * f3M
+        wsCurve.Cells(i, 14).Value = capital * f6M
+
+    Next i
+
+    Application.ScreenUpdating = True
+
+    wsCurve.Columns("K:N").NumberFormat = "0.0000"
+
+
+    On Error Resume Next
+    wsControl.ChartObjects("SimulationWealthChart").Delete
+    On Error GoTo 0
+
+    Set ch = wsControl.ChartObjects.Add( _
+        Left:=wsControl.Range("K34").Left, _
+        Top:=wsControl.Range("K34").Top, _
+        Width:=780, _
+        Height:=420)
+
+    ch.Name = "SimulationWealthChart"
+
+    With ch.Chart
+
+        .ChartType = xlLine
+
+        Set s = .SeriesCollection.NewSeries
+        With s
+            .Name = "ON"
+            .XValues = wsCurve.Range("A2:A" & lastRow)
+            .Values = wsCurve.Range("K2:K" & lastRow)
+            .MarkerStyle = xlMarkerStyleNone
+        End With
+
+        Set s = .SeriesCollection.NewSeries
+        With s
+            .Name = "1M"
+            .XValues = wsCurve.Range("A2:A" & lastRow)
+            .Values = wsCurve.Range("L2:L" & lastRow)
+            .MarkerStyle = xlMarkerStyleNone
+        End With
+
+        Set s = .SeriesCollection.NewSeries
+        With s
+            .Name = "3M"
+            .XValues = wsCurve.Range("A2:A" & lastRow)
+            .Values = wsCurve.Range("M2:M" & lastRow)
+            .MarkerStyle = xlMarkerStyleNone
+        End With
+
+        Set s = .SeriesCollection.NewSeries
+        With s
+            .Name = "6M"
+            .XValues = wsCurve.Range("A2:A" & lastRow)
+            .Values = wsCurve.Range("N2:N" & lastRow)
+            .MarkerStyle = xlMarkerStyleNone
+        End With
+
+        .HasTitle = True
+        .ChartTitle.Text = _
+            "$100 Investment Outcome - " & wsControl.Range("B2").Value
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        With .Axes(xlCategory)
+            .TickLabels.NumberFormat = "mmm-yy"
+        End With
+
+        With .Axes(xlValue)
+            .HasTitle = True
+            .AxisTitle.Text = "Portfolio Value"
+            .TickLabels.NumberFormat = "$0.00"
+        End With
+
+    End With
+
+    wsCurve.Columns("A:N").AutoFit
+
+End Sub
+
+
+'====================================================================
+' APPLY INFORMATION SHOCK TO NEXT THREE FUTURE FOMC MEETINGS
+'====================================================================
+
+Private Sub SIM_ApplyExpectationShock( _
+    ByVal eventDate As Date, _
+    ByVal shock1Bp As Double, _
+    ByVal shock2Bp As Double, _
+    ByVal shock3Bp As Double, _
+    ByRef fomcDates() As Date, _
+    ByRef expectedMoves() As Double, _
+    ByVal nFomc As Long)
+
+    Dim i As Long
+    Dim n As Long
+
+    n = 0
+
+    For i = 1 To nFomc
+
+        If fomcDates(i) > eventDate Then
+
+            n = n + 1
+
+            Select Case n
+
+                Case 1
+                    expectedMoves(i) = _
+                        expectedMoves(i) + shock1Bp / 10000
+
+                Case 2
+                    expectedMoves(i) = _
+                        expectedMoves(i) + shock2Bp / 10000
+
+                Case 3
+                    expectedMoves(i) = _
+                        expectedMoves(i) + shock3Bp / 10000
+                    Exit For
+
+            End Select
+
+        End If
+
+    Next i
+
+End Sub
+
+
+'====================================================================
+' GENERATE TERM RATE FROM EXPECTED POLICY PATH
+'
+' Version 1 assumption:
+' quoted term rate = expected average ON over tenor + optional premium.
+'====================================================================
+
+Private Function SIM_ExpectedAverageRate( _
+    ByVal asOfDate As Date, _
+    ByVal maturityDate As Date, _
+    ByVal actualON As Double, _
+    ByRef fomcDates() As Date, _
+    ByRef expectedMoves() As Double, _
+    ByVal nFomc As Long) As Double
+
+    Dim d As Date
+    Dim i As Long
+
+    Dim expectedRate As Double
+    Dim total As Double
+    Dim days As Long
+
+    total = 0
+    days = 0
+
+    For d = asOfDate To maturityDate - 1
+
+        expectedRate = actualON
+
+        For i = 1 To nFomc
+
+            If fomcDates(i) > asOfDate _
+               And fomcDates(i) <= d Then
+
+                expectedRate = expectedRate + expectedMoves(i)
+
+            End If
+
+        Next i
+
+        total = total + expectedRate
+        days = days + 1
+
+    Next d
+
+    If days > 0 Then
+        SIM_ExpectedAverageRate = total / days
+    Else
+        SIM_ExpectedAverageRate = actualON
+    End If
+
+End Function
+
+
+'====================================================================
+' GET NEXT THREE EXPECTED FOMC MOVES
+'====================================================================
+
+Private Sub SIM_GetNextThreeExpectedMoves( _
+    ByVal asOfDate As Date, _
+    ByRef fomcDates() As Date, _
+    ByRef expectedMoves() As Double, _
+    ByVal nFomc As Long, _
+    ByRef move1 As Double, _
+    ByRef move2 As Double, _
+    ByRef move3 As Double)
+
+    Dim i As Long
+    Dim n As Long
+
+    move1 = 0
+    move2 = 0
+    move3 = 0
+
+    n = 0
+
+    For i = 1 To nFomc
+
+        If fomcDates(i) > asOfDate Then
+
+            n = n + 1
+
+            Select Case n
+                Case 1
+                    move1 = expectedMoves(i)
+                Case 2
+                    move2 = expectedMoves(i)
+                Case 3
+                    move3 = expectedMoves(i)
+                    Exit For
+            End Select
+
+        End If
+
+    Next i
+
+End Sub
+
+
+'====================================================================
+' WRITE TERMINAL STRATEGY RESULT
+'====================================================================
+
+Private Sub SIM_WriteResult( _
+    ByVal ws As Worksheet, _
+    ByVal rowNumber As Long, _
+    ByVal strategy As String, _
+    ByVal capital As Double, _
+    ByVal factor As Double, _
+    ByVal onFactor As Double)
+
+    ws.Cells(rowNumber, 11).Value = strategy
+    ws.Cells(rowNumber, 12).Value = capital
+    ws.Cells(rowNumber, 13).Value = capital * factor
+    ws.Cells(rowNumber, 14).Value = factor - 1
+    ws.Cells(rowNumber, 15).Value = (factor - onFactor) * 10000
+
+End Sub
+
+
+'====================================================================
+' FIRST FRIDAY OF MONTH
+'====================================================================
+
+Private Function SIM_FirstFriday( _
+    ByVal yr As Long, _
+    ByVal mn As Long) As Date
+
+    Dim d As Date
+
+    d = DateSerial(yr, mn, 1)
+
+    Do While Weekday(d, vbMonday) <> 5
+        d = d + 1
+    Loop
+
+    SIM_FirstFriday = d
+
+End Function
+
+
+'====================================================================
+' WEEKEND DATE -> NEXT MONDAY
+'====================================================================
+
+Private Function SIM_NextBusinessDay( _
+    ByVal d As Date) As Date
+
+    Do While Weekday(d, vbMonday) > 5
+        d = d + 1
+    Loop
+
+    SIM_NextBusinessDay = d
+
+End Function
+
+
+'====================================================================
+' GET OR CREATE WORKSHEET
+'====================================================================
+
+Private Function SIM_GetOrCreateSheet( _
+    ByVal sheetName As String) As Worksheet
+
+    On Error Resume Next
+    Set SIM_GetOrCreateSheet = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+
+    If SIM_GetOrCreateSheet Is Nothing Then
+
+        Set SIM_GetOrCreateSheet = _
+            ThisWorkbook.Worksheets.Add( _
+                After:=ThisWorkbook.Worksheets( _
+                    ThisWorkbook.Worksheets.Count))
+
+        SIM_GetOrCreateSheet.Name = sheetName
+
+    End If
+
+End Function
