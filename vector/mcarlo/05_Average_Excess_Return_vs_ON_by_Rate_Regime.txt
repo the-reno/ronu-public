@@ -3,19 +3,27 @@ Option Explicit
 '====================================================================
 ' AVERAGE EXCESS RETURN VS ON BY RATE REGIME
 '
-' Sources:
-'   Analysis_4  -> realized ON path variables
-'   Analysis_1  -> realized tenor returns
+' REQUIRED STARTING INPUT:
+'   Curve
+'
+' Historical dependencies created by the control module:
+'   Strategy_Raw
+'   Analysis_1
 '
 ' Output:
 '   Analysis_5
 '
 ' IMPORTANT:
-'   This macro does NOT call R_CURVE.
+'   This version DOES NOT require Analysis_4.
 '
-' Regime classification uses ONLY the realized ON path, not strategy
-' returns, so the regime labels are not optimized to determine which
-' tenor wins.
+' The realized ON path variables needed for regime classification are
+' calculated directly from Curve + Strategy_Raw.
+'
+' This macro does NOT call R_CURVE.
+'
+' Regime classification uses only the realized ON path, not strategy
+' returns, so the labels are not optimized to determine which tenor
+' wins.
 '
 ' Regime rules:
 '   Rising     : Delta ON >= +50 bp
@@ -24,144 +32,158 @@ Option Explicit
 '   Transition : all other paths
 '
 ' Role in final framework:
-'   Supporting / robustness analysis. The main project path has moved
-'   toward event-driven expectation shocks, deterministic scenarios,
-'   Monte Carlo and portfolio allocation.
+'   Supporting / robustness analysis. Main analytical path remains
+'   event-driven expectation shocks -> scenarios -> Monte Carlo ->
+'   portfolio allocation.
 '====================================================================
 
 Sub Build_Regime_Analysis()
 
-    Dim wsPath As Worksheet
+    Dim wsCurve As Worksheet
+    Dim wsRaw As Worksheet
     Dim wsRet As Worksheet
     Dim wsOut As Worksheet
-    
-    Dim lastPathRow As Long
+
+    Dim lastCurveRow As Long
+    Dim lastRawRow As Long
     Dim lastRetRow As Long
-    
+
     Dim i As Long
     Dim j As Long
     Dim k As Long
     Dim outRow As Long
-    
+
     Dim startDate As Date
+    Dim targetEnd As Date
+    Dim actualEnd As Date
+
+    Dim startCurveMatch As Variant
+    Dim endCurveMatch As Variant
     Dim retRow As Variant
-    
+
+    Dim startCurveRow As Long
+    Dim endCurveRow As Long
+
+    Dim startON As Double
+    Dim endON As Double
+    Dim minON As Double
+    Dim maxON As Double
+
     Dim deltaON As Double
     Dim onRange As Double
+
+    Dim initial6M As Double
+    Dim onFactor As Double
+    Dim actualDays As Long
+    Dim realizedONAnnualized As Double
     Dim pathError As Double
-    
+
     Dim regimeIdx As Long
     Dim regime As String
-    
+
     Dim r(1 To 4) As Double
     Dim excess(1 To 4) As Double
     Dim regret(1 To 4) As Double
-    
+
     Dim bestReturn As Double
     Dim bestTenor As String
-    
+
+
     '===========================================================
     ' SUMMARY ARRAYS
-    '
-    ' Dimension 1 = Regime
-    '   1 Rising
-    '   2 Stable
-    '   3 Falling
-    '   4 Transition
-    '
-    ' Dimension 2 = Tenor
-    '   1 ON
-    '   2 1M
-    '   3 3M
-    '   4 6M
     '===========================================================
-    
+
     Dim obs(1 To 4, 1 To 4) As Long
-    
+
     Dim sumRet(1 To 4, 1 To 4) As Double
     Dim sumSqRet(1 To 4, 1 To 4) As Double
-    
     Dim sumExcess(1 To 4, 1 To 4) As Double
-    
     Dim winCount(1 To 4, 1 To 4) As Long
-    
     Dim sumRegret(1 To 4, 1 To 4) As Double
     Dim maxRegret(1 To 4, 1 To 4) As Double
-    
+
     Dim regimeObs(1 To 4) As Long
     Dim sumDelta(1 To 4) As Double
     Dim sumRange(1 To 4) As Double
     Dim sumPathError(1 To 4) As Double
-    
+
     Dim regimeNames(1 To 4) As String
     Dim tenorNames(1 To 4) As String
-    
+
     Dim avgRet As Double
     Dim volatility As Double
     Dim avgExcess As Double
     Dim avgRegret As Double
     Dim winRate As Double
-    
+
     Dim summaryRow As Long
-    
+
     Dim ch As ChartObject
-    Dim s As Series
-    
-    
+
+
     '===========================================================
     ' LABELS
     '===========================================================
-    
+
     regimeNames(1) = "Rising"
     regimeNames(2) = "Stable"
     regimeNames(3) = "Falling"
     regimeNames(4) = "Transition"
-    
+
     tenorNames(1) = "ON"
     tenorNames(2) = "1M"
     tenorNames(3) = "3M"
     tenorNames(4) = "6M"
-    
-    
+
+
     '===========================================================
     ' SOURCE SHEETS
     '===========================================================
-    
-    Set wsPath = ThisWorkbook.Worksheets("Analysis_4")
+
+    Set wsCurve = ThisWorkbook.Worksheets("Curve")
+    Set wsRaw = ThisWorkbook.Worksheets("Strategy_Raw")
     Set wsRet = ThisWorkbook.Worksheets("Analysis_1")
-    
-    lastPathRow = wsPath.Cells(wsPath.Rows.Count, "A").End(xlUp).Row
-    lastRetRow = wsRet.Cells(wsRet.Rows.Count, "A").End(xlUp).Row
-    
-    
+
+    lastCurveRow = _
+        wsCurve.Cells(wsCurve.Rows.Count, "A").End(xlUp).Row
+
+    lastRawRow = _
+        wsRaw.Cells(wsRaw.Rows.Count, "A").End(xlUp).Row
+
+    lastRetRow = _
+        wsRet.Cells(wsRet.Rows.Count, "A").End(xlUp).Row
+
+
     '===========================================================
     ' CREATE / RESET OUTPUT
     '===========================================================
-    
+
     On Error Resume Next
     Set wsOut = ThisWorkbook.Worksheets("Analysis_5")
     On Error GoTo 0
-    
+
     If wsOut Is Nothing Then
-        
-        Set wsOut = ThisWorkbook.Worksheets.Add(After:=wsPath)
+
+        Set wsOut = _
+            ThisWorkbook.Worksheets.Add(After:=wsRet)
+
         wsOut.Name = "Analysis_5"
-        
+
     Else
-        
+
         wsOut.Cells.Clear
-        
+
         For Each ch In wsOut.ChartObjects
             ch.Delete
         Next ch
-        
+
     End If
-    
-    
+
+
     '===========================================================
-    ' RAW CLASSIFIED DATA HEADERS
+    ' RAW CLASSIFIED DATA
     '===========================================================
-    
+
     wsOut.Range("A1:Q1").Value = Array( _
         "Start", _
         "Regime", _
@@ -180,165 +202,257 @@ Sub Build_Regime_Analysis()
         "1M Regret (bp)", _
         "3M Regret (bp)", _
         "6M Regret (bp)")
-    
+
     outRow = 2
-    
-    
+
+
     '===========================================================
-    ' CLASSIFY EACH 6M WINDOW
+    ' CLASSIFY EACH COMMON 6M WINDOW
     '===========================================================
-    
-    For i = 2 To lastPathRow
-        
-        If IsDate(wsPath.Cells(i, 1).Value) Then
-            
-            startDate = wsPath.Cells(i, 1).Value
-            
-            'Analysis_4:
-            ' J = Delta ON
-            ' K = ON Range
-            ' N = Rate Path Error
-            
-            deltaON = wsPath.Cells(i, 10).Value
-            onRange = wsPath.Cells(i, 11).Value
-            pathError = wsPath.Cells(i, 14).Value
-            
-            regimeIdx = GetRegimeIndex(deltaON, onRange)
-            regime = regimeNames(regimeIdx)
-            
-            retRow = Application.Match( _
+
+    For i = 2 To lastRawRow
+
+        If IsDate(wsRaw.Cells(i, 1).Value) _
+           And IsDate(wsRaw.Cells(i, 2).Value) Then
+
+            startDate = wsRaw.Cells(i, 1).Value
+            targetEnd = wsRaw.Cells(i, 2).Value
+
+
+            '---------------------------------------------------
+            ' Exact start-date match in Curve
+            '---------------------------------------------------
+
+            startCurveMatch = Application.Match( _
+                CDbl(startDate), _
+                wsCurve.Range("A2:A" & lastCurveRow), _
+                0)
+
+
+            '---------------------------------------------------
+            ' Actual terminal curve date = latest date <= target
+            ' maturity. Curve dates must be ascending.
+            '---------------------------------------------------
+
+            endCurveMatch = Application.Match( _
+                CDbl(targetEnd), _
+                wsCurve.Range("A2:A" & lastCurveRow), _
+                1)
+
+
+            If Not IsError(startCurveMatch) _
+               And Not IsError(endCurveMatch) Then
+
+                startCurveRow = CLng(startCurveMatch) + 1
+                endCurveRow = CLng(endCurveMatch) + 1
+
+                actualEnd = wsCurve.Cells(endCurveRow, 1).Value
+                actualDays = actualEnd - startDate
+
+
+                If actualDays > 0 Then
+
+                    startON = wsCurve.Cells(startCurveRow, 2).Value
+                    endON = wsCurve.Cells(endCurveRow, 2).Value
+                    initial6M = wsCurve.Cells(startCurveRow, 5).Value
+
+                    minON = startON
+                    maxON = startON
+
+
+                    For j = startCurveRow To endCurveRow
+
+                        If IsNumeric(wsCurve.Cells(j, 2).Value) Then
+
+                            If wsCurve.Cells(j, 2).Value < minON Then
+                                minON = wsCurve.Cells(j, 2).Value
+                            End If
+
+                            If wsCurve.Cells(j, 2).Value > maxON Then
+                                maxON = wsCurve.Cells(j, 2).Value
+                            End If
+
+                        End If
+
+                    Next j
+
+
+                    deltaON = (endON - startON) * 10000
+                    onRange = (maxON - minON) * 10000
+
+
+                    '-------------------------------------------
+                    ' Path-error diagnostic calculated directly
+                    ' from audited ON factor + initial 6M rate.
+                    '-------------------------------------------
+
+                    onFactor = wsRaw.Cells(i, 3).Value
+
+                    realizedONAnnualized = _
+                        (onFactor - 1) * 360 / actualDays
+
+                    pathError = _
+                        (realizedONAnnualized - initial6M) * 10000
+
+
+                    regimeIdx = _
+                        GetRegimeIndex(deltaON, onRange)
+
+                    regime = regimeNames(regimeIdx)
+
+
+                    '-------------------------------------------
+                    ' Match realized tenor returns
+                    '-------------------------------------------
+
+                    retRow = Application.Match( _
                         CDbl(startDate), _
                         wsRet.Range("A1:A" & lastRetRow), _
                         0)
-            
-            If Not IsError(retRow) Then
-                
-                'Analysis_1:
-                ' B = ON
-                ' C = 1M
-                ' D = 3M
-                ' E = 6M
-                
-                r(1) = wsRet.Cells(retRow, 2).Value
-                r(2) = wsRet.Cells(retRow, 3).Value
-                r(3) = wsRet.Cells(retRow, 4).Value
-                r(4) = wsRet.Cells(retRow, 5).Value
-                
-                excess(1) = 0
-                excess(2) = (r(2) - r(1)) * 10000
-                excess(3) = (r(3) - r(1)) * 10000
-                excess(4) = (r(4) - r(1)) * 10000
-                
-                bestReturn = r(1)
-                bestTenor = "ON"
-                
-                For k = 2 To 4
-                    
-                    If r(k) > bestReturn Then
-                        bestReturn = r(k)
-                        bestTenor = tenorNames(k)
+
+
+                    If Not IsError(retRow) Then
+
+                        r(1) = wsRet.Cells(retRow, 2).Value
+                        r(2) = wsRet.Cells(retRow, 3).Value
+                        r(3) = wsRet.Cells(retRow, 4).Value
+                        r(4) = wsRet.Cells(retRow, 5).Value
+
+                        excess(1) = 0
+                        excess(2) = (r(2) - r(1)) * 10000
+                        excess(3) = (r(3) - r(1)) * 10000
+                        excess(4) = (r(4) - r(1)) * 10000
+
+
+                        bestReturn = r(1)
+                        bestTenor = "ON"
+
+                        For k = 2 To 4
+
+                            If r(k) > bestReturn Then
+                                bestReturn = r(k)
+                                bestTenor = tenorNames(k)
+                            End If
+
+                        Next k
+
+
+                        For k = 1 To 4
+                            regret(k) = _
+                                (bestReturn - r(k)) * 10000
+                        Next k
+
+
+                        '---------------------------------------
+                        ' Raw output
+                        '---------------------------------------
+
+                        wsOut.Cells(outRow, 1).Value = startDate
+                        wsOut.Cells(outRow, 2).Value = regime
+
+                        wsOut.Cells(outRow, 3).Value = deltaON
+                        wsOut.Cells(outRow, 4).Value = onRange
+                        wsOut.Cells(outRow, 5).Value = pathError
+
+                        wsOut.Cells(outRow, 6).Value = r(1)
+                        wsOut.Cells(outRow, 7).Value = r(2)
+                        wsOut.Cells(outRow, 8).Value = r(3)
+                        wsOut.Cells(outRow, 9).Value = r(4)
+
+                        wsOut.Cells(outRow, 10).Value = bestTenor
+
+                        wsOut.Cells(outRow, 11).Value = excess(2)
+                        wsOut.Cells(outRow, 12).Value = excess(3)
+                        wsOut.Cells(outRow, 13).Value = excess(4)
+
+                        wsOut.Cells(outRow, 14).Value = regret(1)
+                        wsOut.Cells(outRow, 15).Value = regret(2)
+                        wsOut.Cells(outRow, 16).Value = regret(3)
+                        wsOut.Cells(outRow, 17).Value = regret(4)
+
+
+                        '---------------------------------------
+                        ' Regime path statistics
+                        '---------------------------------------
+
+                        regimeObs(regimeIdx) = _
+                            regimeObs(regimeIdx) + 1
+
+                        sumDelta(regimeIdx) = _
+                            sumDelta(regimeIdx) + deltaON
+
+                        sumRange(regimeIdx) = _
+                            sumRange(regimeIdx) + onRange
+
+                        sumPathError(regimeIdx) = _
+                            sumPathError(regimeIdx) + pathError
+
+
+                        '---------------------------------------
+                        ' Tenor statistics
+                        '---------------------------------------
+
+                        For k = 1 To 4
+
+                            obs(regimeIdx, k) = _
+                                obs(regimeIdx, k) + 1
+
+                            sumRet(regimeIdx, k) = _
+                                sumRet(regimeIdx, k) + r(k)
+
+                            sumSqRet(regimeIdx, k) = _
+                                sumSqRet(regimeIdx, k) + r(k) ^ 2
+
+                            sumExcess(regimeIdx, k) = _
+                                sumExcess(regimeIdx, k) + excess(k)
+
+                            sumRegret(regimeIdx, k) = _
+                                sumRegret(regimeIdx, k) + regret(k)
+
+                            If regret(k) > _
+                               maxRegret(regimeIdx, k) Then
+
+                                maxRegret(regimeIdx, k) = regret(k)
+
+                            End If
+
+                            If tenorNames(k) = bestTenor Then
+
+                                winCount(regimeIdx, k) = _
+                                    winCount(regimeIdx, k) + 1
+
+                            End If
+
+                        Next k
+
+
+                        outRow = outRow + 1
+
                     End If
-                    
-                Next k
-                
-                For k = 1 To 4
-                    regret(k) = (bestReturn - r(k)) * 10000
-                Next k
-                
-                
-                '---------------------------------------------------
-                ' Raw classified output
-                '---------------------------------------------------
-                
-                wsOut.Cells(outRow, 1).Value = startDate
-                wsOut.Cells(outRow, 2).Value = regime
-                
-                wsOut.Cells(outRow, 3).Value = deltaON
-                wsOut.Cells(outRow, 4).Value = onRange
-                wsOut.Cells(outRow, 5).Value = pathError
-                
-                wsOut.Cells(outRow, 6).Value = r(1)
-                wsOut.Cells(outRow, 7).Value = r(2)
-                wsOut.Cells(outRow, 8).Value = r(3)
-                wsOut.Cells(outRow, 9).Value = r(4)
-                
-                wsOut.Cells(outRow, 10).Value = bestTenor
-                
-                wsOut.Cells(outRow, 11).Value = excess(2)
-                wsOut.Cells(outRow, 12).Value = excess(3)
-                wsOut.Cells(outRow, 13).Value = excess(4)
-                
-                wsOut.Cells(outRow, 14).Value = regret(1)
-                wsOut.Cells(outRow, 15).Value = regret(2)
-                wsOut.Cells(outRow, 16).Value = regret(3)
-                wsOut.Cells(outRow, 17).Value = regret(4)
-                
-                
-                '---------------------------------------------------
-                ' Regime-level path characteristics
-                '---------------------------------------------------
-                
-                regimeObs(regimeIdx) = regimeObs(regimeIdx) + 1
-                sumDelta(regimeIdx) = sumDelta(regimeIdx) + deltaON
-                sumRange(regimeIdx) = sumRange(regimeIdx) + onRange
-                sumPathError(regimeIdx) = _
-                    sumPathError(regimeIdx) + pathError
-                
-                
-                '---------------------------------------------------
-                ' Tenor statistics by regime
-                '---------------------------------------------------
-                
-                For k = 1 To 4
-                    
-                    obs(regimeIdx, k) = obs(regimeIdx, k) + 1
-                    
-                    sumRet(regimeIdx, k) = _
-                        sumRet(regimeIdx, k) + r(k)
-                    
-                    sumSqRet(regimeIdx, k) = _
-                        sumSqRet(regimeIdx, k) + r(k) ^ 2
-                    
-                    sumExcess(regimeIdx, k) = _
-                        sumExcess(regimeIdx, k) + excess(k)
-                    
-                    sumRegret(regimeIdx, k) = _
-                        sumRegret(regimeIdx, k) + regret(k)
-                    
-                    If regret(k) > maxRegret(regimeIdx, k) Then
-                        maxRegret(regimeIdx, k) = regret(k)
-                    End If
-                    
-                    If tenorNames(k) = bestTenor Then
-                        winCount(regimeIdx, k) = _
-                            winCount(regimeIdx, k) + 1
-                    End If
-                    
-                Next k
-                
-                outRow = outRow + 1
-                
+
+                End If
+
             End If
-            
+
         End If
-        
+
     Next i
-    
-    
+
+
     '===========================================================
     ' FORMAT RAW DATA
     '===========================================================
-    
+
     wsOut.Columns("A").NumberFormat = "dd-mmm-yyyy"
     wsOut.Columns("C:E").NumberFormat = "0.0"
     wsOut.Columns("F:I").NumberFormat = "0.000%"
     wsOut.Columns("K:Q").NumberFormat = "0.0"
-    
-    
+
+
     '===========================================================
     ' REGIME DEFINITION / PATH SUMMARY
     '===========================================================
-    
+
     wsOut.Range("T1:Y1").Value = Array( _
         "Regime", _
         "Definition", _
@@ -346,53 +460,55 @@ Sub Build_Regime_Analysis()
         "Avg Delta ON (bp)", _
         "Avg ON Range (bp)", _
         "Avg Path Error (bp)")
-    
+
+
     For j = 1 To 4
-        
+
         wsOut.Cells(j + 1, 20).Value = regimeNames(j)
-        
+
         Select Case j
-            
+
             Case 1
                 wsOut.Cells(j + 1, 21).Value = _
                     "Delta ON >= +50 bp"
-                
+
             Case 2
                 wsOut.Cells(j + 1, 21).Value = _
                     "|Delta ON| <= 25 bp and range <= 50 bp"
-                
+
             Case 3
                 wsOut.Cells(j + 1, 21).Value = _
                     "Delta ON <= -50 bp"
-                
+
             Case 4
                 wsOut.Cells(j + 1, 21).Value = _
                     "All other paths"
-                
+
         End Select
-        
+
+
         wsOut.Cells(j + 1, 22).Value = regimeObs(j)
-        
+
         If regimeObs(j) > 0 Then
-            
+
             wsOut.Cells(j + 1, 23).Value = _
                 sumDelta(j) / regimeObs(j)
-            
+
             wsOut.Cells(j + 1, 24).Value = _
                 sumRange(j) / regimeObs(j)
-            
+
             wsOut.Cells(j + 1, 25).Value = _
                 sumPathError(j) / regimeObs(j)
-            
+
         End If
-        
+
     Next j
-    
-    
+
+
     '===========================================================
     ' TENOR PERFORMANCE SUMMARY
     '===========================================================
-    
+
     wsOut.Range("T8:AB8").Value = Array( _
         "Regime", _
         "Tenor", _
@@ -403,32 +519,33 @@ Sub Build_Regime_Analysis()
         "Avg Excess vs ON (bp)", _
         "Avg Regret (bp)", _
         "Worst Regret (bp)")
-    
+
     summaryRow = 9
-    
+
+
     For j = 1 To 4
-        
+
         For k = 1 To 4
-            
+
             If obs(j, k) > 0 Then
-                
+
                 avgRet = sumRet(j, k) / obs(j, k)
-                
+
                 If obs(j, k) > 1 Then
-                    
+
                     volatility = Sqr( _
                         (sumSqRet(j, k) - _
                         (sumRet(j, k) ^ 2 / obs(j, k))) / _
                         (obs(j, k) - 1))
-                    
+
                 Else
                     volatility = 0
                 End If
-                
+
                 winRate = winCount(j, k) / obs(j, k)
                 avgExcess = sumExcess(j, k) / obs(j, k)
                 avgRegret = sumRegret(j, k) / obs(j, k)
-                
+
                 wsOut.Cells(summaryRow, 20).Value = regimeNames(j)
                 wsOut.Cells(summaryRow, 21).Value = tenorNames(k)
                 wsOut.Cells(summaryRow, 22).Value = obs(j, k)
@@ -439,99 +556,99 @@ Sub Build_Regime_Analysis()
                 wsOut.Cells(summaryRow, 27).Value = avgRegret
                 wsOut.Cells(summaryRow, 28).Value = _
                     maxRegret(j, k)
-                
+
                 summaryRow = summaryRow + 1
-                
+
             End If
-            
+
         Next k
-        
+
     Next j
-    
-    
-    '===========================================================
-    ' FORMAT SUMMARY
-    '===========================================================
-    
+
+
     wsOut.Range("W9:X" & summaryRow - 1).NumberFormat = "0.000%"
     wsOut.Range("Y9:Y" & summaryRow - 1).NumberFormat = "0.0%"
     wsOut.Range("Z9:AB" & summaryRow - 1).NumberFormat = "0.0"
-    wsOut.Range("W2:Y5").NumberFormat = "0.0"
-    
-    
+
+
     '===========================================================
     ' CHART DATA - AVERAGE EXCESS RETURN VS ON
     '===========================================================
-    
+
     wsOut.Range("AD1:AG1").Value = Array( _
         "Regime", _
         "1M", _
         "3M", _
         "6M")
-    
+
+
     For j = 1 To 4
-        
+
         wsOut.Cells(j + 1, 30).Value = regimeNames(j)
-        
+
         If obs(j, 2) > 0 Then
             wsOut.Cells(j + 1, 31).Value = _
                 sumExcess(j, 2) / obs(j, 2)
         End If
-        
+
         If obs(j, 3) > 0 Then
             wsOut.Cells(j + 1, 32).Value = _
                 sumExcess(j, 3) / obs(j, 3)
         End If
-        
+
         If obs(j, 4) > 0 Then
             wsOut.Cells(j + 1, 33).Value = _
                 sumExcess(j, 4) / obs(j, 4)
         End If
-        
+
     Next j
-    
-    
+
+
     '===========================================================
-    ' EXPLORATORY REGIME CHART
+    ' REGIME CHART
     '===========================================================
-    
+
     Set ch = wsOut.ChartObjects.Add( _
         Left:=wsOut.Range("T27").Left, _
         Top:=wsOut.Range("T27").Top, _
         Width:=720, _
         Height:=420)
-    
+
+
     With ch.Chart
-        
+
         .ChartType = xlColumnClustered
         .SetSourceData Source:=wsOut.Range("AD1:AG5")
-        
+
         .HasTitle = True
         .ChartTitle.Text = _
             "Average Excess Return vs ON by Rate Regime"
-        
+
         .HasLegend = True
         .Legend.Position = xlLegendPositionBottom
-        
+
         With .Axes(xlCategory)
             .HasTitle = True
             .AxisTitle.Text = "Realized 6M Rate Regime"
         End With
-        
+
         With .Axes(xlValue)
             .HasTitle = True
             .AxisTitle.Text = "Average Excess Return vs ON (bp)"
             .CrossesAt = 0
         End With
-        
+
     End With
-    
+
+
     wsOut.Columns("A:AG").AutoFit
-    
-    MsgBox (outRow - 2) & _
-           " observations classified into rate regimes.", _
-           vbInformation, _
-           "Regime Analysis"
+
+
+    MsgBox _
+        (outRow - 2) & _
+        " observations classified into rate regimes.", _
+        vbInformation, _
+        "Regime Analysis"
 
 End Sub
 
@@ -544,27 +661,21 @@ Private Function GetRegimeIndex( _
     ByVal deltaON As Double, _
     ByVal onRange As Double) As Long
 
-    'Rising: ON increased at least 50bp over the 6M horizon.
     If deltaON >= 50 Then
         GetRegimeIndex = 1
         Exit Function
     End If
 
-    'Falling: ON declined at least 50bp.
     If deltaON <= -50 Then
         GetRegimeIndex = 3
         Exit Function
     End If
 
-    'Stable: end rate within +/-25bp AND total path range <= 50bp.
-    'The range condition prevents a large round trip from being
-    'incorrectly classified as stable.
     If Abs(deltaON) <= 25 And onRange <= 50 Then
         GetRegimeIndex = 2
         Exit Function
     End If
 
-    'All other paths are transition / mixed.
     GetRegimeIndex = 4
 
 End Function
