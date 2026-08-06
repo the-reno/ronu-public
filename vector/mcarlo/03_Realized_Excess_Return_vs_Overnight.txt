@@ -1,0 +1,199 @@
+Option Explicit
+
+'====================================================================
+' REALIZED EXCESS RETURN VS OVERNIGHT
+'
+' Source:
+'   Analysis_1
+'
+' Output:
+'   Analysis_2
+'
+' IMPORTANT:
+'   This macro does NOT call R_CURVE.
+'   It converts the relative return columns already derived from
+'   Strategy_Raw into basis points and plots them against zero.
+'
+' Analysis_1 expected columns:
+'   A = Start
+'   G = 1M - ON
+'   H = 3M - ON
+'   I = 6M - ON
+'====================================================================
+
+Sub Build_Excess_Return_Chart()
+
+    Dim wsSource As Worksheet
+    Dim wsOut As Worksheet
+
+    Dim lastRow As Long
+    Dim i As Long
+    Dim outRow As Long
+
+    Dim ch As ChartObject
+    Dim s As Series
+
+
+    Set wsSource = ThisWorkbook.Worksheets("Analysis_1")
+
+    lastRow = wsSource.Cells(wsSource.Rows.Count, "A").End(xlUp).Row
+
+
+    '----------------------------------------------------------------
+    ' Create / reset output sheet
+    '----------------------------------------------------------------
+
+    On Error Resume Next
+    Set wsOut = ThisWorkbook.Worksheets("Analysis_2")
+    On Error GoTo 0
+
+    If wsOut Is Nothing Then
+
+        Set wsOut = ThisWorkbook.Worksheets.Add(After:=wsSource)
+        wsOut.Name = "Analysis_2"
+
+    Else
+
+        wsOut.Cells.Clear
+
+        For Each ch In wsOut.ChartObjects
+            ch.Delete
+        Next ch
+
+    End If
+
+
+    '----------------------------------------------------------------
+    ' Headers
+    '----------------------------------------------------------------
+
+    wsOut.Range("A1:E1").Value = Array( _
+        "Start", _
+        "1M - ON (bp)", _
+        "3M - ON (bp)", _
+        "6M - ON (bp)", _
+        "Zero")
+
+
+    outRow = 2
+
+
+    '----------------------------------------------------------------
+    ' Convert relative return to basis points
+    '----------------------------------------------------------------
+
+    For i = 2 To lastRow
+
+        If IsDate(wsSource.Cells(i, 1).Value) Then
+
+            wsOut.Cells(outRow, 1).Value = wsSource.Cells(i, 1).Value
+
+            wsOut.Cells(outRow, 2).Value = _
+                wsSource.Cells(i, 7).Value * 10000
+
+            wsOut.Cells(outRow, 3).Value = _
+                wsSource.Cells(i, 8).Value * 10000
+
+            wsOut.Cells(outRow, 4).Value = _
+                wsSource.Cells(i, 9).Value * 10000
+
+            wsOut.Cells(outRow, 5).Value = 0
+
+            outRow = outRow + 1
+
+        End If
+
+    Next i
+
+
+    '----------------------------------------------------------------
+    ' Format
+    '----------------------------------------------------------------
+
+    wsOut.Columns("A").NumberFormat = "dd-mmm-yyyy"
+    wsOut.Columns("B:E").NumberFormat = "0.0"
+
+    wsOut.Columns.AutoFit
+
+
+    '----------------------------------------------------------------
+    ' Chart
+    ' Positive = locking tenor beat ON
+    ' Negative = ON beat locking tenor
+    '----------------------------------------------------------------
+
+    Set ch = wsOut.ChartObjects.Add( _
+        Left:=20, _
+        Top:=40, _
+        Width:=900, _
+        Height:=500)
+
+    With ch.Chart
+
+        .ChartType = xlLine
+
+
+        '1M
+        Set s = .SeriesCollection.NewSeries
+        With s
+            .Name = "1M - ON"
+            .XValues = wsOut.Range("A2:A" & outRow - 1)
+            .Values = wsOut.Range("B2:B" & outRow - 1)
+            .MarkerStyle = xlMarkerStyleNone
+        End With
+
+
+        '3M
+        Set s = .SeriesCollection.NewSeries
+        With s
+            .Name = "3M - ON"
+            .XValues = wsOut.Range("A2:A" & outRow - 1)
+            .Values = wsOut.Range("C2:C" & outRow - 1)
+            .MarkerStyle = xlMarkerStyleNone
+        End With
+
+
+        '6M
+        Set s = .SeriesCollection.NewSeries
+        With s
+            .Name = "6M - ON"
+            .XValues = wsOut.Range("A2:A" & outRow - 1)
+            .Values = wsOut.Range("D2:D" & outRow - 1)
+            .MarkerStyle = xlMarkerStyleNone
+        End With
+
+
+        'Zero reference
+        Set s = .SeriesCollection.NewSeries
+        With s
+            .Name = "Zero"
+            .XValues = wsOut.Range("A2:A" & outRow - 1)
+            .Values = wsOut.Range("E2:E" & outRow - 1)
+            .MarkerStyle = xlMarkerStyleNone
+        End With
+
+
+        .HasTitle = True
+        .ChartTitle.Text = "Realized Excess Return vs Overnight"
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        With .Axes(xlCategory)
+            .TickLabels.NumberFormat = "mmm-yy"
+        End With
+
+        With .Axes(xlValue)
+            .HasTitle = True
+            .AxisTitle.Text = "Excess Return vs ON (bp)"
+            .CrossesAt = 0
+        End With
+
+    End With
+
+
+    MsgBox (outRow - 2) & _
+           " observations created in Analysis_2.", _
+           vbInformation
+
+End Sub
