@@ -4,7 +4,7 @@ Option Explicit
 ' INITIAL 6M CURVE SPREAD VS REALIZED 6M EXCESS RETURN
 '
 ' Sources:
-'   curve
+'   Curve
 '   Analysis_2
 '
 ' Output:
@@ -59,7 +59,7 @@ Sub Build_Curve_vs_Outcome()
     Dim ch As ChartObject
     Dim s As Series
     
-    Set wsCurve = ThisWorkbook.Worksheets("curve")
+    Set wsCurve = ThisWorkbook.Worksheets("Curve")
     Set wsSource = ThisWorkbook.Worksheets("Analysis_2")
     
     lastCurveRow = wsCurve.Cells(wsCurve.Rows.Count, "A").End(xlUp).Row
