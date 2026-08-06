@@ -1,0 +1,538 @@
+Option Explicit
+
+'====================================================================
+' MCARLO WORKBOOK CONTROL
+'
+' REQUIRED STARTING WORKBOOK
+' --------------------------
+' One worksheet only is required:
+'
+'   Curve
+'
+' Curve columns:
+'   A = Date
+'   B = ON
+'   C = 1M
+'   D = 3M
+'   E = 6M
+'
+' Dates must be ascending.
+'
+' Dependency:
+'   Existing R_CURVE function must be present in the workbook.
+'
+' FIRST RUN
+' ---------
+' Run once:
+'
+'   Setup_MCarlo_Workbook
+'
+' This adds buttons directly to the Curve tab.
+'
+' BUTTONS
+' -------
+' 1. Build Strategy Raw
+' 2. Realized Return
+' 3. Excess vs ON
+' 4. Curve vs Outcome
+' 5. Regime Analysis
+' 6. Simulation Model
+' RUN ALL HISTORICAL
+'
+' Each step automatically creates any missing prerequisite output.
+'====================================================================
+
+
+'====================================================================
+' FIRST-RUN SETUP
+'====================================================================
+
+Sub Setup_MCarlo_Workbook()
+
+    Dim ws As Worksheet
+
+    Set ws = MC_GetCurveSheet()
+
+    If ws Is Nothing Then
+        MsgBox _
+            "A worksheet named 'Curve' is required." & vbCrLf & _
+            "Expected columns: Date | ON | 1M | 3M | 6M", _
+            vbCritical
+        Exit Sub
+    End If
+
+    If Not MC_ValidateCurve(ws) Then Exit Sub
+
+    MC_CreateButtons ws
+
+    MsgBox _
+        "MCarlo controls added to the Curve tab." & vbCrLf & _
+        "Use the buttons in columns G:I.", _
+        vbInformation
+
+End Sub
+
+
+'====================================================================
+' STEP WRAPPERS
+'
+' These are assigned to the buttons.
+' Each wrapper builds missing prerequisites automatically.
+'====================================================================
+
+Sub MC_Step1_BuildRaw()
+
+    Build_Strategy_Raw_From_Curve
+
+End Sub
+
+
+Sub MC_Step2_RealizedReturn()
+
+    If Not MC_SheetExists("Strategy_Raw") Then
+        Build_Strategy_Raw_From_Curve
+    End If
+
+    If MC_SheetExists("Strategy_Raw") Then
+        Build_Analysis_1
+    End If
+
+End Sub
+
+
+Sub MC_Step3_ExcessReturn()
+
+    If Not MC_SheetExists("Analysis_1") Then
+        MC_Step2_RealizedReturn
+    End If
+
+    If MC_SheetExists("Analysis_1") Then
+        Build_Excess_Return_Chart
+    End If
+
+End Sub
+
+
+Sub MC_Step4_CurveVsOutcome()
+
+    If Not MC_SheetExists("Analysis_2") Then
+        MC_Step3_ExcessReturn
+    End If
+
+    If MC_SheetExists("Analysis_2") Then
+        Build_Curve_vs_Outcome
+    End If
+
+End Sub
+
+
+Sub MC_Step5_RegimeAnalysis()
+
+    If Not MC_SheetExists("Strategy_Raw") Then
+        Build_Strategy_Raw_From_Curve
+    End If
+
+    If Not MC_SheetExists("Analysis_1") Then
+        Build_Analysis_1
+    End If
+
+    If MC_SheetExists("Strategy_Raw") _
+       And MC_SheetExists("Analysis_1") Then
+
+        Build_Regime_Analysis
+
+    End If
+
+End Sub
+
+
+Sub MC_Step6_Simulation()
+
+    Create_Simple_Simulation_Model
+
+End Sub
+
+
+Sub MC_RunAllHistorical()
+
+    Application.ScreenUpdating = False
+
+    Build_Strategy_Raw_From_Curve
+    Build_Analysis_1
+    Build_Excess_Return_Chart
+    Build_Curve_vs_Outcome
+    Build_Regime_Analysis
+
+    Application.ScreenUpdating = True
+
+    MsgBox _
+        "Historical analysis completed:" & vbCrLf & _
+        "Strategy_Raw" & vbCrLf & _
+        "Analysis_1" & vbCrLf & _
+        "Analysis_2" & vbCrLf & _
+        "Analysis_3" & vbCrLf & _
+        "Analysis_5", _
+        vbInformation
+
+End Sub
+
+
+'====================================================================
+' STEP 1 - OFFICIAL RAW STRATEGY PANEL
+'
+' This is the only historical macro in this package that calls
+' R_CURVE directly.
+'
+' Architecture:
+'   Curve -> R_CURVE -> Strategy_Raw
+'
+' Strategy_Raw is the immutable official calculation layer.
+' All downstream historical analyses derive from it.
+'====================================================================
+
+Sub Build_Strategy_Raw_From_Curve()
+
+    Dim wsCurve As Worksheet
+    Dim wsOut As Worksheet
+
+    Dim lastCurveRow As Long
+    Dim i As Long
+    Dim outRow As Long
+
+    Dim startDate As Date
+    Dim maturityDate As Date
+    Dim lastCurveDate As Date
+
+    Dim curveTable As Range
+
+    Dim fON As Variant
+    Dim f1M As Variant
+    Dim f3M As Variant
+    Dim f6M As Variant
+
+
+    Set wsCurve = MC_GetCurveSheet()
+
+    If wsCurve Is Nothing Then
+        MsgBox "Curve tab not found.", vbCritical
+        Exit Sub
+    End If
+
+    If Not MC_ValidateCurve(wsCurve) Then Exit Sub
+
+    lastCurveRow = _
+        wsCurve.Cells(wsCurve.Rows.Count, "A").End(xlUp).Row
+
+    lastCurveDate = wsCurve.Cells(lastCurveRow, 1).Value
+
+    Set curveTable = wsCurve.Range("A1:E" & lastCurveRow)
+
+
+    '----------------------------------------------------------------
+    ' Create / reset output
+    '----------------------------------------------------------------
+
+    Set wsOut = MC_GetOrCreateSheet("Strategy_Raw")
+
+    wsOut.Cells.Clear
+
+    wsOut.Range("A1:F1").Value = Array( _
+        "Start", _
+        "End", _
+        "ON Factor", _
+        "1M Factor", _
+        "3M Factor", _
+        "6M Factor")
+
+    outRow = 2
+
+
+    '----------------------------------------------------------------
+    ' Common six-month terminal horizon
+    '----------------------------------------------------------------
+
+    For i = 2 To lastCurveRow
+
+        If IsDate(wsCurve.Cells(i, 1).Value) Then
+
+            startDate = wsCurve.Cells(i, 1).Value
+            maturityDate = DateAdd("m", 6, startDate)
+
+            If maturityDate <= lastCurveDate Then
+
+                fON = R_CURVE( _
+                    startDate, _
+                    curveTable, _
+                    "ON", _
+                    0, _
+                    "FACTOR", _
+                    0, _
+                    maturityDate)
+
+                f1M = R_CURVE( _
+                    startDate, _
+                    curveTable, _
+                    "1M", _
+                    0, _
+                    "FACTOR", _
+                    0, _
+                    maturityDate)
+
+                f3M = R_CURVE( _
+                    startDate, _
+                    curveTable, _
+                    "3M", _
+                    0, _
+                    "FACTOR", _
+                    0, _
+                    maturityDate)
+
+                f6M = R_CURVE( _
+                    startDate, _
+                    curveTable, _
+                    "6M", _
+                    0, _
+                    "FACTOR", _
+                    0, _
+                    maturityDate)
+
+
+                If IsNumeric(fON) _
+                   And IsNumeric(f1M) _
+                   And IsNumeric(f3M) _
+                   And IsNumeric(f6M) Then
+
+                    wsOut.Cells(outRow, 1).Value = startDate
+                    wsOut.Cells(outRow, 2).Value = maturityDate
+
+                    wsOut.Cells(outRow, 3).Value = fON
+                    wsOut.Cells(outRow, 4).Value = f1M
+                    wsOut.Cells(outRow, 5).Value = f3M
+                    wsOut.Cells(outRow, 6).Value = f6M
+
+                    outRow = outRow + 1
+
+                End If
+
+            End If
+
+        End If
+
+    Next i
+
+
+    wsOut.Columns("A:B").NumberFormat = "dd-mmm-yyyy"
+    wsOut.Columns("C:F").NumberFormat = "0.000000"
+    wsOut.Columns.AutoFit
+
+    MsgBox _
+        (outRow - 2) & _
+        " observations created in Strategy_Raw.", _
+        vbInformation
+
+End Sub
+
+
+'====================================================================
+' BUTTON PANEL ON CURVE TAB
+'====================================================================
+
+Private Sub MC_CreateButtons(ByVal ws As Worksheet)
+
+    Dim labels As Variant
+    Dim macros As Variant
+
+    Dim i As Long
+    Dim topPos As Double
+    Dim leftPos As Double
+
+    Dim shp As Shape
+
+
+    labels = Array( _
+        "1  Build Strategy Raw", _
+        "2  Realized Return", _
+        "3  Excess vs ON", _
+        "4  Curve vs Outcome", _
+        "5  Regime Analysis", _
+        "6  Simulation Model", _
+        "RUN ALL HISTORICAL")
+
+    macros = Array( _
+        "MC_Step1_BuildRaw", _
+        "MC_Step2_RealizedReturn", _
+        "MC_Step3_ExcessReturn", _
+        "MC_Step4_CurveVsOutcome", _
+        "MC_Step5_RegimeAnalysis", _
+        "MC_Step6_Simulation", _
+        "MC_RunAllHistorical")
+
+
+    'Remove previous controls created by this module.
+
+    For i = ws.Shapes.Count To 1 Step -1
+
+        If Left$(ws.Shapes(i).Name, 9) = "MC_Button" Then
+            ws.Shapes(i).Delete
+        End If
+
+    Next i
+
+
+    ws.Range("G1:I1").Merge
+    ws.Range("G1").Value = "MCARLO ANALYSIS"
+
+    ws.Range("G2:I2").Merge
+    ws.Range("G2").Value = _
+        "Required input: Curve columns A:E = Date | ON | 1M | 3M | 6M"
+
+
+    leftPos = ws.Range("G4").Left
+    topPos = ws.Range("G4").Top
+
+
+    For i = LBound(labels) To UBound(labels)
+
+        Set shp = ws.Shapes.AddShape( _
+            msoShapeRoundedRectangle, _
+            leftPos, _
+            topPos + i * 35, _
+            180, _
+            27)
+
+        shp.Name = "MC_Button_" & Format(i + 1, "00")
+        shp.TextFrame.Characters.Text = labels(i)
+        shp.OnAction = macros(i)
+
+    Next i
+
+
+    ws.Columns("G:I").ColumnWidth = 18
+
+End Sub
+
+
+'====================================================================
+' CURVE VALIDATION
+'====================================================================
+
+Private Function MC_ValidateCurve(ByVal ws As Worksheet) As Boolean
+
+    Dim lastRow As Long
+    Dim i As Long
+
+    Dim prevDate As Date
+    Dim currentDate As Date
+
+
+    MC_ValidateCurve = False
+
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+
+    If lastRow < 3 Then
+        MsgBox "Curve does not contain enough observations.", vbCritical
+        Exit Function
+    End If
+
+
+    If UCase(Trim(ws.Cells(1, 1).Value)) <> "DATE" Then
+        MsgBox "Curve!A1 must be Date.", vbCritical
+        Exit Function
+    End If
+
+
+    If UCase(Trim(ws.Cells(1, 2).Value)) <> "ON" _
+       Or UCase(Trim(ws.Cells(1, 3).Value)) <> "1M" _
+       Or UCase(Trim(ws.Cells(1, 4).Value)) <> "3M" _
+       Or UCase(Trim(ws.Cells(1, 5).Value)) <> "6M" Then
+
+        MsgBox _
+            "Curve headers must be:" & vbCrLf & _
+            "Date | ON | 1M | 3M | 6M", _
+            vbCritical
+
+        Exit Function
+
+    End If
+
+
+    If Not IsDate(ws.Cells(2, 1).Value) Then
+        MsgBox "Curve dates are invalid.", vbCritical
+        Exit Function
+    End If
+
+    prevDate = ws.Cells(2, 1).Value
+
+
+    For i = 3 To lastRow
+
+        If Not IsDate(ws.Cells(i, 1).Value) Then
+            MsgBox "Invalid Curve date at row " & i & ".", vbCritical
+            Exit Function
+        End If
+
+        currentDate = ws.Cells(i, 1).Value
+
+        If currentDate <= prevDate Then
+            MsgBox _
+                "Curve dates must be strictly ascending." & vbCrLf & _
+                "Problem at row " & i & ".", _
+                vbCritical
+            Exit Function
+        End If
+
+        prevDate = currentDate
+
+    Next i
+
+
+    MC_ValidateCurve = True
+
+End Function
+
+
+'====================================================================
+' HELPERS
+'====================================================================
+
+Private Function MC_GetCurveSheet() As Worksheet
+
+    On Error Resume Next
+    Set MC_GetCurveSheet = ThisWorkbook.Worksheets("Curve")
+    On Error GoTo 0
+
+End Function
+
+
+Private Function MC_SheetExists(ByVal sheetName As String) As Boolean
+
+    Dim ws As Worksheet
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+
+    MC_SheetExists = Not ws Is Nothing
+
+End Function
+
+
+Private Function MC_GetOrCreateSheet( _
+    ByVal sheetName As String) As Worksheet
+
+    On Error Resume Next
+    Set MC_GetOrCreateSheet = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+
+    If MC_GetOrCreateSheet Is Nothing Then
+
+        Set MC_GetOrCreateSheet = _
+            ThisWorkbook.Worksheets.Add( _
+                After:=ThisWorkbook.Worksheets( _
+                    ThisWorkbook.Worksheets.Count))
+
+        MC_GetOrCreateSheet.Name = sheetName
+
+    End If
+
+End Function
