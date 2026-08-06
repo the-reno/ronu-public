@@ -1,0 +1,235 @@
+Option Explicit
+
+'====================================================================
+' REALIZED RETURN BY INITIAL TENOR
+'
+' Source:
+'   Strategy_Raw
+'
+' Official architecture:
+'   Market data -> R_CURVE -> Strategy_Raw -> Analysis_1
+'
+' IMPORTANT:
+'   This macro does NOT call R_CURVE.
+'   Strategy_Raw remains the immutable official calculation layer.
+'
+' Strategy_Raw expected columns:
+'   A = Start
+'   B = End
+'   C = ON Factor
+'   D = 1M Factor
+'   E = 3M Factor
+'   F = 6M Factor
+'
+' Output:
+'   Analysis_1
+'
+' All tenors are compared over the same realized 6M terminal horizon.
+'====================================================================
+
+Sub Build_Analysis_1()
+
+    Dim wsSource As Worksheet
+    Dim wsOut As Worksheet
+
+    Dim lastRow As Long
+    Dim i As Long
+    Dim outRow As Long
+
+    Dim startDate As Date
+
+    Dim rON As Double
+    Dim r1M As Double
+    Dim r3M As Double
+    Dim r6M As Double
+
+    Dim bestReturn As Double
+    Dim bestTenor As String
+
+    Dim ch As ChartObject
+    Dim s As Series
+
+
+    Set wsSource = ThisWorkbook.Worksheets("Strategy_Raw")
+
+    lastRow = wsSource.Cells(wsSource.Rows.Count, "A").End(xlUp).Row
+
+
+    '----------------------------------------------------------------
+    ' Create / reset output sheet
+    '----------------------------------------------------------------
+
+    On Error Resume Next
+    Set wsOut = ThisWorkbook.Worksheets("Analysis_1")
+    On Error GoTo 0
+
+    If wsOut Is Nothing Then
+
+        Set wsOut = ThisWorkbook.Worksheets.Add(After:=wsSource)
+        wsOut.Name = "Analysis_1"
+
+    Else
+
+        wsOut.Cells.Clear
+
+        For Each ch In wsOut.ChartObjects
+            ch.Delete
+        Next ch
+
+    End If
+
+
+    '----------------------------------------------------------------
+    ' Headers
+    '----------------------------------------------------------------
+
+    wsOut.Range("A1:I1").Value = Array( _
+        "Start", _
+        "ON Return", _
+        "1M Return", _
+        "3M Return", _
+        "6M Return", _
+        "Best Tenor", _
+        "1M - ON", _
+        "3M - ON", _
+        "6M - ON")
+
+
+    outRow = 2
+
+
+    '----------------------------------------------------------------
+    ' Derive returns directly from audited Strategy_Raw factors
+    '----------------------------------------------------------------
+
+    For i = 2 To lastRow
+
+        If IsDate(wsSource.Cells(i, 1).Value) Then
+
+            startDate = wsSource.Cells(i, 1).Value
+
+            If IsNumeric(wsSource.Cells(i, 3).Value) _
+               And IsNumeric(wsSource.Cells(i, 4).Value) _
+               And IsNumeric(wsSource.Cells(i, 5).Value) _
+               And IsNumeric(wsSource.Cells(i, 6).Value) Then
+
+                rON = wsSource.Cells(i, 3).Value - 1
+                r1M = wsSource.Cells(i, 4).Value - 1
+                r3M = wsSource.Cells(i, 5).Value - 1
+                r6M = wsSource.Cells(i, 6).Value - 1
+
+
+                '----------------------------------------------------
+                ' Best realized tenor
+                ' Tie-breaking follows ON -> 1M -> 3M -> 6M order.
+                '----------------------------------------------------
+
+                bestReturn = rON
+                bestTenor = "ON"
+
+                If r1M > bestReturn Then
+                    bestReturn = r1M
+                    bestTenor = "1M"
+                End If
+
+                If r3M > bestReturn Then
+                    bestReturn = r3M
+                    bestTenor = "3M"
+                End If
+
+                If r6M > bestReturn Then
+                    bestReturn = r6M
+                    bestTenor = "6M"
+                End If
+
+
+                '----------------------------------------------------
+                ' Output
+                '----------------------------------------------------
+
+                wsOut.Cells(outRow, 1).Value = startDate
+
+                wsOut.Cells(outRow, 2).Value = rON
+                wsOut.Cells(outRow, 3).Value = r1M
+                wsOut.Cells(outRow, 4).Value = r3M
+                wsOut.Cells(outRow, 5).Value = r6M
+
+                wsOut.Cells(outRow, 6).Value = bestTenor
+
+                wsOut.Cells(outRow, 7).Value = r1M - rON
+                wsOut.Cells(outRow, 8).Value = r3M - rON
+                wsOut.Cells(outRow, 9).Value = r6M - rON
+
+                outRow = outRow + 1
+
+            End If
+
+        End If
+
+    Next i
+
+
+    '----------------------------------------------------------------
+    ' Format
+    '----------------------------------------------------------------
+
+    wsOut.Columns("A").NumberFormat = "dd-mmm-yyyy"
+    wsOut.Columns("B:E").NumberFormat = "0.000%"
+    wsOut.Columns("G:I").NumberFormat = "0.000%"
+
+    wsOut.Columns.AutoFit
+
+
+    '----------------------------------------------------------------
+    ' Chart: realized return over the common 6M horizon
+    '----------------------------------------------------------------
+
+    Set ch = wsOut.ChartObjects.Add( _
+        Left:=20, _
+        Top:=40, _
+        Width:=900, _
+        Height:=500)
+
+    With ch.Chart
+
+        .ChartType = xlLine
+
+        For i = 2 To 5
+
+            Set s = .SeriesCollection.NewSeries
+
+            With s
+                .Name = wsOut.Cells(1, i).Value
+                .XValues = wsOut.Range("A2:A" & outRow - 1)
+                .Values = wsOut.Range( _
+                    wsOut.Cells(2, i), _
+                    wsOut.Cells(outRow - 1, i))
+                .MarkerStyle = xlMarkerStyleNone
+            End With
+
+        Next i
+
+        .HasTitle = True
+        .ChartTitle.Text = "Realized 6M Return by Initial Tenor"
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        With .Axes(xlCategory)
+            .TickLabels.NumberFormat = "mmm-yy"
+        End With
+
+        With .Axes(xlValue)
+            .HasTitle = True
+            .AxisTitle.Text = "Realized Return over Common 6M Horizon"
+            .TickLabels.NumberFormat = "0.00%"
+        End With
+
+    End With
+
+
+    MsgBox (outRow - 2) & _
+           " observations created in Analysis_1.", _
+           vbInformation
+
+End Sub
