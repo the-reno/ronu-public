@@ -1,0 +1,163 @@
+Option Explicit
+
+'=====================================================================
+' SLIDE 2 - DIRECTION MATTERS
+'
+' Message:
+'   The preferred tenor changes when the rate path changes.
+'
+' Presentation choice:
+'   Plot average 6M excess return versus ON, not absolute return.
+'   This removes the distraction created by different absolute starting
+'   rate levels between historical and inverted stress paths.
+'
+' Output:
+'   Clustered column chart:
+'       Historical excess return vs ON (bp)
+'       Inverted excess return vs ON (bp)
+'=====================================================================
+
+Public Sub FINAL_Slide2_Direction()
+
+    Dim ws As Worksheet
+
+    Dim histON As Double
+    Dim hist1M As Double
+    Dim hist3M As Double
+    Dim hist6M As Double
+
+    Dim invON As Double
+    Dim inv1M As Double
+    Dim inv3M As Double
+    Dim inv6M As Double
+
+    Dim histWinner As String
+    Dim invWinner As String
+
+    Dim headline As String
+    Dim conclusion As String
+
+    Dim ch As ChartObject
+
+    Dim h1 As Double
+    Dim h3 As Double
+    Dim h6 As Double
+
+    Dim i1 As Double
+    Dim i3 As Double
+    Dim i6 As Double
+
+    Dim maxAbs As Double
+    Dim axisMax As Double
+
+    Set ws = FINAL_GetOrCreateSheet(FINAL_S2, True)
+
+    histON = FINAL_ScenarioAverage("Historical", 4)
+    hist1M = FINAL_ScenarioAverage("Historical", 5)
+    hist3M = FINAL_ScenarioAverage("Historical", 6)
+    hist6M = FINAL_ScenarioAverage("Historical", 7)
+
+    invON = FINAL_ScenarioAverage("Inverted", 4)
+    inv1M = FINAL_ScenarioAverage("Inverted", 5)
+    inv3M = FINAL_ScenarioAverage("Inverted", 6)
+    inv6M = FINAL_ScenarioAverage("Inverted", 7)
+
+    histWinner = FINAL_BestTenorByAverage("Historical")
+    invWinner = FINAL_BestTenorByAverage("Inverted")
+
+    If histWinner <> invWinner Then
+        headline = "The preferred tenor reverses when the rate path reverses"
+    Else
+        headline = "Rate direction materially changes the relative value of tenor"
+    End If
+
+    conclusion = _
+        "Historical path winner = " & histWinner & _
+        "; inverted path winner = " & invWinner & _
+        ". The comparison is shown as excess return versus ON within each path."
+
+    FINAL_PrepareSlideSheet ws, headline, conclusion
+
+    '-------------------------------------------------------------
+    ' Convert relative return to basis points.
+    '-------------------------------------------------------------
+    h1 = (hist1M - histON) * 10000#
+    h3 = (hist3M - histON) * 10000#
+    h6 = (hist6M - histON) * 10000#
+
+    i1 = (inv1M - invON) * 10000#
+    i3 = (inv3M - invON) * 10000#
+    i6 = (inv6M - invON) * 10000#
+
+    ws.Range("A19:C19").Value = Array("Tenor", "Historical", "Inverted")
+
+    ws.Range("A20").Value = "ON"
+    ws.Range("A21").Value = "1M"
+    ws.Range("A22").Value = "3M"
+    ws.Range("A23").Value = "6M"
+
+    ws.Range("B20").Value = 0
+    ws.Range("B21").Value = h1
+    ws.Range("B22").Value = h3
+    ws.Range("B23").Value = h6
+
+    ws.Range("C20").Value = 0
+    ws.Range("C21").Value = i1
+    ws.Range("C22").Value = i3
+    ws.Range("C23").Value = i6
+
+    ws.Range("E19").Value = "Path"
+    ws.Range("F19").Value = "Best tenor"
+    ws.Range("E20").Value = "Historical"
+    ws.Range("F20").Value = histWinner
+    ws.Range("E21").Value = "Inverted"
+    ws.Range("F21").Value = invWinner
+
+    ws.Range("A19:F19").Font.Bold = True
+    ws.Range("B20:C23").NumberFormat = "0.0 ""bp"""
+
+    '-------------------------------------------------------------
+    ' Symmetric scale around zero makes the reversal visually honest.
+    '-------------------------------------------------------------
+    maxAbs = 0
+
+    If Abs(h1) > maxAbs Then maxAbs = Abs(h1)
+    If Abs(h3) > maxAbs Then maxAbs = Abs(h3)
+    If Abs(h6) > maxAbs Then maxAbs = Abs(h6)
+    If Abs(i1) > maxAbs Then maxAbs = Abs(i1)
+    If Abs(i3) > maxAbs Then maxAbs = Abs(i3)
+    If Abs(i6) > maxAbs Then maxAbs = Abs(i6)
+
+    axisMax = FINAL_NiceBpMax(maxAbs)
+
+    Set ch = ws.ChartObjects.Add(Left:=95, Top:=80, Width:=760, Height:=300)
+
+    With ch.Chart
+
+        .ChartType = xlColumnClustered
+        .SetSourceData ws.Range("A19:C23")
+
+        FINAL_StyleChart ch.Chart, "Average 6M excess return versus ON", True
+
+        FINAL_SetSeriesColor .SeriesCollection(1), FINAL_ColorDark()
+        FINAL_SetSeriesColor .SeriesCollection(2), FINAL_ColorAccent()
+
+        .SeriesCollection(1).ApplyDataLabels
+        .SeriesCollection(2).ApplyDataLabels
+
+        .SeriesCollection(1).DataLabels.NumberFormat = "0.0 ""bp"""
+        .SeriesCollection(2).DataLabels.NumberFormat = "0.0 ""bp"""
+
+        .Axes(xlValue).MinimumScale = -axisMax
+        .Axes(xlValue).MaximumScale = axisMax
+        .Axes(xlValue).MajorUnit = axisMax / 4#
+
+        .Axes(xlValue).HasTitle = True
+        .Axes(xlValue).AxisTitle.Text = "Excess return vs ON (bp)"
+        .Axes(xlValue).CrossesAt = 0
+
+    End With
+
+    ws.Columns("A:F").AutoFit
+
+End Sub
