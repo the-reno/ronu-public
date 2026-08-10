@@ -32,11 +32,11 @@ Public Sub FINAL_Slide4_Robust()
     Dim r As Long
 
     Dim robustText As String
-    Dim nonZeroWeights As Long
 
     Dim histBp As Double
     Dim invBp As Double
     Dim maxDirBp As Double
+    Dim weightedMonths As Double
 
     Dim onHistBp As Double
     Dim onInvBp As Double
@@ -90,14 +90,10 @@ Public Sub FINAL_Slide4_Robust()
         wsPort.Cells(robustRow, 3).Value, _
         wsPort.Cells(robustRow, 4).Value)
 
-    If CDbl(wsPort.Cells(robustRow, 1).Value) > 0 Then nonZeroWeights = nonZeroWeights + 1
-    If CDbl(wsPort.Cells(robustRow, 2).Value) > 0 Then nonZeroWeights = nonZeroWeights + 1
-    If CDbl(wsPort.Cells(robustRow, 3).Value) > 0 Then nonZeroWeights = nonZeroWeights + 1
-    If CDbl(wsPort.Cells(robustRow, 4).Value) > 0 Then nonZeroWeights = nonZeroWeights + 1
-
     histBp = CDbl(wsPort.Cells(robustRow, 7).Value) * 10000#
     invBp = CDbl(wsPort.Cells(robustRow, 8).Value) * 10000#
     maxDirBp = CDbl(wsPort.Cells(robustRow, 9).Value) * 10000#
+    weightedMonths = CDbl(wsPort.Cells(robustRow, 11).Value)
 
     onHistBp = CDbl(wsPort.Cells(onRow, 7).Value) * 10000#
     onInvBp = CDbl(wsPort.Cells(onRow, 8).Value) * 10000#
@@ -105,16 +101,16 @@ Public Sub FINAL_Slide4_Robust()
     sixHistBp = CDbl(wsPort.Cells(sixMRow, 7).Value) * 10000#
     sixInvBp = CDbl(wsPort.Cells(sixMRow, 8).Value) * 10000#
 
-    If nonZeroWeights > 1 Then
-        headline = "A balanced tenor mix reduces the cost of being wrong"
+    If Abs(histBp - invBp) <= 0.5 Then
+        headline = "The robust mix equalizes the cost of being wrong at ~" & Format$(maxDirBp, "0.0") & " bp"
     Else
-        headline = "The robust allocation minimizes directional regret"
+        headline = "The robust mix limits directional regret to ~" & Format$(maxDirBp, "0.0") & " bp"
     End If
 
     conclusion = _
-        robustText & " minimizes the larger average regret across the two rate directions: " & _
-        Format$(histBp, "0.0") & " bp historical versus " & _
-        Format$(invBp, "0.0") & " bp inverted."
+        robustText & " produces " & Format$(histBp, "0.0") & " bp historical and " & _
+        Format$(invBp, "0.0") & " bp inverted average regret; maximum directional regret = " & _
+        Format$(maxDirBp, "0.0") & " bp."
 
     FINAL_PrepareSlideSheet ws, headline, conclusion
 
@@ -153,7 +149,7 @@ Public Sub FINAL_Slide4_Robust()
     ws.Range("AC20").Value = invBp
 
     '-------------------------------------------------------------
-    ' RESULT TABLE
+    ' DECISION BOX
     '-------------------------------------------------------------
     ws.Range("K5:N5").Merge
     ws.Range("K5").Value = "ROBUST ALLOCATION"
@@ -169,14 +165,18 @@ Public Sub FINAL_Slide4_Robust()
     ws.Range("L9").Value = wsPort.Cells(robustRow, 4).Value
     ws.Range("L6:L9").NumberFormat = "0%"
 
-    ws.Range("K11").Value = "Historical avg regret"
-    ws.Range("K12").Value = "Inverted avg regret"
-    ws.Range("K13").Value = "Max directional avg regret"
+    ws.Range("K11").Value = "Historical regret"
+    ws.Range("K12").Value = "Inverted regret"
+    ws.Range("K13").Value = "Maximum regret"
+    ws.Range("K14").Value = "Weighted tenor"
 
     ws.Range("M11").Value = histBp
     ws.Range("M12").Value = invBp
     ws.Range("M13").Value = maxDirBp
+    ws.Range("M14").Value = weightedMonths
+
     ws.Range("M11:M13").NumberFormat = "0.0 ""bp"""
+    ws.Range("M14").NumberFormat = "0.0 ""months"""
 
     With ws.Range("K5:N5")
         .Font.Bold = True
@@ -184,9 +184,27 @@ Public Sub FINAL_Slide4_Robust()
         .Interior.Color = RGB(243, 244, 246)
     End With
 
-    ws.Range("K6:K9,K11:K13").Font.Bold = True
+    ws.Range("K6:K9,K11:K14").Font.Bold = True
     ws.Range("L6:L9").Font.Size = 14
-    ws.Range("M11:M13").Font.Size = 13
+    ws.Range("M11:M12").Font.Size = 12
+
+    With ws.Range("K16:N16")
+        .Merge
+        .Value = "MAX DIRECTIONAL REGRET"
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .Interior.Color = RGB(243, 244, 246)
+    End With
+
+    With ws.Range("K17:N18")
+        .Merge
+        .Value = Format$(maxDirBp, "0.0") & " bp"
+        .Font.Bold = True
+        .Font.Size = 20
+        .Font.Color = FINAL_ColorAccent2()
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
 
     '-------------------------------------------------------------
     ' SCATTER - same scale on both axes is intentional
@@ -200,14 +218,14 @@ Public Sub FINAL_Slide4_Robust()
 
         Set sAll = .SeriesCollection.NewSeries
         With sAll
-            .Name = "All 286 allocations"
+            .Name = "286 allocations"
             .XValues = ws.Range("P20:P" & 18 + lastRow)
             .Values = ws.Range("Q20:Q" & 18 + lastRow)
             .MarkerStyle = xlMarkerStyleCircle
-            .MarkerSize = 5
+            .MarkerSize = 4
             .Format.Line.Visible = msoFalse
         End With
-        FINAL_SetSeriesColor sAll, FINAL_ColorLightGray(), 0.15
+        FINAL_SetSeriesColor sAll, FINAL_ColorLightGray(), 0.35
 
         Set sLine = .SeriesCollection.NewSeries
         With sLine
@@ -216,6 +234,7 @@ Public Sub FINAL_Slide4_Robust()
             .Values = ws.Range("T20:T21")
             .ChartType = xlXYScatterLinesNoMarkers
             .Format.Line.Weight = 1.25
+            .Format.Line.DashStyle = msoLineDash
         End With
         FINAL_SetSeriesColor sLine, FINAL_ColorGray()
 
@@ -247,17 +266,17 @@ Public Sub FINAL_Slide4_Robust()
             .XValues = ws.Range("AB20")
             .Values = ws.Range("AC20")
             .MarkerStyle = xlMarkerStyleDiamond
-            .MarkerSize = 11
+            .MarkerSize = 12
             .Format.Line.Visible = msoFalse
         End With
         FINAL_SetSeriesColor sRobust, FINAL_ColorAccent2()
 
-        FINAL_StyleChart ch.Chart, "Directional protection across 286 allocations", True
+        FINAL_StyleChart ch.Chart, "Directional regret by allocation - lower-left is better", True
 
         With .Axes(xlCategory)
             .MinimumScale = 0
             .MaximumScale = axisMax
-            .MajorUnit = axisMax / 5#
+            .MajorUnit = axisMax / 4#
             .HasTitle = True
             .AxisTitle.Text = "Historical-path average regret (bp)"
         End With
@@ -265,7 +284,7 @@ Public Sub FINAL_Slide4_Robust()
         With .Axes(xlValue)
             .MinimumScale = 0
             .MaximumScale = axisMax
-            .MajorUnit = axisMax / 5#
+            .MajorUnit = axisMax / 4#
             .HasTitle = True
             .AxisTitle.Text = "Inverted-path average regret (bp)"
         End With
@@ -274,12 +293,15 @@ Public Sub FINAL_Slide4_Robust()
 
         sON.ApplyDataLabels
         sON.DataLabels(1).Text = "100% ON"
+        sON.DataLabels(1).Position = xlLabelPositionRight
 
         s6M.ApplyDataLabels
         s6M.DataLabels(1).Text = "100% 6M"
+        s6M.DataLabels(1).Position = xlLabelPositionRight
 
         sRobust.ApplyDataLabels
-        sRobust.DataLabels(1).Text = robustText
+        sRobust.DataLabels(1).Text = "ROBUST" & vbLf & robustText
+        sRobust.DataLabels(1).Position = xlLabelPositionRight
 
         On Error GoTo 0
 
