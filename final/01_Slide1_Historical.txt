@@ -4,23 +4,22 @@ Option Explicit
 ' SLIDE 1 - HISTORICAL EVIDENCE
 '
 ' Message:
-'   The realized rate path determines which tenor wins.
-'   During a hiking / higher-for-longer environment, shorter cash
-'   can reprice into higher rates rather than locking too early.
+'   Start with what actually happened.
+'   Short tenors can reprice as rates move; longer tenors lock earlier.
 '
-' Output:
-'   1) ON historical rate path from Jan-2022 to latest curve date.
-'   2) Average realized rolling 6M return by initial tenor.
+' Presentation choice:
+'   1) Show the realized ON rate path.
+'   2) Compare tenor performance as EXCESS RETURN VS ON in bp.
+'      The relative chart makes economically small differences visible
+'      and avoids overstating a narrow historical winner.
 '=====================================================================
 
 Public Sub FINAL_Slide1_Historical()
 
     Dim ws As Worksheet
     Dim wsCurve As Worksheet
-    Dim wsCore As Worksheet
 
     Dim lastCurveRow As Long
-    Dim lastCoreRow As Long
     Dim r As Long
     Dim outRow As Long
 
@@ -29,12 +28,19 @@ Public Sub FINAL_Slide1_Historical()
     Dim avg3M As Double
     Dim avg6M As Double
 
+    Dim bp1M As Double
+    Dim bp3M As Double
+    Dim bp6M As Double
+    Dim maxAbsBp As Double
+    Dim bpAxisMax As Double
+
     Dim winner As String
     Dim headline As String
     Dim conclusion As String
+    Dim sixMText As String
 
     Dim chPath As ChartObject
-    Dim chReturn As ChartObject
+    Dim chRelative As ChartObject
 
     Dim minRate As Double
     Dim maxRate As Double
@@ -43,32 +49,49 @@ Public Sub FINAL_Slide1_Historical()
     Dim span As Double
     Dim stepRate As Double
 
-    Dim minRet As Double
-    Dim maxRet As Double
-
     Set ws = FINAL_GetOrCreateSheet(FINAL_S1, True)
     Set wsCurve = ThisWorkbook.Worksheets(FINAL_CURVE)
-    Set wsCore = ThisWorkbook.Worksheets(FINAL_CORE)
 
     avgON = FINAL_ScenarioAverage("Historical", 4)
     avg1M = FINAL_ScenarioAverage("Historical", 5)
     avg3M = FINAL_ScenarioAverage("Historical", 6)
     avg6M = FINAL_ScenarioAverage("Historical", 7)
 
+    bp1M = (avg1M - avgON) * 10000#
+    bp3M = (avg3M - avgON) * 10000#
+    bp6M = (avg6M - avgON) * 10000#
+
     winner = FINAL_BestTenorByAverage("Historical")
 
-    If winner = "ON" Then
-        headline = "Rolling short protected returns during the realized rate cycle"
-        conclusion = "Historical winner = ON. Frequent repricing allowed short cash to capture higher rates during the hiking phase."
+    If bp6M < 0 Then
+        sixMText = "6M lagged ON by " & Format$(Abs(bp6M), "0.0") & " bp"
+    ElseIf bp6M > 0 Then
+        sixMText = "6M exceeded ON by " & Format$(bp6M, "0.0") & " bp"
     Else
-        headline = winner & " delivered the highest average realized 6M return over the historical sample"
-        conclusion = "The historical winner is data-driven: " & winner & " produced the highest average rolling 6M return."
+        sixMText = "6M matched ON"
+    End If
+
+    If winner = "1M" And Abs(bp1M) <= 2# Then
+        headline = "Short tenors delivered similar realized returns; 1M edged ON while 6M lagged"
+        conclusion = _
+            "Across " & FINAL_ScenarioCount("Historical") & " monthly 6M starts, 1M exceeded ON by " & _
+            Format$(bp1M, "0.0") & " bp on average; " & sixMText & "."
+
+    ElseIf winner = "ON" Then
+        headline = "Rolling short protected returns during the realized rate cycle"
+        conclusion = _
+            "ON produced the highest average realized 6M return; " & sixMText & "."
+
+    Else
+        headline = winner & " produced the highest average realized 6M return over the historical sample"
+        conclusion = _
+            "Historical winner = " & winner & ". Relative performance versus ON is shown in basis points to keep the economic difference clear."
     End If
 
     FINAL_PrepareSlideSheet ws, headline, conclusion
 
     '-------------------------------------------------------------
-    ' DATA 1: ON path
+    ' DATA 1: historical ON path
     '-------------------------------------------------------------
     ws.Range("A19:B19").Value = Array("Date", "ON")
     lastCurveRow = FINAL_LastRow(wsCurve, 1)
@@ -85,16 +108,16 @@ Public Sub FINAL_Slide1_Historical()
     ws.Range("B20:B" & outRow - 1).NumberFormat = "0.00%"
 
     '-------------------------------------------------------------
-    ' DATA 2: average realized 6M return
+    ' DATA 2: historical excess return vs ON
     '-------------------------------------------------------------
-    ws.Range("D19:E19").Value = Array("Tenor", "Average 6M Return")
+    ws.Range("D19:E19").Value = Array("Tenor", "Excess vs ON (bp)")
 
-    ws.Range("D20").Value = "ON": ws.Range("E20").Value = avgON
-    ws.Range("D21").Value = "1M": ws.Range("E21").Value = avg1M
-    ws.Range("D22").Value = "3M": ws.Range("E22").Value = avg3M
-    ws.Range("D23").Value = "6M": ws.Range("E23").Value = avg6M
+    ws.Range("D20").Value = "ON": ws.Range("E20").Value = 0
+    ws.Range("D21").Value = "1M": ws.Range("E21").Value = bp1M
+    ws.Range("D22").Value = "3M": ws.Range("E22").Value = bp3M
+    ws.Range("D23").Value = "6M": ws.Range("E23").Value = bp6M
 
-    ws.Range("E20:E23").NumberFormat = "0.000%"
+    ws.Range("E20:E23").NumberFormat = "0.0 ""bp"""
 
     ws.Range("G19").Value = "Historical winner"
     ws.Range("H19").Value = winner
@@ -108,18 +131,15 @@ Public Sub FINAL_Slide1_Historical()
 
     '-------------------------------------------------------------
     ' CHART 1: historical ON path
-    ' 16:9 slide canvas logic:
-    '   left chart ~61% of chart area
     '-------------------------------------------------------------
     Set chPath = ws.ChartObjects.Add(Left:=15, Top:=78, Width:=555, Height:=285)
 
     With chPath.Chart
         .ChartType = xlLine
         .SetSourceData ws.Range("A19:B" & outRow - 1)
-        FINAL_StyleChart chPath.Chart, "Historical ON rate path", False
+        FINAL_StyleChart chPath.Chart, "Historical overnight rate path", False
 
         FINAL_SetSeriesColor .SeriesCollection(1), FINAL_ColorDark()
-
         .SeriesCollection(1).Format.Line.Weight = 2.25
         .SeriesCollection(1).MarkerStyle = xlMarkerStyleNone
 
@@ -158,42 +178,48 @@ Public Sub FINAL_Slide1_Historical()
     End With
 
     '-------------------------------------------------------------
-    ' CHART 2: average realized return by tenor
+    ' CHART 2: relative realized return vs ON
+    ' Horizontal bars make the small +/- bp differences readable.
     '-------------------------------------------------------------
-    Set chReturn = ws.ChartObjects.Add(Left:=590, Top:=78, Width:=335, Height:=285)
+    maxAbsBp = WorksheetFunction.Max(Abs(bp1M), Abs(bp3M), Abs(bp6M), 1#)
+    bpAxisMax = FINAL_NiceBpMax(maxAbsBp)
 
-    With chReturn.Chart
-        .ChartType = xlColumnClustered
+    Set chRelative = ws.ChartObjects.Add(Left:=590, Top:=78, Width:=335, Height:=285)
+
+    With chRelative.Chart
+        .ChartType = xlBarClustered
         .SetSourceData ws.Range("D19:E23")
-        FINAL_StyleChart chReturn.Chart, "Average realized return over common 6M horizon", False
+        FINAL_StyleChart chRelative.Chart, "Historical excess return vs ON", False
 
-        FINAL_SetSeriesColor .SeriesCollection(1), FINAL_ColorAccent()
+        FINAL_SetSeriesColor .SeriesCollection(1), FINAL_ColorLightGray()
+
+        On Error Resume Next
+        .SeriesCollection(1).Points(1).Format.Fill.ForeColor.RGB = FINAL_ColorGray()
+        .SeriesCollection(1).Points(1).Format.Line.ForeColor.RGB = FINAL_ColorGray()
+        .SeriesCollection(1).Points(2).Format.Fill.ForeColor.RGB = FINAL_ColorAccent()
+        .SeriesCollection(1).Points(2).Format.Line.ForeColor.RGB = FINAL_ColorAccent()
+        .SeriesCollection(1).Points(3).Format.Fill.ForeColor.RGB = FINAL_ColorGray()
+        .SeriesCollection(1).Points(3).Format.Line.ForeColor.RGB = FINAL_ColorGray()
+        .SeriesCollection(1).Points(4).Format.Fill.ForeColor.RGB = FINAL_ColorRisk()
+        .SeriesCollection(1).Points(4).Format.Line.ForeColor.RGB = FINAL_ColorRisk()
+        On Error GoTo 0
 
         .SeriesCollection(1).ApplyDataLabels
-        .SeriesCollection(1).DataLabels.NumberFormat = "0.00%"
+        .SeriesCollection(1).DataLabels.NumberFormat = "0.0 ""bp"""
         .SeriesCollection(1).DataLabels.Position = xlLabelPositionOutsideEnd
 
-        .Axes(xlValue).TickLabels.NumberFormat = "0.0%"
-        .Axes(xlValue).HasTitle = True
-        .Axes(xlValue).AxisTitle.Text = "6M cumulative return"
-    End With
+        With .Axes(xlValue)
+            .MinimumScale = -bpAxisMax
+            .MaximumScale = bpAxisMax
+            .MajorUnit = bpAxisMax / 3#
+            .HasTitle = True
+            .AxisTitle.Text = "Excess return vs ON (bp)"
+            .CrossesAt = 0
+        End With
 
-    minRet = FINAL_Min4(avgON, avg1M, avg3M, avg6M)
-    maxRet = FINAL_Max4(avgON, avg1M, avg3M, avg6M)
-
-    If minRet >= 0 Then
-        axisMin = 0
-    Else
-        axisMin = WorksheetFunction.Floor_Math(minRet * 1.1, 0.0025)
-    End If
-
-    axisMax = WorksheetFunction.Ceiling_Math(maxRet * 1.15, 0.0025)
-    If axisMax <= axisMin Then axisMax = axisMin + 0.0025
-
-    With chReturn.Chart.Axes(xlValue)
-        .MinimumScale = axisMin
-        .MaximumScale = axisMax
-        .MajorUnit = 0.0025
+        On Error Resume Next
+        .Axes(xlCategory).ReversePlotOrder = True
+        On Error GoTo 0
     End With
 
     ws.Columns("A:H").AutoFit
