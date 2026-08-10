@@ -1,0 +1,278 @@
+Option Explicit
+
+'=====================================================================
+' SLIDE 5 - EXECUTION
+'
+' Message:
+'   Translate the tenor framework into an executable deposit program.
+'
+' User input:
+'   Final_Input!B3  Credit rating
+'   Final_Input!B4  Global coverage
+'   Final_Input!B5  Additional proof point
+'
+'   Final_Input!A10:C...
+'       Date | 3M Premium (bp) | 6M Premium (bp)
+'
+' The master creates Final_Input automatically.
+' No institution name is used anywhere in the model.
+'
+' Output:
+'   1) 3M and 6M deposit premium history since Jan-2025.
+'   2) Average premium statistics.
+'   3) Institutional proof-point data table.
+'=====================================================================
+
+Public Sub FINAL_Slide5_Execution()
+
+    Dim ws As Worksheet
+    Dim wsIn As Worksheet
+
+    Dim lastInputRow As Long
+    Dim r As Long
+    Dim outRow As Long
+
+    Dim d As Variant
+    Dim v3 As Variant
+    Dim v6 As Variant
+
+    Dim sum3 As Double
+    Dim sum6 As Double
+    Dim n3 As Long
+    Dim n6 As Long
+
+    Dim avg3 As Double
+    Dim avg6 As Double
+    Dim combinedAvg As Double
+
+    Dim headline As String
+    Dim conclusion As String
+
+    Dim ch As ChartObject
+
+    Dim minBp As Double
+    Dim maxBp As Double
+    Dim axisMin As Double
+    Dim axisMax As Double
+    Dim havePremiumData As Boolean
+
+    Set ws = FINAL_GetOrCreateSheet(FINAL_S5, True)
+    Set wsIn = ThisWorkbook.Worksheets(FINAL_INPUT)
+
+    headline = "Translate the tenor framework into an executable deposit program with competitive pricing"
+    conclusion = "Price, allocate and review: combine competitive deposit levels with credit quality and global execution capability."
+
+    FINAL_PrepareSlideSheet ws, headline, conclusion
+
+    '-------------------------------------------------------------
+    ' PROOF POINTS
+    '-------------------------------------------------------------
+    ws.Range("K5:N5").Merge
+    ws.Range("K5").Value = "EXECUTION PARTNER"
+
+    ws.Range("K6").Value = "Credit rating"
+    ws.Range("K7").Value = "Global coverage"
+    ws.Range("K8").Value = "Additional proof point"
+
+    ws.Range("M6").Value = wsIn.Range("B3").Value
+    ws.Range("M7").Value = wsIn.Range("B4").Value
+    ws.Range("M8").Value = wsIn.Range("B5").Value
+
+    ws.Range("K11").Value = "Process"
+    ws.Range("M11").Value = "PRICE  >  ALLOCATE  >  REVIEW"
+
+    With ws.Range("K5:N5")
+        .Font.Bold = True
+        .Font.Size = 12
+        .Interior.Color = RGB(243, 244, 246)
+    End With
+
+    ws.Range("K6:K8,K11").Font.Bold = True
+    ws.Range("M6:M8").Font.Size = 12
+    ws.Range("M11").Font.Bold = True
+    ws.Range("M11").Font.Size = 12
+
+    '-------------------------------------------------------------
+    ' PREMIUM DATA - actual user observations only
+    '-------------------------------------------------------------
+    ws.Range("A19:C19").Value = Array("Date", "3M Premium (bp)", "6M Premium (bp)")
+    ws.Range("A19:C19").Font.Bold = True
+
+    lastInputRow = FINAL_LastRow(wsIn, 1)
+    outRow = 20
+
+    If lastInputRow >= 10 Then
+
+        For r = 10 To lastInputRow
+
+            d = wsIn.Cells(r, 1).Value
+            v3 = wsIn.Cells(r, 2).Value
+            v6 = wsIn.Cells(r, 3).Value
+
+            If IsDate(d) Then
+
+                If CDate(d) >= DateSerial(2025, 1, 1) Then
+
+                    If IsNumeric(v3) Or IsNumeric(v6) Then
+
+                        ws.Cells(outRow, 1).Value = CDate(d)
+
+                        If IsNumeric(v3) Then
+                            ws.Cells(outRow, 2).Value = CDbl(v3)
+                            sum3 = sum3 + CDbl(v3)
+                            n3 = n3 + 1
+                        End If
+
+                        If IsNumeric(v6) Then
+                            ws.Cells(outRow, 3).Value = CDbl(v6)
+                            sum6 = sum6 + CDbl(v6)
+                            n6 = n6 + 1
+                        End If
+
+                        outRow = outRow + 1
+
+                    End If
+
+                End If
+
+            End If
+
+        Next r
+
+    End If
+
+    havePremiumData = (outRow > 20)
+
+    If havePremiumData Then
+
+        If n3 > 0 Then avg3 = sum3 / n3
+        If n6 > 0 Then avg6 = sum6 / n6
+
+        If n3 + n6 > 0 Then
+            combinedAvg = (sum3 + sum6) / (n3 + n6)
+        End If
+
+        ws.Range("K13").Value = "Average 3M premium"
+        ws.Range("K14").Value = "Average 6M premium"
+        ws.Range("K15").Value = "Combined observed premium"
+
+        If n3 > 0 Then ws.Range("M13").Value = avg3
+        If n6 > 0 Then ws.Range("M14").Value = avg6
+        ws.Range("M15").Value = combinedAvg
+
+        ws.Range("M13:M15").NumberFormat = "0.0 ""bp"""
+        ws.Range("K13:K15").Font.Bold = True
+        ws.Range("M15").Font.Bold = True
+        ws.Range("M15").Font.Size = 14
+
+        ws.Range("A20:A" & outRow - 1).NumberFormat = "mmm-yy"
+        ws.Range("B20:C" & outRow - 1).NumberFormat = "0.0 ""bp"""
+
+        conclusion = _
+            "Observed deposit pricing since Jan-2025: average 3M premium = " & _
+            IIf(n3 > 0, Format$(avg3, "0.0") & " bp", "n/a") & _
+            "; average 6M premium = " & _
+            IIf(n6 > 0, Format$(avg6, "0.0") & " bp", "n/a") & _
+            ". Use pricing, credit quality and coverage to execute the tenor framework."
+
+        ws.Range("A2").Value = conclusion
+
+        '---------------------------------------------------------
+        ' CHART - premium history
+        '---------------------------------------------------------
+        Set ch = ws.ChartObjects.Add(Left:=15, Top:=78, Width:=650, Height:=300)
+
+        With ch.Chart
+
+            .ChartType = xlLine
+            .SetSourceData ws.Range("A19:C" & outRow - 1)
+
+            FINAL_StyleChart ch.Chart, "3M and 6M deposit premium since Jan-2025", True
+
+            If .SeriesCollection.Count >= 1 Then
+                FINAL_SetSeriesColor .SeriesCollection(1), FINAL_ColorDark()
+                .SeriesCollection(1).Format.Line.Weight = 2#
+                .SeriesCollection(1).MarkerStyle = xlMarkerStyleNone
+            End If
+
+            If .SeriesCollection.Count >= 2 Then
+                FINAL_SetSeriesColor .SeriesCollection(2), FINAL_ColorAccent()
+                .SeriesCollection(2).Format.Line.Weight = 2#
+                .SeriesCollection(2).MarkerStyle = xlMarkerStyleNone
+            End If
+
+            .Axes(xlValue).HasTitle = True
+            .Axes(xlValue).AxisTitle.Text = "Premium (bp)"
+            .Axes(xlValue).TickLabels.NumberFormat = "0 ""bp"""
+
+            On Error Resume Next
+            .Axes(xlCategory).CategoryType = xlTimeScale
+            .Axes(xlCategory).MajorUnit = 3
+            .Axes(xlCategory).MajorUnitScale = xlMonths
+            .Axes(xlCategory).TickLabels.NumberFormat = "mmm-yy"
+            On Error GoTo 0
+
+        End With
+
+        minBp = 0
+        maxBp = 0
+
+        If n3 > 0 Then
+            minBp = WorksheetFunction.Min(ws.Range("B20:B" & outRow - 1))
+            maxBp = WorksheetFunction.Max(ws.Range("B20:B" & outRow - 1))
+        End If
+
+        If n6 > 0 Then
+            If n3 = 0 Then
+                minBp = WorksheetFunction.Min(ws.Range("C20:C" & outRow - 1))
+                maxBp = WorksheetFunction.Max(ws.Range("C20:C" & outRow - 1))
+            Else
+                If WorksheetFunction.Min(ws.Range("C20:C" & outRow - 1)) < minBp Then
+                    minBp = WorksheetFunction.Min(ws.Range("C20:C" & outRow - 1))
+                End If
+                If WorksheetFunction.Max(ws.Range("C20:C" & outRow - 1)) > maxBp Then
+                    maxBp = WorksheetFunction.Max(ws.Range("C20:C" & outRow - 1))
+                End If
+            End If
+        End If
+
+        If minBp >= 0 Then
+            axisMin = 0
+        Else
+            axisMin = -FINAL_NiceBpMax(Abs(minBp))
+        End If
+
+        axisMax = FINAL_NiceBpMax(maxBp)
+
+        If axisMax <= axisMin Then axisMax = axisMin + 5
+
+        With ch.Chart.Axes(xlValue)
+            .MinimumScale = axisMin
+            .MaximumScale = axisMax
+            .MajorUnit = (axisMax - axisMin) / 5#
+        End With
+
+    Else
+
+        ws.Range("A6:H9").Merge
+        ws.Range("A6").Value = _
+            "Premium chart pending input. Paste Date / 3M Premium (bp) / 6M Premium (bp) " & _
+            "in Final_Input starting at row 10."
+
+        With ws.Range("A6:H9")
+            .WrapText = True
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+            .Font.Size = 13
+            .Font.Color = RGB(75, 85, 99)
+            .Interior.Color = RGB(249, 250, 251)
+        End With
+
+        ws.Range("A2").Value = _
+            "Execution slide template is ready. Add actual premium history and institutional proof points in Final_Input."
+
+    End If
+
+    ws.Columns("K:N").ColumnWidth = 15
+
+End Sub
