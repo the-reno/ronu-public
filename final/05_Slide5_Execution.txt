@@ -14,13 +14,10 @@ Option Explicit
 '   Final_Input!A10:C...
 '       Date | 3M Premium (bp) | 6M Premium (bp)
 '
-' The master creates Final_Input automatically.
-' No institution name is used anywhere in the model.
-'
 ' Output:
-'   1) 3M and 6M deposit premium history since Jan-2025.
-'   2) Average premium statistics.
-'   3) Institutional proof-point data table.
+'   1) Actual 3M and 6M premium history since Jan-2025.
+'   2) A horizontal observed-average line.
+'   3) Institutional proof points and execution process.
 '=====================================================================
 
 Public Sub FINAL_Slide5_Execution()
@@ -49,6 +46,7 @@ Public Sub FINAL_Slide5_Execution()
     Dim conclusion As String
 
     Dim ch As ChartObject
+    Dim sAvg As Series
 
     Dim minBp As Double
     Dim maxBp As Double
@@ -59,7 +57,7 @@ Public Sub FINAL_Slide5_Execution()
     Set ws = FINAL_GetOrCreateSheet(FINAL_S5, True)
     Set wsIn = ThisWorkbook.Worksheets(FINAL_INPUT)
 
-    headline = "Translate the tenor framework into an executable deposit program with competitive pricing"
+    headline = "Translate the tenor framework into an executable deposit program with consistent pricing"
     conclusion = "Price, allocate and review: combine competitive deposit levels with credit quality and global execution capability."
 
     FINAL_PrepareSlideSheet ws, headline, conclusion
@@ -78,8 +76,8 @@ Public Sub FINAL_Slide5_Execution()
     ws.Range("M7").Value = wsIn.Range("B4").Value
     ws.Range("M8").Value = wsIn.Range("B5").Value
 
-    ws.Range("K11").Value = "Process"
-    ws.Range("M11").Value = "PRICE  >  ALLOCATE  >  REVIEW"
+    ws.Range("K10").Value = "Process"
+    ws.Range("M10").Value = "PRICE  >  ALLOCATE  >  REVIEW"
 
     With ws.Range("K5:N5")
         .Font.Bold = True
@@ -87,16 +85,17 @@ Public Sub FINAL_Slide5_Execution()
         .Interior.Color = RGB(243, 244, 246)
     End With
 
-    ws.Range("K6:K8,K11").Font.Bold = True
-    ws.Range("M6:M8").Font.Size = 12
-    ws.Range("M11").Font.Bold = True
-    ws.Range("M11").Font.Size = 12
+    ws.Range("K6:K8,K10").Font.Bold = True
+    ws.Range("M6:M8").Font.Size = 13
+    ws.Range("M6:M8").Font.Bold = True
+    ws.Range("M10").Font.Bold = True
+    ws.Range("M10").Font.Size = 12
 
     '-------------------------------------------------------------
     ' PREMIUM DATA - actual user observations only
     '-------------------------------------------------------------
-    ws.Range("A19:C19").Value = Array("Date", "3M Premium (bp)", "6M Premium (bp)")
-    ws.Range("A19:C19").Font.Bold = True
+    ws.Range("A19:D19").Value = Array("Date", "3M Premium (bp)", "6M Premium (bp)", "Observed Average (bp)")
+    ws.Range("A19:D19").Font.Bold = True
 
     lastInputRow = FINAL_LastRow(wsIn, 1)
     outRow = 20
@@ -152,33 +151,50 @@ Public Sub FINAL_Slide5_Execution()
             combinedAvg = (sum3 + sum6) / (n3 + n6)
         End If
 
-        ws.Range("K13").Value = "Average 3M premium"
-        ws.Range("K14").Value = "Average 6M premium"
-        ws.Range("K15").Value = "Combined observed premium"
+        For r = 20 To outRow - 1
+            ws.Cells(r, 4).Value = combinedAvg
+        Next r
 
-        If n3 > 0 Then ws.Range("M13").Value = avg3
-        If n6 > 0 Then ws.Range("M14").Value = avg6
-        ws.Range("M15").Value = combinedAvg
+        ws.Range("K12").Value = "Average 3M premium"
+        ws.Range("K13").Value = "Average 6M premium"
 
-        ws.Range("M13:M15").NumberFormat = "0.0 ""bp"""
-        ws.Range("K13:K15").Font.Bold = True
-        ws.Range("M15").Font.Bold = True
-        ws.Range("M15").Font.Size = 14
+        If n3 > 0 Then ws.Range("M12").Value = avg3
+        If n6 > 0 Then ws.Range("M13").Value = avg6
+
+        ws.Range("M12:M13").NumberFormat = "0.0 ""bp"""
+        ws.Range("K12:K13").Font.Bold = True
+
+        With ws.Range("K15:N15")
+            .Merge
+            .Value = "OBSERVED AVERAGE PREMIUM"
+            .Font.Bold = True
+            .HorizontalAlignment = xlCenter
+            .Interior.Color = RGB(243, 244, 246)
+        End With
+
+        With ws.Range("K16:N18")
+            .Merge
+            .Value = Format$(combinedAvg, "0.0") & " bp"
+            .Font.Bold = True
+            .Font.Size = 20
+            .Font.Color = FINAL_ColorAccent2()
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+        End With
 
         ws.Range("A20:A" & outRow - 1).NumberFormat = "mmm-yy"
-        ws.Range("B20:C" & outRow - 1).NumberFormat = "0.0 ""bp"""
+        ws.Range("B20:D" & outRow - 1).NumberFormat = "0.0 ""bp"""
 
+        headline = "Observed deposit premium supports execution of the tenor framework"
         conclusion = _
-            "Observed deposit pricing since Jan-2025: average 3M premium = " & _
-            IIf(n3 > 0, Format$(avg3, "0.0") & " bp", "n/a") & _
-            "; average 6M premium = " & _
-            IIf(n6 > 0, Format$(avg6, "0.0") & " bp", "n/a") & _
-            ". Use pricing, credit quality and coverage to execute the tenor framework."
+            "Since Jan-2025, observed 3M/6M pricing averaged " & Format$(combinedAvg, "0.0") & _
+            " bp of premium; execution combines pricing, credit quality and coverage with the tenor framework."
 
+        ws.Range("A1").Value = headline
         ws.Range("A2").Value = conclusion
 
         '---------------------------------------------------------
-        ' CHART - premium history
+        ' CHART - premium history plus observed average
         '---------------------------------------------------------
         Set ch = ws.ChartObjects.Add(Left:=15, Top:=78, Width:=650, Height:=300)
 
@@ -187,7 +203,7 @@ Public Sub FINAL_Slide5_Execution()
             .ChartType = xlLine
             .SetSourceData ws.Range("A19:C" & outRow - 1)
 
-            FINAL_StyleChart ch.Chart, "3M and 6M deposit premium since Jan-2025", True
+            FINAL_StyleChart ch.Chart, "Observed 3M and 6M deposit premium since Jan-2025", True
 
             If .SeriesCollection.Count >= 1 Then
                 FINAL_SetSeriesColor .SeriesCollection(1), FINAL_ColorDark()
@@ -200,6 +216,18 @@ Public Sub FINAL_Slide5_Execution()
                 .SeriesCollection(2).Format.Line.Weight = 2#
                 .SeriesCollection(2).MarkerStyle = xlMarkerStyleNone
             End If
+
+            Set sAvg = .SeriesCollection.NewSeries
+            With sAvg
+                .Name = "Observed average"
+                .XValues = ws.Range("A20:A" & outRow - 1)
+                .Values = ws.Range("D20:D" & outRow - 1)
+                .ChartType = xlLine
+                .MarkerStyle = xlMarkerStyleNone
+                .Format.Line.Weight = 1.5
+                .Format.Line.DashStyle = msoLineDash
+            End With
+            FINAL_SetSeriesColor sAvg, FINAL_ColorAccent2()
 
             .Axes(xlValue).HasTitle = True
             .Axes(xlValue).AxisTitle.Text = "Premium (bp)"
@@ -236,6 +264,9 @@ Public Sub FINAL_Slide5_Execution()
             End If
         End If
 
+        If combinedAvg < minBp Then minBp = combinedAvg
+        If combinedAvg > maxBp Then maxBp = combinedAvg
+
         If minBp >= 0 Then
             axisMin = 0
         Else
@@ -243,7 +274,6 @@ Public Sub FINAL_Slide5_Execution()
         End If
 
         axisMax = FINAL_NiceBpMax(maxBp)
-
         If axisMax <= axisMin Then axisMax = axisMin + 5
 
         With ch.Chart.Axes(xlValue)
