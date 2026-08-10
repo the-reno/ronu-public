@@ -58,7 +58,7 @@ First available Curve date on/after 01-Jan-2022.
 End:
 Last available Curve date.
 
-Historical return observations:
+Return observations:
 First available date in each calendar month, only where a complete common 6M horizon fits inside the curve.
 
 Rate units
@@ -134,19 +134,36 @@ Only observations from Jan-2025 onward are plotted.
 
 Presentation discipline
 -----------------------
-Slide 1:
-What actually happened?
+Slide 1 — What actually happened?
+- Historical ON path.
+- Tenor result shown as excess return vs ON in bp.
+- Do not overstate a narrow historical winner.
 
-Slide 2:
-What changes when rate direction changes?
+Slide 2 — What changes when rate direction changes?
+- Historical vs inverted excess return vs ON.
+- ON is the zero reference and is omitted from the bars.
+- Symmetric scale around zero.
 
-Slide 3:
-What is the risk we should manage?
+Slide 3 — What is the risk we should manage?
+- Average regret for 100% ON and 100% 6M.
+- Lower is better.
 
-Slide 4:
-Which allocation best protects against being wrong?
+Slide 4 — Which allocation best protects against being wrong?
+- 286-allocation regret scatter.
+- Identical X/Y scales.
+- Equal-regret line.
+- Highlight 100% ON, 100% 6M and robust allocation.
+- Lower-left is better.
 
-Slide 5:
-How is the framework executed consistently?
+Slide 5 — How is the framework executed consistently?
+- Actual 3M/6M premium history since Jan-2025.
+- Observed-average reference line.
+- Credit / coverage / additional proof point.
+- PRICE > ALLOCATE > REVIEW.
 
 The historical and inverted paths are directional stress tests, not forecasts.
+
+Presentation canvas
+-------------------
+Rows 1:18 of each slide sheet are formatted as a clean white presentation canvas.
+Supporting data begins at row 19.
