@@ -1,0 +1,1225 @@
+Option Explicit
+
+'=====================================================================
+' FINAL CASH TENOR ANALYSIS - MASTER / SHARED ENGINE
+'
+' REQUIRED INPUTS
+'   1) Worksheet named "Curve"
+'      Row 1 must contain: Date, ON, 1M, 3M, 6M
+'      Extra tenor columns are allowed.
+'      Dates must be strictly ascending.
+'
+'   2) Public Function R_CURVE in the same VBA project.
+'
+' NO OTHER INPUT SHEETS ARE REQUIRED.
+' The master creates all working/output sheets.
+'
+' ANALYSIS WINDOW
+'   Start: first available curve date on/after 01-Jan-2022
+'   End:   last available date in Curve
+'   Return observations: first available date of each month with a
+'   complete 6M horizon inside the curve.
+'
+' PRIMARY DECISION LOGIC
+'   Historical path = realized curve.
+'   Inverted path   = exact historical daily changes with opposite sign,
+'                     anchored to a configurable positive starting ON.
+'   Regret          = best single-tenor return in that observation
+'                     minus portfolio return.
+'   Robust portfolio = allocation that minimizes the larger of:
+'                     average historical regret and average inverted regret.
+'
+' Run:
+'   FINAL_BuildAll
+'=====================================================================
+
+Public Const FINAL_CONTROL As String = "Final_Control"
+Public Const FINAL_INPUT As String = "Final_Input"
+Public Const FINAL_CURVE As String = "F_Curve_Normalized"
+Public Const FINAL_INVERTED As String = "F_Curve_Inverted"
+Public Const FINAL_CORE As String = "F_Core_Returns"
+Public Const FINAL_PORT As String = "F_Portfolios"
+
+Public Const FINAL_S1 As String = "S1_Historical"
+Public Const FINAL_S2 As String = "S2_Direction"
+Public Const FINAL_S3 As String = "S3_Regret"
+Public Const FINAL_S4 As String = "S4_Robust"
+Public Const FINAL_S5 As String = "S5_Execution"
+
+Private Const FINAL_ALLOC_UNITS As Long = 10          ' 10% increments = 286 portfolios
+Private Const FINAL_EPS As Double = 0.000000000001
+
+'---------------------------------------------------------------------
+' MASTER
+'---------------------------------------------------------------------
+Public Sub FINAL_BuildAll()
+
+    Dim calcMode As XlCalculation
+    Dim oldScreen As Boolean
+    Dim oldEvents As Boolean
+
+    On Error GoTo fail
+
+    calcMode = Application.Calculation
+    oldScreen = Application.ScreenUpdating
+    oldEvents = Application.EnableEvents
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "Building final cash tenor analysis..."
+
+    FINAL_EnsureSetup
+    FINAL_BuildCoreData
+
+    FINAL_Slide1_Historical
+    FINAL_Slide2_Direction
+    FINAL_Slide3_Regret
+    FINAL_Slide4_Robust
+    FINAL_Slide5_Execution
+
+    FINAL_UpdateWordingSummary
+
+clean_exit:
+    Application.StatusBar = False
+    Application.Calculation = calcMode
+    Application.EnableEvents = oldEvents
+    Application.ScreenUpdating = oldScreen
+    Exit Sub
+
+fail:
+    MsgBox "FINAL_BuildAll stopped: " & Err.Description, vbCritical
+    Resume clean_exit
+
+End Sub
+
+'---------------------------------------------------------------------
+' SETUP
+'---------------------------------------------------------------------
+Public Sub FINAL_EnsureSetup()
+
+    Dim ws As Worksheet
+
+    If Not FINAL_SheetExists("Curve") Then
+        Err.Raise vbObjectError + 100, , "Required worksheet 'Curve' was not found."
+    End If
+
+    Set ws = FINAL_GetOrCreateSheet(FINAL_CONTROL, False)
+
+    If UCase$(Trim$(CStr(ws.Range("A1").Value))) <> "FINAL CASH TENOR ANALYSIS" Then
+        ws.Cells.Clear
+
+        ws.Range("A1").Value = "FINAL CASH TENOR ANALYSIS"
+        ws.Range("A3").Value = "Analysis start"
+        ws.Range("A4").Value = "Analysis end"
+        ws.Range("A5").Value = "Inverted-path starting ON"
+        ws.Range("A6").Value = "Inversion magnitude"
+        ws.Range("A7").Value = "Allocation increment"
+
+        ws.Range("B5").Value = 0.055
+        ws.Range("B6").Value = 1#
+        ws.Range("B7").Value = 0.1
+
+        ws.Range("A9").Value = "Robust allocation"
+        ws.Range("A10").Value = "Historical avg regret"
+        ws.Range("A11").Value = "Inverted avg regret"
+        ws.Range("A12").Value = "Max directional avg regret"
+
+        ws.Range("D3").Value = "Method"
+        ws.Range("D4").Value = "Monthly starts / common 6M horizon"
+        ws.Range("D5").Value = "Return engine"
+        ws.Range("E5").Value = "R_CURVE"
+        ws.Range("D6").Value = "Optimization"
+        ws.Range("E6").Value = "Minimize max directional average regret"
+        ws.Range("D7").Value = "Scenario use"
+        ws.Range("E7").Value = "Stress tests, not forecasts"
+
+        ws.Columns("A:E").ColumnWidth = 28
+        ws.Range("A1:E1").Merge
+        With ws.Range("A1")
+            .Font.Bold = True
+            .Font.Size = 18
+        End With
+        ws.Range("A3:A12,D3:D7").Font.Bold = True
+        ws.Range("B5").NumberFormat = "0.00%"
+        ws.Range("B6").NumberFormat = "0.0x"
+        ws.Range("B7").NumberFormat = "0%"
+    Else
+        If Len(Trim(CStr(ws.Range("B5").Value))) = 0 Then ws.Range("B5").Value = 0.055
+        If Len(Trim(CStr(ws.Range("B6").Value))) = 0 Then ws.Range("B6").Value = 1#
+        If Len(Trim(CStr(ws.Range("B7").Value))) = 0 Then ws.Range("B7").Value = 0.1
+    End If
+
+    Set ws = FINAL_GetOrCreateSheet(FINAL_INPUT, False)
+
+    If UCase$(Trim$(CStr(ws.Range("A1").Value))) <> "EXECUTION INPUTS" Then
+        ws.Cells.Clear
+
+        ws.Range("A1").Value = "EXECUTION INPUTS"
+        ws.Range("A3").Value = "Credit rating"
+        ws.Range("A4").Value = "Global coverage"
+        ws.Range("A5").Value = "Additional proof point"
+
+        ws.Range("A8").Value = "Deposit premium history"
+        ws.Range("A9").Value = "Date"
+        ws.Range("B9").Value = "3M Premium (bp)"
+        ws.Range("C9").Value = "6M Premium (bp)"
+
+        ws.Range("E3").Value = "Instructions"
+        ws.Range("E4").Value = "Paste actual 3M/6M deposit premium observations from Jan-2025 onward."
+        ws.Range("E5").Value = "Enter institutional proof points in B3:B5."
+        ws.Range("E6").Value = "No institution name is required in the model."
+
+        ws.Columns("A:A").ColumnWidth = 24
+        ws.Columns("B:C").ColumnWidth = 18
+        ws.Columns("E:E").ColumnWidth = 62
+        ws.Range("A1:E1").Merge
+        With ws.Range("A1")
+            .Font.Bold = True
+            .Font.Size = 18
+        End With
+        ws.Range("A3:A5,A8:C9,E3").Font.Bold = True
+        ws.Range("A9:C9").Interior.Color = RGB(243, 244, 246)
+    End If
+
+End Sub
+
+'---------------------------------------------------------------------
+' CORE DATA BUILD
+'---------------------------------------------------------------------
+Public Sub FINAL_BuildCoreData()
+
+    Dim wsNorm As Worksheet
+    Dim wsInv As Worksheet
+    Dim wsCore As Worksheet
+    Dim wsPort As Worksheet
+    Dim wsCtl As Worksheet
+
+    Dim analysisStart As Date
+    Dim analysisEnd As Date
+    Dim starts As Collection
+    Dim outRow As Long
+
+    On Error GoTo fail
+
+    FINAL_CreateNormalizedCurve
+
+    Set wsNorm = ThisWorkbook.Worksheets(FINAL_CURVE)
+    analysisStart = CDate(wsNorm.Cells(2, 1).Value)
+    analysisEnd = CDate(wsNorm.Cells(FINAL_LastRow(wsNorm, 1), 1).Value)
+
+    Set wsCtl = ThisWorkbook.Worksheets(FINAL_CONTROL)
+    wsCtl.Range("B3").Value = analysisStart
+    wsCtl.Range("B4").Value = analysisEnd
+    wsCtl.Range("B3:B4").NumberFormat = "dd-mmm-yyyy"
+
+    FINAL_CreateInvertedCurve
+
+    Set wsInv = ThisWorkbook.Worksheets(FINAL_INVERTED)
+    Set starts = FINAL_MonthlyStarts(wsNorm, analysisEnd)
+
+    If starts.Count = 0 Then
+        Err.Raise vbObjectError + 101, , _
+            "No complete monthly 6M horizons are available between Jan-2022 and the last curve date."
+    End If
+
+    Set wsCore = FINAL_GetOrCreateSheet(FINAL_CORE, True)
+    FINAL_ClearCharts wsCore
+
+    wsCore.Range("A1:M1").Value = Array( _
+        "Scenario", "Start", "Maturity", _
+        "ON Return", "1M Return", "3M Return", "6M Return", _
+        "Best Tenor", "Best Return", _
+        "ON Regret", "1M Regret", "3M Regret", "6M Regret")
+
+    outRow = 2
+
+    FINAL_WriteScenarioReturns _
+        "Historical", _
+        FINAL_CurveTable(wsNorm), _
+        starts, _
+        wsCore, _
+        outRow
+
+    FINAL_WriteScenarioReturns _
+        "Inverted", _
+        FINAL_CurveTable(wsInv), _
+        starts, _
+        wsCore, _
+        outRow
+
+    With wsCore
+        .Rows(1).Font.Bold = True
+        .Columns("B:C").NumberFormat = "dd-mmm-yyyy"
+        .Columns("D:G").NumberFormat = "0.000%"
+        .Columns("I:M").NumberFormat = "0.000%"
+        .Columns("A:M").AutoFit
+    End With
+
+    Set wsPort = FINAL_GetOrCreateSheet(FINAL_PORT, True)
+    FINAL_BuildPortfolioGrid wsCore, wsPort
+
+    FINAL_UpdateControlFromPortfolios
+
+    Exit Sub
+
+fail:
+    Err.Raise Err.Number, "FINAL_BuildCoreData", Err.Description
+
+End Sub
+
+'---------------------------------------------------------------------
+' NORMALIZE CURVE
+'
+' Handles either:
+'   decimal rates: 0.054 = 5.40%
+'   percent-point rates: 5.40 = 5.40%
+'
+' Detection uses the maximum absolute required tenor rate from Jan-2022.
+' Source sheet is never modified.
+'---------------------------------------------------------------------
+Private Sub FINAL_CreateNormalizedCurve()
+
+    Dim wsSrc As Worksheet
+    Dim wsOut As Worksheet
+
+    Dim cDate As Long
+    Dim cON As Long
+    Dim c1M As Long
+    Dim c3M As Long
+    Dim c6M As Long
+
+    Dim lastRow As Long
+    Dim r As Long
+    Dim outRow As Long
+    Dim d As Variant
+    Dim analysisFloor As Date
+
+    Dim maxAbsRate As Double
+    Dim divisor As Double
+    Dim v As Variant
+    Dim cols(1 To 4) As Long
+    Dim j As Long
+
+    Dim prevDate As Double
+
+    Set wsSrc = ThisWorkbook.Worksheets("Curve")
+
+    cDate = FINAL_FindHeaderCol(wsSrc, "Date")
+    cON = FINAL_FindHeaderCol(wsSrc, "ON")
+    c1M = FINAL_FindHeaderCol(wsSrc, "1M")
+    c3M = FINAL_FindHeaderCol(wsSrc, "3M")
+    c6M = FINAL_FindHeaderCol(wsSrc, "6M")
+
+    If cDate = 0 Or cON = 0 Or c1M = 0 Or c3M = 0 Or c6M = 0 Then
+        Err.Raise vbObjectError + 102, , _
+            "Curve row 1 must contain Date, ON, 1M, 3M and 6M."
+    End If
+
+    cols(1) = cON
+    cols(2) = c1M
+    cols(3) = c3M
+    cols(4) = c6M
+
+    lastRow = FINAL_LastRow(wsSrc, cDate)
+    If lastRow < 2 Then
+        Err.Raise vbObjectError + 103, , "Curve contains no data rows."
+    End If
+
+    analysisFloor = DateSerial(2022, 1, 1)
+
+    maxAbsRate = 0
+
+    For r = 2 To lastRow
+        d = wsSrc.Cells(r, cDate).Value
+        If IsDate(d) Then
+            If CDate(d) >= analysisFloor Then
+                For j = 1 To 4
+                    v = wsSrc.Cells(r, cols(j)).Value
+                    If IsNumeric(v) Then
+                        If Abs(CDbl(v)) > maxAbsRate Then maxAbsRate = Abs(CDbl(v))
+                    End If
+                Next j
+            End If
+        End If
+    Next r
+
+    If maxAbsRate = 0 Then
+        Err.Raise vbObjectError + 104, , _
+            "No usable required tenor rates were found from Jan-2022 onward."
+    End If
+
+    If maxAbsRate > 0.5 Then
+        divisor = 100#
+    Else
+        divisor = 1#
+    End If
+
+    Set wsOut = FINAL_GetOrCreateSheet(FINAL_CURVE, True)
+    FINAL_ClearCharts wsOut
+
+    wsOut.Range("A1:E1").Value = Array("Date", "ON", "1M", "3M", "6M")
+
+    outRow = 2
+    prevDate = 0
+
+    For r = 2 To lastRow
+
+        d = wsSrc.Cells(r, cDate).Value
+
+        If IsDate(d) Then
+            If CDate(d) >= analysisFloor Then
+
+                If prevDate > 0 Then
+                    If CDbl(CDate(d)) <= prevDate Then
+                        Err.Raise vbObjectError + 105, , _
+                            "Curve dates must be strictly ascending. Check source row " & r & "."
+                    End If
+                End If
+
+                For j = 1 To 4
+                    v = wsSrc.Cells(r, cols(j)).Value
+                    If Not IsNumeric(v) Then
+                        Err.Raise vbObjectError + 106, , _
+                            "Missing/non-numeric required rate at source row " & r & _
+                            ", tenor " & Choose(j, "ON", "1M", "3M", "6M") & "."
+                    End If
+                Next j
+
+                wsOut.Cells(outRow, 1).Value = CDate(d)
+                wsOut.Cells(outRow, 2).Value = CDbl(wsSrc.Cells(r, cON).Value) / divisor
+                wsOut.Cells(outRow, 3).Value = CDbl(wsSrc.Cells(r, c1M).Value) / divisor
+                wsOut.Cells(outRow, 4).Value = CDbl(wsSrc.Cells(r, c3M).Value) / divisor
+                wsOut.Cells(outRow, 5).Value = CDbl(wsSrc.Cells(r, c6M).Value) / divisor
+
+                prevDate = CDbl(CDate(d))
+                outRow = outRow + 1
+
+            End If
+        End If
+
+    Next r
+
+    If outRow <= 2 Then
+        Err.Raise vbObjectError + 107, , _
+            "Curve has no dates on or after 01-Jan-2022."
+    End If
+
+    With wsOut
+        .Rows(1).Font.Bold = True
+        .Columns("A").NumberFormat = "dd-mmm-yyyy"
+        .Columns("B:E").NumberFormat = "0.000%"
+        .Columns("A:E").AutoFit
+        .Range("G1").Value = "Detected source scale"
+        If divisor = 100# Then
+            .Range("G2").Value = "Percent points -> normalized to decimals"
+        Else
+            .Range("G2").Value = "Decimals"
+        End If
+    End With
+
+End Sub
+
+'---------------------------------------------------------------------
+' INVERTED CURVE
+'
+' Stress_j(t) =
+'   StressStart_j - Scale * [Historical_j(t) - Historical_j(anchor)]
+'
+' StressStart_ON is configurable in Final_Control!B5.
+' Other starting tenors preserve the initial historical spread to ON.
+'---------------------------------------------------------------------
+Private Sub FINAL_CreateInvertedCurve()
+
+    Dim wsHist As Worksheet
+    Dim wsInv As Worksheet
+    Dim wsCtl As Worksheet
+
+    Dim lastRow As Long
+    Dim r As Long
+    Dim j As Long
+
+    Dim startON As Double
+    Dim shockScale As Double
+
+    Dim anchorON As Double
+    Dim anchorRate(2 To 5) As Double
+    Dim stressStart(2 To 5) As Double
+    Dim histNow As Double
+
+    Set wsHist = ThisWorkbook.Worksheets(FINAL_CURVE)
+    Set wsCtl = ThisWorkbook.Worksheets(FINAL_CONTROL)
+
+    startON = CDbl(wsCtl.Range("B5").Value)
+    shockScale = CDbl(wsCtl.Range("B6").Value)
+
+    If startON <= -1# Or startON > 1# Then
+        Err.Raise vbObjectError + 108, , _
+            "Final_Control!B5 must be a decimal rate, e.g. 0.055 for 5.50%."
+    End If
+
+    If shockScale <= 0 Or shockScale > 3 Then
+        Err.Raise vbObjectError + 109, , _
+            "Final_Control!B6 inversion magnitude must be >0 and <=3."
+    End If
+
+    lastRow = FINAL_LastRow(wsHist, 1)
+
+    Set wsInv = FINAL_GetOrCreateSheet(FINAL_INVERTED, True)
+    FINAL_ClearCharts wsInv
+
+    wsInv.Range("A1:E1").Value = Array("Date", "ON", "1M", "3M", "6M")
+
+    anchorON = CDbl(wsHist.Cells(2, 2).Value)
+
+    For j = 2 To 5
+        anchorRate(j) = CDbl(wsHist.Cells(2, j).Value)
+        stressStart(j) = startON + (anchorRate(j) - anchorON)
+    Next j
+
+    For r = 2 To lastRow
+
+        wsInv.Cells(r, 1).Value = wsHist.Cells(r, 1).Value
+
+        For j = 2 To 5
+            histNow = CDbl(wsHist.Cells(r, j).Value)
+            wsInv.Cells(r, j).Value = _
+                stressStart(j) - shockScale * (histNow - anchorRate(j))
+        Next j
+
+    Next r
+
+    With wsInv
+        .Rows(1).Font.Bold = True
+        .Columns("A").NumberFormat = "dd-mmm-yyyy"
+        .Columns("B:E").NumberFormat = "0.000%"
+        .Columns("A:E").AutoFit
+        .Range("G1").Value = "Stress definition"
+        .Range("G2").Value = "Historical daily changes replayed with opposite sign"
+        .Range("G3").Value = "Starting ON"
+        .Range("H3").Value = startON
+        .Range("H3").NumberFormat = "0.00%"
+        .Range("G4").Value = "Magnitude"
+        .Range("H4").Value = shockScale
+        .Range("H4").NumberFormat = "0.0x"
+    End With
+
+End Sub
+
+'---------------------------------------------------------------------
+' MONTHLY STARTS
+'---------------------------------------------------------------------
+Private Function FINAL_MonthlyStarts(ByVal wsCurve As Worksheet, ByVal analysisEnd As Date) As Collection
+
+    Dim result As New Collection
+    Dim lastRow As Long
+    Dim r As Long
+    Dim d As Date
+    Dim key As String
+    Dim prevKey As String
+
+    lastRow = FINAL_LastRow(wsCurve, 1)
+    prevKey = vbNullString
+
+    For r = 2 To lastRow
+
+        d = CDate(wsCurve.Cells(r, 1).Value)
+        key = Format$(d, "yyyymm")
+
+        If key <> prevKey Then
+            If DateAdd("m", 6, d) <= analysisEnd Then
+                result.Add d
+            End If
+            prevKey = key
+        End If
+
+    Next r
+
+    Set FINAL_MonthlyStarts = result
+
+End Function
+
+'---------------------------------------------------------------------
+' R_CURVE MONTHLY RETURN MATRIX
+'---------------------------------------------------------------------
+Private Sub FINAL_WriteScenarioReturns( _
+    ByVal scenarioName As String, _
+    ByVal tbl As Range, _
+    ByVal starts As Collection, _
+    ByVal wsOut As Worksheet, _
+    ByRef outRow As Long)
+
+    Dim i As Long
+    Dim startDate As Date
+    Dim maturityTarget As Date
+    Dim maturityActual As Variant
+
+    Dim retON As Double
+    Dim ret1M As Double
+    Dim ret3M As Double
+    Dim ret6M As Double
+
+    Dim bestReturn As Double
+    Dim bestTenor As String
+
+    For i = 1 To starts.Count
+
+        startDate = CDate(starts(i))
+        maturityTarget = DateAdd("m", 6, startDate)
+
+        maturityActual = R_CURVE(startDate, tbl, "ON", 0, "DATE", 0, maturityTarget)
+
+        If Not IsDate(maturityActual) Then
+            Err.Raise vbObjectError + 110, , _
+                "R_CURVE could not resolve maturity for " & scenarioName & _
+                ", start " & Format$(startDate, "dd-mmm-yyyy") & "."
+        End If
+
+        retON = FINAL_RCurveReturn(startDate, tbl, "ON", maturityTarget)
+        ret1M = FINAL_RCurveReturn(startDate, tbl, "1M", maturityTarget)
+        ret3M = FINAL_RCurveReturn(startDate, tbl, "3M", maturityTarget)
+        ret6M = FINAL_RCurveReturn(startDate, tbl, "6M", maturityTarget)
+
+        bestReturn = retON
+        bestTenor = "ON"
+
+        If ret1M > bestReturn Then bestReturn = ret1M: bestTenor = "1M"
+        If ret3M > bestReturn Then bestReturn = ret3M: bestTenor = "3M"
+        If ret6M > bestReturn Then bestReturn = ret6M: bestTenor = "6M"
+
+        wsOut.Cells(outRow, 1).Value = scenarioName
+        wsOut.Cells(outRow, 2).Value = startDate
+        wsOut.Cells(outRow, 3).Value = CDate(maturityActual)
+
+        wsOut.Cells(outRow, 4).Value = retON
+        wsOut.Cells(outRow, 5).Value = ret1M
+        wsOut.Cells(outRow, 6).Value = ret3M
+        wsOut.Cells(outRow, 7).Value = ret6M
+
+        wsOut.Cells(outRow, 8).Value = bestTenor
+        wsOut.Cells(outRow, 9).Value = bestReturn
+
+        wsOut.Cells(outRow, 10).Value = bestReturn - retON
+        wsOut.Cells(outRow, 11).Value = bestReturn - ret1M
+        wsOut.Cells(outRow, 12).Value = bestReturn - ret3M
+        wsOut.Cells(outRow, 13).Value = bestReturn - ret6M
+
+        outRow = outRow + 1
+
+    Next i
+
+End Sub
+
+Private Function FINAL_RCurveReturn( _
+    ByVal startDate As Date, _
+    ByVal tbl As Range, _
+    ByVal tenor As String, _
+    ByVal maturityTarget As Date) As Double
+
+    Dim v As Variant
+
+    v = R_CURVE(startDate, tbl, tenor, 0, "FACTOR", 0, maturityTarget)
+
+    If Not IsNumeric(v) Then
+        Err.Raise vbObjectError + 111, , _
+            "R_CURVE returned '" & CStr(v) & "' for " & tenor & _
+            ", start " & Format$(startDate, "dd-mmm-yyyy") & "."
+    End If
+
+    FINAL_RCurveReturn = CDbl(v) - 1#
+
+End Function
+
+'---------------------------------------------------------------------
+' 286 PORTFOLIOS - 10% LONG-ONLY GRID
+'---------------------------------------------------------------------
+Private Sub FINAL_BuildPortfolioGrid(ByVal wsCore As Worksheet, ByVal wsOut As Worksheet)
+
+    Dim lastRow As Long
+    Dim data As Variant
+
+    Dim a As Long
+    Dim b As Long
+    Dim c As Long
+    Dim d As Long
+
+    Dim wON As Double
+    Dim w1M As Double
+    Dim w3M As Double
+    Dim w6M As Double
+
+    Dim r As Long
+    Dim outRow As Long
+
+    Dim pRet As Double
+    Dim regret As Double
+
+    Dim histReturn As Double
+    Dim invReturn As Double
+    Dim histRegret As Double
+    Dim invRegret As Double
+
+    Dim nHist As Long
+    Dim nInv As Long
+
+    Dim maxDirRegret As Double
+    Dim meanDirRegret As Double
+    Dim weightedMonths As Double
+
+    Dim bestRow As Long
+    Dim bestMax As Double
+    Dim bestMean As Double
+    Dim bestMonths As Double
+
+    lastRow = FINAL_LastRow(wsCore, 1)
+    data = wsCore.Range("A2:M" & lastRow).Value2
+
+    wsOut.Range("A1:L1").Value = Array( _
+        "ON Weight", "1M Weight", "3M Weight", "6M Weight", _
+        "Historical Avg Return", "Inverted Avg Return", _
+        "Historical Avg Regret", "Inverted Avg Regret", _
+        "Max Directional Avg Regret", "Mean Directional Avg Regret", _
+        "Weighted Tenor (months)", "Robust")
+
+    outRow = 2
+    bestRow = 0
+    bestMax = 1E+99
+    bestMean = 1E+99
+    bestMonths = 1E+99
+
+    For a = 0 To FINAL_ALLOC_UNITS
+
+        For b = 0 To FINAL_ALLOC_UNITS - a
+
+            For c = 0 To FINAL_ALLOC_UNITS - a - b
+
+                d = FINAL_ALLOC_UNITS - a - b - c
+
+                wON = a / FINAL_ALLOC_UNITS
+                w1M = b / FINAL_ALLOC_UNITS
+                w3M = c / FINAL_ALLOC_UNITS
+                w6M = d / FINAL_ALLOC_UNITS
+
+                histReturn = 0
+                invReturn = 0
+                histRegret = 0
+                invRegret = 0
+                nHist = 0
+                nInv = 0
+
+                For r = 1 To UBound(data, 1)
+
+                    pRet = _
+                        wON * CDbl(data(r, 4)) + _
+                        w1M * CDbl(data(r, 5)) + _
+                        w3M * CDbl(data(r, 6)) + _
+                        w6M * CDbl(data(r, 7))
+
+                    regret = CDbl(data(r, 9)) - pRet
+
+                    If CStr(data(r, 1)) = "Historical" Then
+                        histReturn = histReturn + pRet
+                        histRegret = histRegret + regret
+                        nHist = nHist + 1
+                    ElseIf CStr(data(r, 1)) = "Inverted" Then
+                        invReturn = invReturn + pRet
+                        invRegret = invRegret + regret
+                        nInv = nInv + 1
+                    End If
+
+                Next r
+
+                If nHist = 0 Or nInv = 0 Then
+                    Err.Raise vbObjectError + 112, , "Core scenario observations are incomplete."
+                End If
+
+                histReturn = histReturn / nHist
+                invReturn = invReturn / nInv
+                histRegret = histRegret / nHist
+                invRegret = invRegret / nInv
+
+                If histRegret > invRegret Then
+                    maxDirRegret = histRegret
+                Else
+                    maxDirRegret = invRegret
+                End If
+
+                meanDirRegret = (histRegret + invRegret) / 2#
+                weightedMonths = w1M * 1# + w3M * 3# + w6M * 6#
+
+                wsOut.Cells(outRow, 1).Value = wON
+                wsOut.Cells(outRow, 2).Value = w1M
+                wsOut.Cells(outRow, 3).Value = w3M
+                wsOut.Cells(outRow, 4).Value = w6M
+
+                wsOut.Cells(outRow, 5).Value = histReturn
+                wsOut.Cells(outRow, 6).Value = invReturn
+
+                wsOut.Cells(outRow, 7).Value = histRegret
+                wsOut.Cells(outRow, 8).Value = invRegret
+                wsOut.Cells(outRow, 9).Value = maxDirRegret
+                wsOut.Cells(outRow, 10).Value = meanDirRegret
+                wsOut.Cells(outRow, 11).Value = weightedMonths
+                wsOut.Cells(outRow, 12).Value = False
+
+                ' Primary: minimum max directional average regret
+                ' Tie 1:    minimum mean directional average regret
+                ' Tie 2:    shorter weighted tenor (liquidity-conservative)
+                If maxDirRegret < bestMax - FINAL_EPS Then
+                    bestRow = outRow
+                    bestMax = maxDirRegret
+                    bestMean = meanDirRegret
+                    bestMonths = weightedMonths
+
+                ElseIf Abs(maxDirRegret - bestMax) <= FINAL_EPS Then
+
+                    If meanDirRegret < bestMean - FINAL_EPS Then
+                        bestRow = outRow
+                        bestMean = meanDirRegret
+                        bestMonths = weightedMonths
+
+                    ElseIf Abs(meanDirRegret - bestMean) <= FINAL_EPS Then
+
+                        If weightedMonths < bestMonths - FINAL_EPS Then
+                            bestRow = outRow
+                            bestMonths = weightedMonths
+                        End If
+
+                    End If
+
+                End If
+
+                outRow = outRow + 1
+
+            Next c
+
+        Next b
+
+    Next a
+
+    If outRow - 2 <> 286 Then
+        Err.Raise vbObjectError + 113, , _
+            "Portfolio grid expected 286 allocations but generated " & (outRow - 2) & "."
+    End If
+
+    If bestRow = 0 Then
+        Err.Raise vbObjectError + 114, , "Robust allocation could not be identified."
+    End If
+
+    wsOut.Cells(bestRow, 12).Value = True
+
+    With wsOut
+        .Rows(1).Font.Bold = True
+        .Columns("A:D").NumberFormat = "0%"
+        .Columns("E:F").NumberFormat = "0.000%"
+        .Columns("G:J").NumberFormat = "0.000%"
+        .Columns("K").NumberFormat = "0.0"
+        .Columns("A:L").AutoFit
+    End With
+
+End Sub
+
+Private Sub FINAL_UpdateControlFromPortfolios()
+
+    Dim wsCtl As Worksheet
+    Dim wsPort As Worksheet
+    Dim robustRow As Long
+
+    Set wsCtl = ThisWorkbook.Worksheets(FINAL_CONTROL)
+    Set wsPort = ThisWorkbook.Worksheets(FINAL_PORT)
+
+    robustRow = FINAL_RobustRow(wsPort)
+
+    wsCtl.Range("B9").Value = FINAL_WeightText( _
+        wsPort.Cells(robustRow, 1).Value, _
+        wsPort.Cells(robustRow, 2).Value, _
+        wsPort.Cells(robustRow, 3).Value, _
+        wsPort.Cells(robustRow, 4).Value)
+
+    wsCtl.Range("B10").Value = CDbl(wsPort.Cells(robustRow, 7).Value) * 10000#
+    wsCtl.Range("B11").Value = CDbl(wsPort.Cells(robustRow, 8).Value) * 10000#
+    wsCtl.Range("B12").Value = CDbl(wsPort.Cells(robustRow, 9).Value) * 10000#
+
+    wsCtl.Range("B10:B12").NumberFormat = "0.0 ""bp"""
+
+End Sub
+
+'---------------------------------------------------------------------
+' WORDING SUMMARY
+' Each slide sheet also receives its own dynamic headline/conclusion.
+' This block centralizes the copy-ready wording.
+'---------------------------------------------------------------------
+Public Sub FINAL_UpdateWordingSummary()
+
+    Dim ws As Worksheet
+    Dim slides(1 To 5) As String
+    Dim r As Long
+
+    slides(1) = FINAL_S1
+    slides(2) = FINAL_S2
+    slides(3) = FINAL_S3
+    slides(4) = FINAL_S4
+    slides(5) = FINAL_S5
+
+    Set ws = ThisWorkbook.Worksheets(FINAL_CONTROL)
+
+    ws.Range("D10:F16").ClearContents
+
+    ws.Range("D10").Value = "Slide"
+    ws.Range("E10").Value = "Headline"
+    ws.Range("F10").Value = "Direct conclusion"
+
+    For r = 1 To 5
+        ws.Cells(10 + r, 4).Value = r
+        If FINAL_SheetExists(slides(r)) Then
+            ws.Cells(10 + r, 5).Value = ThisWorkbook.Worksheets(slides(r)).Range("A1").Value
+            ws.Cells(10 + r, 6).Value = ThisWorkbook.Worksheets(slides(r)).Range("A2").Value
+        End If
+    Next r
+
+    ws.Range("D10:F10").Font.Bold = True
+    ws.Columns("D:F").ColumnWidth = 34
+    ws.Columns("F:F").ColumnWidth = 68
+    ws.Range("D10:F16").WrapText = True
+
+End Sub
+
+'=====================================================================
+' SHARED PUBLIC HELPERS FOR SLIDE MODULES
+'=====================================================================
+
+Public Function FINAL_GetOrCreateSheet(ByVal sheetName As String, ByVal clearExisting As Boolean) As Worksheet
+
+    Dim ws As Worksheet
+
+    If FINAL_SheetExists(sheetName) Then
+        Set ws = ThisWorkbook.Worksheets(sheetName)
+        If clearExisting Then ws.Cells.Clear
+    Else
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        ws.Name = sheetName
+    End If
+
+    Set FINAL_GetOrCreateSheet = ws
+
+End Function
+
+Public Function FINAL_SheetExists(ByVal sheetName As String) As Boolean
+
+    Dim ws As Worksheet
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    FINAL_SheetExists = Not ws Is Nothing
+    On Error GoTo 0
+
+End Function
+
+Public Function FINAL_LastRow(ByVal ws As Worksheet, ByVal colNum As Long) As Long
+
+    FINAL_LastRow = ws.Cells(ws.Rows.Count, colNum).End(xlUp).Row
+
+End Function
+
+Private Function FINAL_FindHeaderCol(ByVal ws As Worksheet, ByVal headerText As String) As Long
+
+    Dim lastCol As Long
+    Dim c As Long
+
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+    For c = 1 To lastCol
+        If UCase$(Trim$(CStr(ws.Cells(1, c).Value))) = UCase$(headerText) Then
+            FINAL_FindHeaderCol = c
+            Exit Function
+        End If
+    Next c
+
+    FINAL_FindHeaderCol = 0
+
+End Function
+
+Public Function FINAL_CurveTable(ByVal ws As Worksheet) As Range
+
+    Set FINAL_CurveTable = ws.Range("A1:E" & FINAL_LastRow(ws, 1))
+
+End Function
+
+Public Function FINAL_RobustRow(ByVal wsPort As Worksheet) As Long
+
+    Dim lastRow As Long
+    Dim r As Long
+
+    lastRow = FINAL_LastRow(wsPort, 1)
+
+    For r = 2 To lastRow
+        If CBool(wsPort.Cells(r, 12).Value) Then
+            FINAL_RobustRow = r
+            Exit Function
+        End If
+    Next r
+
+    Err.Raise vbObjectError + 115, , "Robust allocation row was not found."
+
+End Function
+
+Public Function FINAL_WeightText( _
+    ByVal wON As Double, _
+    ByVal w1M As Double, _
+    ByVal w3M As Double, _
+    ByVal w6M As Double) As String
+
+    Dim s As String
+
+    If wON > FINAL_EPS Then s = s & Format$(wON, "0%") & " ON / "
+    If w1M > FINAL_EPS Then s = s & Format$(w1M, "0%") & " 1M / "
+    If w3M > FINAL_EPS Then s = s & Format$(w3M, "0%") & " 3M / "
+    If w6M > FINAL_EPS Then s = s & Format$(w6M, "0%") & " 6M / "
+
+    If Len(s) >= 3 Then s = Left$(s, Len(s) - 3)
+
+    FINAL_WeightText = s
+
+End Function
+
+Public Function FINAL_ScenarioAverage(ByVal scenarioName As String, ByVal returnCol As Long) As Double
+
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim r As Long
+    Dim n As Long
+    Dim total As Double
+
+    Set ws = ThisWorkbook.Worksheets(FINAL_CORE)
+    lastRow = FINAL_LastRow(ws, 1)
+
+    For r = 2 To lastRow
+        If CStr(ws.Cells(r, 1).Value) = scenarioName Then
+            total = total + CDbl(ws.Cells(r, returnCol).Value)
+            n = n + 1
+        End If
+    Next r
+
+    If n = 0 Then
+        Err.Raise vbObjectError + 116, , "Scenario '" & scenarioName & "' has no observations."
+    End If
+
+    FINAL_ScenarioAverage = total / n
+
+End Function
+
+Public Function FINAL_ScenarioRegretAverage(ByVal scenarioName As String, ByVal regretCol As Long) As Double
+
+    FINAL_ScenarioRegretAverage = FINAL_ScenarioAverage(scenarioName, regretCol)
+
+End Function
+
+Public Function FINAL_BestTenorByAverage(ByVal scenarioName As String) As String
+
+    Dim tenors(1 To 4) As String
+    Dim cols(1 To 4) As Long
+    Dim i As Long
+    Dim x As Double
+    Dim best As Double
+    Dim bestTenor As String
+
+    tenors(1) = "ON"
+    tenors(2) = "1M"
+    tenors(3) = "3M"
+    tenors(4) = "6M"
+
+    cols(1) = 4
+    cols(2) = 5
+    cols(3) = 6
+    cols(4) = 7
+
+    best = -1E+99
+
+    For i = 1 To 4
+        x = FINAL_ScenarioAverage(scenarioName, cols(i))
+        If x > best Then
+            best = x
+            bestTenor = tenors(i)
+        End If
+    Next i
+
+    FINAL_BestTenorByAverage = bestTenor
+
+End Function
+
+Public Function FINAL_ScenarioCount(ByVal scenarioName As String) As Long
+
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim r As Long
+
+    Set ws = ThisWorkbook.Worksheets(FINAL_CORE)
+    lastRow = FINAL_LastRow(ws, 1)
+
+    For r = 2 To lastRow
+        If CStr(ws.Cells(r, 1).Value) = scenarioName Then
+            FINAL_ScenarioCount = FINAL_ScenarioCount + 1
+        End If
+    Next r
+
+End Function
+
+'---------------------------------------------------------------------
+' OUTPUT SHEET FORMATTING
+'---------------------------------------------------------------------
+Public Sub FINAL_PrepareSlideSheet( _
+    ByVal ws As Worksheet, _
+    ByVal headline As String, _
+    ByVal conclusion As String)
+
+    FINAL_ClearCharts ws
+
+    ws.Cells.UnMerge
+    ws.Cells.ClearFormats
+
+    ws.Range("A1:N1").Merge
+    ws.Range("A2:N2").Merge
+
+    ws.Range("A1").Value = headline
+    ws.Range("A2").Value = conclusion
+
+    With ws.Range("A1:N1")
+        .Font.Bold = True
+        .Font.Size = 20
+        .Font.Color = RGB(17, 24, 39)
+        .VerticalAlignment = xlCenter
+        .RowHeight = 30
+    End With
+
+    With ws.Range("A2:N2")
+        .Font.Size = 11
+        .Font.Color = RGB(75, 85, 99)
+        .WrapText = True
+        .VerticalAlignment = xlCenter
+        .RowHeight = 32
+    End With
+
+    ws.Columns("A:N").ColumnWidth = 11
+
+End Sub
+
+Public Sub FINAL_ClearCharts(ByVal ws As Worksheet)
+
+    Dim i As Long
+
+    For i = ws.ChartObjects.Count To 1 Step -1
+        ws.ChartObjects(i).Delete
+    Next i
+
+End Sub
+
+Public Sub FINAL_StyleChart(ByVal ch As Chart, ByVal titleText As String, ByVal showLegend As Boolean)
+
+    With ch
+        .HasTitle = True
+        .ChartTitle.Text = titleText
+        .HasLegend = showLegend
+
+        .ChartArea.Border.LineStyle = xlNone
+        .PlotArea.Border.LineStyle = xlNone
+
+        On Error Resume Next
+        .ChartTitle.Format.TextFrame2.TextRange.Font.Size = 13
+        .ChartTitle.Format.TextFrame2.TextRange.Font.Bold = msoTrue
+
+        .Axes(xlCategory).TickLabels.Font.Size = 9
+        .Axes(xlValue).TickLabels.Font.Size = 9
+
+        .Axes(xlValue).MajorGridlines.Format.Line.ForeColor.RGB = RGB(229, 231, 235)
+        .Axes(xlValue).Format.Line.ForeColor.RGB = RGB(156, 163, 175)
+        .Axes(xlCategory).Format.Line.ForeColor.RGB = RGB(156, 163, 175)
+        On Error GoTo 0
+
+        If showLegend Then
+            .Legend.Position = xlLegendPositionBottom
+            .Legend.Font.Size = 9
+        End If
+    End With
+
+End Sub
+
+Public Sub FINAL_SetSeriesColor(ByVal s As Series, ByVal rgbColor As Long, Optional ByVal transparency As Double = 0)
+
+    On Error Resume Next
+
+    s.Format.Fill.ForeColor.RGB = rgbColor
+    s.Format.Fill.Transparency = transparency
+
+    s.Format.Line.ForeColor.RGB = rgbColor
+    s.Format.Line.Transparency = transparency
+
+    On Error GoTo 0
+
+End Sub
+
+Public Function FINAL_ColorDark() As Long
+    FINAL_ColorDark = RGB(31, 41, 55)
+End Function
+
+Public Function FINAL_ColorAccent() As Long
+    FINAL_ColorAccent = RGB(37, 99, 235)
+End Function
+
+Public Function FINAL_ColorAccent2() As Long
+    FINAL_ColorAccent2 = RGB(5, 150, 105)
+End Function
+
+Public Function FINAL_ColorGray() As Long
+    FINAL_ColorGray = RGB(156, 163, 175)
+End Function
+
+Public Function FINAL_ColorLightGray() As Long
+    FINAL_ColorLightGray = RGB(209, 213, 219)
+End Function
+
+Public Function FINAL_ColorRisk() As Long
+    FINAL_ColorRisk = RGB(220, 38, 38)
+End Function
+
+'---------------------------------------------------------------------
+' NICE AXIS HELPERS
+'---------------------------------------------------------------------
+Public Function FINAL_NiceBpMax(ByVal x As Double) As Double
+
+    Dim stepSize As Double
+
+    x = Abs(x)
+
+    If x <= 10 Then
+        stepSize = 2
+    ElseIf x <= 30 Then
+        stepSize = 5
+    ElseIf x <= 100 Then
+        stepSize = 10
+    Else
+        stepSize = 25
+    End If
+
+    FINAL_NiceBpMax = WorksheetFunction.Ceiling_Math(x * 1.08, stepSize)
+
+    If FINAL_NiceBpMax < stepSize Then FINAL_NiceBpMax = stepSize
+
+End Function
+
+Public Function FINAL_Max4(ByVal a As Double, ByVal b As Double, ByVal c As Double, ByVal d As Double) As Double
+
+    FINAL_Max4 = a
+    If b > FINAL_Max4 Then FINAL_Max4 = b
+    If c > FINAL_Max4 Then FINAL_Max4 = c
+    If d > FINAL_Max4 Then FINAL_Max4 = d
+
+End Function
+
+Public Function FINAL_Min4(ByVal a As Double, ByVal b As Double, ByVal c As Double, ByVal d As Double) As Double
+
+    FINAL_Min4 = a
+    If b < FINAL_Min4 Then FINAL_Min4 = b
+    If c < FINAL_Min4 Then FINAL_Min4 = c
+    If d < FINAL_Min4 Then FINAL_Min4 = d
+
+End Function
