@@ -10,14 +10,6 @@ Option Explicit
 '   Regret = best single-tenor return in an observation
 '            minus selected strategy return.
 '
-' Output:
-'   Average regret for:
-'       100% ON
-'       100% 6M
-'   under:
-'       Historical path
-'       Inverted path
-'
 ' Lower is better.
 '=====================================================================
 
@@ -29,6 +21,11 @@ Public Sub FINAL_Slide3_Regret()
     Dim hist6MRegret As Double
     Dim invONRegret As Double
     Dim inv6MRegret As Double
+
+    Dim histONBp As Double
+    Dim hist6MBp As Double
+    Dim invONBp As Double
+    Dim inv6MBp As Double
 
     Dim headline As String
     Dim conclusion As String
@@ -45,10 +42,16 @@ Public Sub FINAL_Slide3_Regret()
     invONRegret = FINAL_ScenarioRegretAverage("Inverted", 10)
     inv6MRegret = FINAL_ScenarioRegretAverage("Inverted", 13)
 
+    histONBp = histONRegret * 10000#
+    hist6MBp = hist6MRegret * 10000#
+    invONBp = invONRegret * 10000#
+    inv6MBp = inv6MRegret * 10000#
+
     headline = "The relevant risk is the cost of choosing the wrong tenor"
     conclusion = _
-        "Regret = best tenor return minus selected strategy return. " & _
-        "ON protects one rate direction; 6M protects the other."
+        "100% ON: " & Format$(histONBp, "0.0") & " bp historical / " & Format$(invONBp, "0.0") & _
+        " bp inverted; 100% 6M: " & Format$(hist6MBp, "0.0") & " bp historical / " & _
+        Format$(inv6MBp, "0.0") & " bp inverted. Protection is directional."
 
     FINAL_PrepareSlideSheet ws, headline, conclusion
 
@@ -60,20 +63,47 @@ Public Sub FINAL_Slide3_Regret()
     ws.Range("A20").Value = "100% ON"
     ws.Range("A21").Value = "100% 6M"
 
-    ws.Range("B20").Value = histONRegret * 10000#
-    ws.Range("B21").Value = hist6MRegret * 10000#
+    ws.Range("B20").Value = histONBp
+    ws.Range("B21").Value = hist6MBp
 
-    ws.Range("C20").Value = invONRegret * 10000#
-    ws.Range("C21").Value = inv6MRegret * 10000#
+    ws.Range("C20").Value = invONBp
+    ws.Range("C21").Value = inv6MBp
 
-    ws.Range("E19").Value = "Definition"
-    ws.Range("E20").Value = "Regret"
-    ws.Range("F20").Value = "Best tenor return - selected strategy return"
-    ws.Range("E21").Value = "Interpretation"
-    ws.Range("F21").Value = "Lower is better"
-
-    ws.Range("A19:F19").Font.Bold = True
+    ws.Range("A19:C19").Font.Bold = True
     ws.Range("B20:C21").NumberFormat = "0.0 ""bp"""
+
+    '-------------------------------------------------------------
+    ' DEFINITION BOX
+    '-------------------------------------------------------------
+    ws.Range("K5:N5").Merge
+    ws.Range("K5").Value = "REGRET"
+
+    ws.Range("K6:N8").Merge
+    ws.Range("K6").Value = "Best tenor return" & vbLf & "minus" & vbLf & "selected strategy return"
+
+    ws.Range("K10:N10").Merge
+    ws.Range("K10").Value = "LOWER IS BETTER"
+
+    With ws.Range("K5:N5")
+        .Font.Bold = True
+        .Font.Size = 12
+        .Interior.Color = RGB(243, 244, 246)
+        .HorizontalAlignment = xlCenter
+    End With
+
+    With ws.Range("K6:N8")
+        .WrapText = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .Font.Size = 12
+    End With
+
+    With ws.Range("K10:N10")
+        .Font.Bold = True
+        .Font.Size = 12
+        .HorizontalAlignment = xlCenter
+        .Font.Color = FINAL_ColorAccent2()
+    End With
 
     '-------------------------------------------------------------
     ' CHART
@@ -81,14 +111,14 @@ Public Sub FINAL_Slide3_Regret()
     maxBp = WorksheetFunction.Max(ws.Range("B20:C21"))
     axisMax = FINAL_NiceBpMax(maxBp)
 
-    Set ch = ws.ChartObjects.Add(Left:=140, Top:=80, Width:=670, Height:=300)
+    Set ch = ws.ChartObjects.Add(Left:=40, Top:=80, Width:=650, Height:=300)
 
     With ch.Chart
 
-        .ChartType = xlColumnClustered
+        .ChartType = xlBarClustered
         .SetSourceData ws.Range("A19:C21")
 
-        FINAL_StyleChart ch.Chart, "Average regret by directional path", True
+        FINAL_StyleChart ch.Chart, "Average cost of being wrong - lower is better", True
 
         FINAL_SetSeriesColor .SeriesCollection(1), FINAL_ColorDark()
         FINAL_SetSeriesColor .SeriesCollection(2), FINAL_ColorAccent()
@@ -98,16 +128,23 @@ Public Sub FINAL_Slide3_Regret()
 
         .SeriesCollection(1).DataLabels.NumberFormat = "0.0 ""bp"""
         .SeriesCollection(2).DataLabels.NumberFormat = "0.0 ""bp"""
+        .SeriesCollection(1).DataLabels.Position = xlLabelPositionOutsideEnd
+        .SeriesCollection(2).DataLabels.Position = xlLabelPositionOutsideEnd
 
-        .Axes(xlValue).MinimumScale = 0
-        .Axes(xlValue).MaximumScale = axisMax
-        .Axes(xlValue).MajorUnit = axisMax / 4#
+        With .Axes(xlValue)
+            .MinimumScale = 0
+            .MaximumScale = axisMax
+            .MajorUnit = axisMax / 4#
+            .HasTitle = True
+            .AxisTitle.Text = "Average regret (bp)"
+        End With
 
-        .Axes(xlValue).HasTitle = True
-        .Axes(xlValue).AxisTitle.Text = "Average regret (bp)"
+        On Error Resume Next
+        .Axes(xlCategory).ReversePlotOrder = True
+        On Error GoTo 0
 
     End With
 
-    ws.Columns("A:F").AutoFit
+    ws.Columns("K:N").ColumnWidth = 15
 
 End Sub
