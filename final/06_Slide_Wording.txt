@@ -1,0 +1,111 @@
+FINAL CFO PRESENTATION WORDING
+==============================
+
+Purpose
+-------
+Use one conclusion per slide. Keep the analytical chain explicit:
+historical evidence -> directional reversal -> define risk -> robust allocation -> execution.
+
+SLIDE 1 — HISTORICAL EVIDENCE
+-----------------------------
+Headline:
+Rolling short protected returns during the realized rate cycle
+
+Direct conclusion:
+Historical winner = ON. Frequent repricing allowed short cash to capture higher rates during the hiking phase.
+
+Chart wording:
+Historical ON rate path
+Average realized return over common 6M horizon
+
+Speaker wording:
+"Starting with the realized market path, the short end had an advantage because cash was repeatedly reinvested at higher rates. The point is not that ON is always better; it is that rising rates reward the ability to reprice."
+
+If the actual data produces a different historical winner, use the dynamic wording written by the VBA in S1_Historical!A1:A2.
+
+SLIDE 2 — DIRECTION MATTERS
+---------------------------
+Headline:
+The preferred tenor reverses when the rate path reverses
+
+Direct conclusion:
+Historical path winner = ON; inverted path winner = 6M. The comparison is shown as excess return versus ON within each path.
+
+Chart wording:
+Average 6M excess return versus ON
+Y-axis: Excess return vs ON (bp)
+
+Speaker wording:
+"When the direction of rates is reversed, the advantage moves toward longer tenor. ON benefits from repricing higher; 6M benefits from locking before rates fall. This is why the decision cannot be based on the historical winner alone."
+
+Important:
+Use excess return versus ON within each scenario. Do not compare pooled absolute returns across historical and inverted paths because the stress paths can start at different absolute rate levels.
+
+SLIDE 3 — DEFINE THE RISK
+-------------------------
+Headline:
+The relevant risk is the cost of choosing the wrong tenor
+
+Direct conclusion:
+Regret = best tenor return minus selected strategy return. ON protects one rate direction; 6M protects the other.
+
+Chart wording:
+Average regret by directional path
+Y-axis: Average regret (bp)
+Lower is better
+
+Speaker wording:
+"The CFO does not need to forecast the path perfectly. The risk we want to control is the penalty from selecting the wrong tenor. We measure that penalty as regret: the difference between what the selected strategy earned and what the best tenor would have earned with perfect hindsight."
+
+SLIDE 4 — ROBUST ALLOCATION
+---------------------------
+Headline:
+A balanced tenor mix reduces the cost of being wrong
+
+Core CFO message:
+ON protects against higher-for-longer / rising rates; 6M protects against falling rates; the allocation is chosen to minimize the cost of being wrong in either direction.
+
+Direct conclusion:
+Use the dynamic conclusion written by the VBA in S4_Robust!A2. It will state the selected allocation and its average historical and inverted regret using the latest Curve data.
+
+Chart wording:
+Directional protection across 286 allocations
+X-axis: Historical-path average regret (bp)
+Y-axis: Inverted-path average regret (bp)
+
+Speaker wording:
+"Each point is one long-only allocation across ON, 1M, 3M and 6M in 10% increments. We choose the portfolio that minimizes the larger average regret across the two directional stress paths. The objective is protection against being materially wrong, not maximum return under one forecast."
+
+Interpretation:
+- Lower-left is better.
+- 100% ON protects the historical/rising side.
+- 100% 6M protects the falling-rate side.
+- The robust point balances both.
+- Historical and inverted paths are stress tests, not forecasts.
+
+SLIDE 5 — EXECUTION
+-------------------
+Headline:
+Translate the tenor framework into an executable deposit program with competitive pricing
+
+Direct conclusion:
+Use the dynamic conclusion written by the VBA in S5_Execution!A2 after actual 3M and 6M premium observations are entered in Final_Input.
+
+Chart wording:
+3M and 6M deposit premium since Jan-2025
+Y-axis: Premium (bp)
+
+Institutional proof points:
+Credit rating
+Global coverage
+Additional proof point
+
+Execution process:
+PRICE > ALLOCATE > REVIEW
+
+Speaker wording:
+"The analytical framework determines how much duration we want. Execution then determines whether we can capture that allocation efficiently. The practical value is consistent pricing across tenors, supported by credit quality and broad execution capability. The process is ongoing: price the alternatives, allocate according to the risk framework, and review as the curve changes."
+
+FINAL MESSAGE
+-------------
+"The objective is not to maximize return under one interest-rate forecast. It is to preserve an attractive return while limiting the cost of being wrong about the direction of rates, and then execute that allocation consistently."
