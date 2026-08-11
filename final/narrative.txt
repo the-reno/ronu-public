@@ -1,0 +1,78 @@
+CFO NARRATIVE — SHORT-TERM USD CASH ALLOCATION
+
+The starting point is simple: we have cash to invest, and the decision is how much to keep short versus how much to lock for longer.
+
+Over the last few years, SOFR moved from very low levels into one of the fastest tightening cycles in decades. During that period, staying short was generally rewarded because cash kept resetting into higher rates. If we look only at the historical outcome, the conclusion would be easy: short tenors worked well.
+
+But that is only half of the story.
+
+What matters for a treasury decision is not just where rates were. It is what the market was paying at each point to extend duration, and whether that premium was ultimately worth taking.
+
+So the analysis compares two things.
+
+First, the spread priced at inception. For example, how much more did 6M pay versus ON or 1M when the investment was made?
+
+Second, the spread actually realized. After six months, did locking that 6M rate really outperform what we would have earned by staying short and reinvesting as rates changed?
+
+That distinction is important because a positive term spread does not automatically mean that extending was the better decision. If rates rise after we invest, the short strategy can catch up and outperform. If rates fall, locking the longer rate becomes much more valuable.
+
+The historical analysis lets us see exactly how that trade-off behaved during the last rate cycle.
+
+The next question is more important:
+
+What if the next cycle does not look like the last one?
+
+Historical data gives us only one realized path. The last cycle strongly favored shorter resets because rates moved higher. We therefore stress the same investment decisions under alternative rate paths, including an opposite-direction scenario.
+
+The purpose is not to predict exactly where the Fed will go. It is to understand the exposure we are taking if our view is wrong.
+
+That gives us two clear risks.
+
+If we stay too short and rates fall, we face reinvestment risk: the cash keeps resetting at lower rates.
+
+If we lock too much and rates stay high or rise, we face lock-in risk: we lose the opportunity to reinvest at better rates.
+
+So rather than trying to pick the single tenor that will win, the proposal is to build an allocation that balances those two risks.
+
+The model tests different combinations of ON, 1M, 3M and 6M and asks:
+
+Which allocation keeps the cost of being wrong relatively small under both rate directions?
+
+That is a different objective from simply maximizing return under one forecast.
+
+The current analysis points to a meaningful allocation to 6M as the duration anchor, while keeping part of the portfolio in shorter tenors for liquidity and the ability to reset if rates remain attractive.
+
+The exact mix should not be viewed as permanent. It should be adjusted based on three things:
+
+what the curve is currently paying, what liquidity the company needs, and how much directional risk we are comfortable taking.
+
+So the practical process becomes:
+
+Price the curve. Allocate across tenors. Review as the market changes.
+
+The value of the framework is that it changes the discussion from:
+
+“Which deposit rate is highest today?”
+
+to:
+
+“What are we being paid to extend, what happens if rates move differently from expectations, and how should we structure the cash portfolio so that we are not overly dependent on one rate view?”
+
+
+HOW WE CAN SUPPORT
+
+The analysis is only useful if it can be translated into executable levels and meaningful capacity.
+
+We can support that in a way that is particularly relevant for corporate cash portfolios: providing consistent deposit pricing across tenors, capacity for larger balances, and a relationship-driven approach focused on stable funding rather than purely opportunistic pricing.
+
+That matters because the objective is not just to find the highest rate on one day. A treasury needs confidence that its banking partner can remain competitive through different market conditions, absorb meaningful ticket sizes, and provide continuity as the allocation changes between ON, 1M, 3M and 6M.
+
+From a credit perspective, the quality of the counterparty is also part of the decision. The return on cash should be considered together with the credit profile of the institution, concentration limits and the ability to place size efficiently.
+
+The value proposition is therefore broader than quoting a deposit:
+
+We can help determine where the curve offers attractive value, provide executable levels across the relevant tenors, accommodate larger and more stable balances, and review the allocation as market conditions change.
+
+The objective is to become a consistent liquidity partner rather than simply compete for individual deposits.
+
+My role in that process is to connect the market view, the quantitative analysis and the client’s treasury objectives, and then work with the broader platform to translate that into executable pricing and an allocation that makes sense for the client.
