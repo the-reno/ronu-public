@@ -1,88 +1,71 @@
 Option Explicit
 
 '=====================================================================
-' SLIDE 4 - ROBUST ALLOCATION
+' SLIDE 4 - DIRECTIONAL ALLOCATION FRAMEWORK
 '
-' Message:
-'   ON protects against higher-for-longer / rising rates.
-'   6M protects against falling rates.
-'   The allocation is chosen to minimize the cost of being wrong in
-'   either direction.
+' Purpose:
+'   Show HOW the allocation changes protection under both rate paths,
+'   not only the final optimizer point.
 '
-' Optimization:
-'   Minimize max(
-'       average regret in historical path,
-'       average regret in inverted path
-'   )
+' Framework:
+'   1) Fix the 6M allocation at 0%, 10%, ... 100%.
+'   2) For each fixed 6M weight, choose the ON / 1M / 3M mix that
+'      minimizes the larger of historical and inverted average regret.
+'   3) Compare the two directional regrets.
+'   4) The selected portfolio is the global minimum of worst
+'      directional average regret across all 286 portfolios.
 '
-' Output:
-'   Scatter of all 286 allocations.
-'   Same X/Y scale so the equal-regret line is visually meaningful.
+' Charts:
+'   A) Historical vs inverted regret as 6M allocation changes.
+'   B) Worst directional regret by 6M allocation (protection curve).
+'   C) Allocation structure inside +0.25 bp of the optimum.
+'
+' Historical and inverted paths are stress environments, not forecasts.
 '=====================================================================
+
+Private Const S4_NEAR_OPT_BP As Double = 0.25
+Private Const S4_MAX_NEAR_BARS As Long = 12
+Private Const S4_EPS As Double = 0.000000000001
 
 Public Sub FINAL_Slide4_Robust()
 
     Dim ws As Worksheet
     Dim wsPort As Worksheet
-
-    Dim lastRow As Long
-    Dim robustRow As Long
-    Dim onRow As Long
-    Dim sixMRow As Long
-    Dim r As Long
+    Dim lastRow As Long, robustRow As Long
+    Dim r As Long, i As Long, j As Long, k As Long
 
     Dim robustText As String
+    Dim histBp As Double, invBp As Double, maxDirBp As Double
+    Dim weightedMonths As Double, robust6M As Double
 
-    Dim histBp As Double
-    Dim invBp As Double
-    Dim maxDirBp As Double
-    Dim weightedMonths As Double
+    Dim bestRow(0 To 10) As Long
+    Dim bestMax(0 To 10) As Double
+    Dim bestMean(0 To 10) As Double
+    Dim bestMonths(0 To 10) As Double
+    Dim bucket As Long
+    Dim candMax As Double, candMean As Double, candMonths As Double
 
-    Dim onHistBp As Double
-    Dim onInvBp As Double
-    Dim sixHistBp As Double
-    Dim sixInvBp As Double
+    Dim nearThreshold As Double
+    Dim nearCount As Long, displayCount As Long
+    Dim nearRows() As Long
+    Dim tmpRow As Long
+    Dim nearMin6M As Double, nearMax6M As Double, current6M As Double
 
-    Dim rawMax As Double
-    Dim axisMax As Double
+    Dim axisMax As Double, maxCurveBp As Double
+    Dim headline As String, conclusion As String
+    Dim frameworkText As String, nearTitle As String
 
-    Dim headline As String
-    Dim conclusion As String
-
-    Dim ch As ChartObject
-    Dim sAll As Series
-    Dim sLine As Series
-    Dim sON As Series
-    Dim s6M As Series
-    Dim sRobust As Series
+    Dim chDirection As ChartObject
+    Dim chWorst As ChartObject
+    Dim chNear As ChartObject
+    Dim sHist As Series, sInv As Series, sWorst As Series
+    Dim sRobustHist As Series, sRobustInv As Series, sRobustWorst As Series
 
     Set ws = FINAL_GetOrCreateSheet(FINAL_S4, True)
     Set wsPort = ThisWorkbook.Worksheets(FINAL_PORT)
 
     lastRow = FINAL_LastRow(wsPort, 1)
     robustRow = FINAL_RobustRow(wsPort)
-
-    For r = 2 To lastRow
-
-        If CDbl(wsPort.Cells(r, 1).Value) = 1# And _
-           CDbl(wsPort.Cells(r, 2).Value) = 0 And _
-           CDbl(wsPort.Cells(r, 3).Value) = 0 And _
-           CDbl(wsPort.Cells(r, 4).Value) = 0 Then
-            onRow = r
-        End If
-
-        If CDbl(wsPort.Cells(r, 1).Value) = 0 And _
-           CDbl(wsPort.Cells(r, 2).Value) = 0 And _
-           CDbl(wsPort.Cells(r, 3).Value) = 0 And _
-           CDbl(wsPort.Cells(r, 4).Value) = 1# Then
-            sixMRow = r
-        End If
-
-    Next r
-
-    If onRow = 0 Or sixMRow = 0 Then
-        Err.Raise vbObjectError + 200, , "Pure ON / 6M portfolio rows were not found."
-    End If
 
     robustText = FINAL_WeightText( _
         wsPort.Cells(robustRow, 1).Value, _
@@ -94,191 +77,257 @@ Public Sub FINAL_Slide4_Robust()
     invBp = CDbl(wsPort.Cells(robustRow, 8).Value) * 10000#
     maxDirBp = CDbl(wsPort.Cells(robustRow, 9).Value) * 10000#
     weightedMonths = CDbl(wsPort.Cells(robustRow, 11).Value)
+    robust6M = CDbl(wsPort.Cells(robustRow, 4).Value)
 
-    onHistBp = CDbl(wsPort.Cells(onRow, 7).Value) * 10000#
-    onInvBp = CDbl(wsPort.Cells(onRow, 8).Value) * 10000#
+    '-------------------------------------------------------------
+    ' BEST SHORT-BUCKET MIX FOR EACH FIXED 6M ALLOCATION
+    '-------------------------------------------------------------
+    For k = 0 To 10
+        bestRow(k) = 0
+        bestMax(k) = 1E+99
+        bestMean(k) = 1E+99
+        bestMonths(k) = 1E+99
+    Next k
 
-    sixHistBp = CDbl(wsPort.Cells(sixMRow, 7).Value) * 10000#
-    sixInvBp = CDbl(wsPort.Cells(sixMRow, 8).Value) * 10000#
+    For r = 2 To lastRow
 
-    If Abs(histBp - invBp) <= 0.5 Then
-        headline = "The robust mix equalizes the cost of being wrong at ~" & Format$(maxDirBp, "0.0") & " bp"
+        bucket = CLng(Round(CDbl(wsPort.Cells(r, 4).Value) * 10#, 0))
+
+        If bucket >= 0 And bucket <= 10 Then
+
+            candMax = CDbl(wsPort.Cells(r, 9).Value)
+            candMean = CDbl(wsPort.Cells(r, 10).Value)
+            candMonths = CDbl(wsPort.Cells(r, 11).Value)
+
+            If candMax < bestMax(bucket) - S4_EPS Then
+                bestRow(bucket) = r
+                bestMax(bucket) = candMax
+                bestMean(bucket) = candMean
+                bestMonths(bucket) = candMonths
+
+            ElseIf Abs(candMax - bestMax(bucket)) <= S4_EPS Then
+
+                If candMean < bestMean(bucket) - S4_EPS Then
+                    bestRow(bucket) = r
+                    bestMean(bucket) = candMean
+                    bestMonths(bucket) = candMonths
+
+                ElseIf Abs(candMean - bestMean(bucket)) <= S4_EPS Then
+                    If candMonths < bestMonths(bucket) - S4_EPS Then
+                        bestRow(bucket) = r
+                        bestMonths(bucket) = candMonths
+                    End If
+                End If
+
+            End If
+
+        End If
+
+    Next r
+
+    For k = 0 To 10
+        If bestRow(k) = 0 Then
+            Err.Raise vbObjectError + 200, , _
+                "No portfolio found for 6M allocation bucket " & Format$(k / 10#, "0%") & "."
+        End If
+    Next k
+
+    '-------------------------------------------------------------
+    ' NEAR-OPTIMAL REGION: +0.25 BP FROM GLOBAL OPTIMUM
+    '-------------------------------------------------------------
+    nearThreshold = CDbl(wsPort.Cells(robustRow, 9).Value) + S4_NEAR_OPT_BP / 10000#
+    nearCount = 0
+    nearMin6M = 1E+99
+    nearMax6M = -1E+99
+
+    For r = 2 To lastRow
+        If CDbl(wsPort.Cells(r, 9).Value) <= nearThreshold + S4_EPS Then
+            nearCount = nearCount + 1
+            current6M = CDbl(wsPort.Cells(r, 4).Value)
+            If current6M < nearMin6M Then nearMin6M = current6M
+            If current6M > nearMax6M Then nearMax6M = current6M
+        End If
+    Next r
+
+    If nearCount = 0 Then
+        Err.Raise vbObjectError + 201, , "Near-optimal portfolio region could not be identified."
+    End If
+
+    ReDim nearRows(1 To nearCount)
+    i = 0
+
+    For r = 2 To lastRow
+        If CDbl(wsPort.Cells(r, 9).Value) <= nearThreshold + S4_EPS Then
+            i = i + 1
+            nearRows(i) = r
+        End If
+    Next r
+
+    For i = 1 To nearCount - 1
+        For j = i + 1 To nearCount
+            If S4_NearRowComesFirst(wsPort, nearRows(j), nearRows(i)) Then
+                tmpRow = nearRows(i)
+                nearRows(i) = nearRows(j)
+                nearRows(j) = tmpRow
+            End If
+        Next j
+    Next i
+
+    displayCount = nearCount
+    If displayCount > S4_MAX_NEAR_BARS Then displayCount = S4_MAX_NEAR_BARS
+
+    '-------------------------------------------------------------
+    ' CFO MESSAGE
+    '-------------------------------------------------------------
+    If Abs(nearMin6M - nearMax6M) <= S4_EPS Then
+        headline = _
+            "Robust protection is anchored at " & Format$(nearMin6M, "0%") & _
+            " 6M; the short bucket remains flexible"
     Else
-        headline = "The robust mix limits directional regret to ~" & Format$(maxDirBp, "0.0") & " bp"
+        headline = _
+            "Robust protection is concentrated between " & Format$(nearMin6M, "0%") & _
+            " and " & Format$(nearMax6M, "0%") & " in 6M"
     End If
 
     conclusion = _
-        robustText & " produces " & Format$(histBp, "0.0") & " bp historical and " & _
-        Format$(invBp, "0.0") & " bp inverted average regret; maximum directional regret = " & _
-        Format$(maxDirBp, "0.0") & " bp."
+        robustText & " minimizes worst directional average regret at " & _
+        Format$(maxDirBp, "0.0") & " bp. " & nearCount & _
+        " allocations remain within +" & Format$(S4_NEAR_OPT_BP, "0.00") & _
+        " bp of the optimum."
+
+    frameworkText = _
+        "Framework: fix the 6M share; optimize the remaining ON / 1M / 3M bucket; " & _
+        "then compare average regret under the Historical and Inverted rate paths."
 
     FINAL_PrepareSlideSheet ws, headline, conclusion
 
-    '-------------------------------------------------------------
-    ' COPY ALL PORTFOLIO REGRET POINTS TO OFF-CANVAS DATA AREA
-    '-------------------------------------------------------------
-    ws.Range("P19:Q19").Value = Array("Historical Avg Regret (bp)", "Inverted Avg Regret (bp)")
+    ws.Range("A3:N3").Merge
+    ws.Range("A3").Value = frameworkText
 
-    For r = 2 To lastRow
-        ws.Cells(18 + r, 16).Value = CDbl(wsPort.Cells(r, 7).Value) * 10000#
-        ws.Cells(18 + r, 17).Value = CDbl(wsPort.Cells(r, 8).Value) * 10000#
-    Next r
-
-    rawMax = WorksheetFunction.Max( _
-        ws.Range("P20:P" & 18 + lastRow), _
-        ws.Range("Q20:Q" & 18 + lastRow))
-
-    axisMax = FINAL_NiceBpMax(rawMax)
-
-    ws.Range("S19:T19").Value = Array("Equal X", "Equal Y")
-    ws.Range("S20").Value = 0
-    ws.Range("T20").Value = 0
-    ws.Range("S21").Value = axisMax
-    ws.Range("T21").Value = axisMax
-
-    ws.Range("V19:W19").Value = Array("ON X", "ON Y")
-    ws.Range("V20").Value = onHistBp
-    ws.Range("W20").Value = onInvBp
-
-    ws.Range("Y19:Z19").Value = Array("6M X", "6M Y")
-    ws.Range("Y20").Value = sixHistBp
-    ws.Range("Z20").Value = sixInvBp
-
-    ws.Range("AB19:AC19").Value = Array("Robust X", "Robust Y")
-    ws.Range("AB20").Value = histBp
-    ws.Range("AC20").Value = invBp
-
-    '-------------------------------------------------------------
-    ' DECISION BOX
-    '-------------------------------------------------------------
-    ws.Range("K5:N5").Merge
-    ws.Range("K5").Value = "ROBUST ALLOCATION"
-
-    ws.Range("K6").Value = "ON"
-    ws.Range("K7").Value = "1M"
-    ws.Range("K8").Value = "3M"
-    ws.Range("K9").Value = "6M"
-
-    ws.Range("L6").Value = wsPort.Cells(robustRow, 1).Value
-    ws.Range("L7").Value = wsPort.Cells(robustRow, 2).Value
-    ws.Range("L8").Value = wsPort.Cells(robustRow, 3).Value
-    ws.Range("L9").Value = wsPort.Cells(robustRow, 4).Value
-    ws.Range("L6:L9").NumberFormat = "0%"
-
-    ws.Range("K11").Value = "Historical regret"
-    ws.Range("K12").Value = "Inverted regret"
-    ws.Range("K13").Value = "Maximum regret"
-    ws.Range("K14").Value = "Weighted tenor"
-
-    ws.Range("M11").Value = histBp
-    ws.Range("M12").Value = invBp
-    ws.Range("M13").Value = maxDirBp
-    ws.Range("M14").Value = weightedMonths
-
-    ws.Range("M11:M13").NumberFormat = "0.0 ""bp"""
-    ws.Range("M14").NumberFormat = "0.0 ""months"""
-
-    With ws.Range("K5:N5")
-        .Font.Bold = True
-        .Font.Size = 12
-        .Interior.Color = RGB(243, 244, 246)
-    End With
-
-    ws.Range("K6:K9,K11:K14").Font.Bold = True
-    ws.Range("L6:L9").Font.Size = 14
-    ws.Range("M11:M12").Font.Size = 12
-
-    With ws.Range("K16:N16")
-        .Merge
-        .Value = "MAX DIRECTIONAL REGRET"
-        .Font.Bold = True
-        .HorizontalAlignment = xlCenter
-        .Interior.Color = RGB(243, 244, 246)
-    End With
-
-    With ws.Range("K17:N18")
-        .Merge
-        .Value = Format$(maxDirBp, "0.0") & " bp"
-        .Font.Bold = True
-        .Font.Size = 20
-        .Font.Color = FINAL_ColorAccent2()
-        .HorizontalAlignment = xlCenter
+    With ws.Range("A3:N3")
+        .Font.Size = 9
+        .Font.Color = RGB(107, 114, 128)
+        .WrapText = True
         .VerticalAlignment = xlCenter
+        .RowHeight = 24
     End With
 
     '-------------------------------------------------------------
-    ' SCATTER - same scale on both axes is intentional
+    ' DATA: BEST PORTFOLIO AT EACH 6M WEIGHT
+    ' P:S = 6M / Historical / Inverted / Worst regret
+    ' T:W = selected ON / 1M / 3M / 6M weights
     '-------------------------------------------------------------
-    Set ch = ws.ChartObjects.Add(Left:=15, Top:=78, Width:=640, Height:=315)
+    ws.Range("P30:W30").Value = Array( _
+        "6M Allocation (%)", "Historical Regret (bp)", "Inverted Regret (bp)", _
+        "Worst Regret (bp)", "ON", "1M", "3M", "6M")
 
-    With ch.Chart
+    For k = 0 To 10
+        r = bestRow(k)
+        ws.Cells(31 + k, 16).Value = k * 10#
+        ws.Cells(31 + k, 17).Value = CDbl(wsPort.Cells(r, 7).Value) * 10000#
+        ws.Cells(31 + k, 18).Value = CDbl(wsPort.Cells(r, 8).Value) * 10000#
+        ws.Cells(31 + k, 19).Value = CDbl(wsPort.Cells(r, 9).Value) * 10000#
+        ws.Cells(31 + k, 20).Value = CDbl(wsPort.Cells(r, 1).Value)
+        ws.Cells(31 + k, 21).Value = CDbl(wsPort.Cells(r, 2).Value)
+        ws.Cells(31 + k, 22).Value = CDbl(wsPort.Cells(r, 3).Value)
+        ws.Cells(31 + k, 23).Value = CDbl(wsPort.Cells(r, 4).Value)
+    Next k
 
-        .ChartType = xlXYScatter
+    ws.Range("Y30:Z30").Value = Array("Robust X", "Robust Historical")
+    ws.Range("Y31").Value = robust6M * 100#
+    ws.Range("Z31").Value = histBp
+
+    ws.Range("AB30:AC30").Value = Array("Robust X", "Robust Inverted")
+    ws.Range("AB31").Value = robust6M * 100#
+    ws.Range("AC31").Value = invBp
+
+    ws.Range("AE30:AF30").Value = Array("Robust X", "Robust Worst")
+    ws.Range("AE31").Value = robust6M * 100#
+    ws.Range("AF31").Value = maxDirBp
+
+    '-------------------------------------------------------------
+    ' DATA: NEAR-OPTIMAL PORTFOLIOS
+    ' AH:AL = label / ON / 1M / 3M / 6M
+    '-------------------------------------------------------------
+    ws.Range("AH30:AL30").Value = Array("Portfolio", "ON", "1M", "3M", "6M")
+
+    For i = 1 To displayCount
+        r = nearRows(i)
+        ws.Cells(30 + i, 34).Value = S4_CompactWeightLabel(wsPort, r)
+        ws.Cells(30 + i, 35).Value = CDbl(wsPort.Cells(r, 1).Value)
+        ws.Cells(30 + i, 36).Value = CDbl(wsPort.Cells(r, 2).Value)
+        ws.Cells(30 + i, 37).Value = CDbl(wsPort.Cells(r, 3).Value)
+        ws.Cells(30 + i, 38).Value = CDbl(wsPort.Cells(r, 4).Value)
+    Next i
+
+    maxCurveBp = WorksheetFunction.Max(ws.Range("Q31:S41"))
+    axisMax = FINAL_NiceBpMax(maxCurveBp)
+
+    '-------------------------------------------------------------
+    ' CHART A - HISTORICAL VS INVERTED REGRET
+    '-------------------------------------------------------------
+    Set chDirection = ws.ChartObjects.Add(Left:=15, Top:=92, Width:=560, Height:=225)
+
+    With chDirection.Chart
+        .ChartType = xlXYScatterLines
         .HasLegend = True
 
-        Set sAll = .SeriesCollection.NewSeries
-        With sAll
-            .Name = "286 allocations"
-            .XValues = ws.Range("P20:P" & 18 + lastRow)
-            .Values = ws.Range("Q20:Q" & 18 + lastRow)
+        Set sHist = .SeriesCollection.NewSeries
+        With sHist
+            .Name = "Historical path"
+            .XValues = ws.Range("P31:P41")
+            .Values = ws.Range("Q31:Q41")
             .MarkerStyle = xlMarkerStyleCircle
-            .MarkerSize = 4
-            .Format.Line.Visible = msoFalse
+            .MarkerSize = 5
+            .Format.Line.Weight = 2.25
         End With
-        FINAL_SetSeriesColor sAll, FINAL_ColorLightGray(), 0.35
+        FINAL_SetSeriesColor sHist, FINAL_ColorDark()
 
-        Set sLine = .SeriesCollection.NewSeries
-        With sLine
-            .Name = "Equal regret"
-            .XValues = ws.Range("S20:S21")
-            .Values = ws.Range("T20:T21")
-            .ChartType = xlXYScatterLinesNoMarkers
-            .Format.Line.Weight = 1.25
-            .Format.Line.DashStyle = msoLineDash
-        End With
-        FINAL_SetSeriesColor sLine, FINAL_ColorGray()
-
-        Set sON = .SeriesCollection.NewSeries
-        With sON
-            .Name = "100% ON"
-            .XValues = ws.Range("V20")
-            .Values = ws.Range("W20")
+        Set sInv = .SeriesCollection.NewSeries
+        With sInv
+            .Name = "Inverted path"
+            .XValues = ws.Range("P31:P41")
+            .Values = ws.Range("R31:R41")
             .MarkerStyle = xlMarkerStyleCircle
-            .MarkerSize = 9
-            .Format.Line.Visible = msoFalse
+            .MarkerSize = 5
+            .Format.Line.Weight = 2.25
         End With
-        FINAL_SetSeriesColor sON, FINAL_ColorDark()
+        FINAL_SetSeriesColor sInv, FINAL_ColorAccent()
 
-        Set s6M = .SeriesCollection.NewSeries
-        With s6M
-            .Name = "100% 6M"
-            .XValues = ws.Range("Y20")
-            .Values = ws.Range("Z20")
-            .MarkerStyle = xlMarkerStyleCircle
-            .MarkerSize = 9
-            .Format.Line.Visible = msoFalse
-        End With
-        FINAL_SetSeriesColor s6M, FINAL_ColorRisk()
-
-        Set sRobust = .SeriesCollection.NewSeries
-        With sRobust
-            .Name = "Robust allocation"
-            .XValues = ws.Range("AB20")
-            .Values = ws.Range("AC20")
+        Set sRobustHist = .SeriesCollection.NewSeries
+        With sRobustHist
+            .Name = "Selected - historical"
+            .XValues = ws.Range("Y31")
+            .Values = ws.Range("Z31")
+            .ChartType = xlXYScatter
             .MarkerStyle = xlMarkerStyleDiamond
-            .MarkerSize = 12
+            .MarkerSize = 10
             .Format.Line.Visible = msoFalse
         End With
-        FINAL_SetSeriesColor sRobust, FINAL_ColorAccent2()
+        FINAL_SetSeriesColor sRobustHist, FINAL_ColorAccent2()
 
-        FINAL_StyleChart ch.Chart, "Directional regret by allocation - lower-left is better", True
+        Set sRobustInv = .SeriesCollection.NewSeries
+        With sRobustInv
+            .Name = "Selected - inverted"
+            .XValues = ws.Range("AB31")
+            .Values = ws.Range("AC31")
+            .ChartType = xlXYScatter
+            .MarkerStyle = xlMarkerStyleDiamond
+            .MarkerSize = 10
+            .Format.Line.Visible = msoFalse
+        End With
+        FINAL_SetSeriesColor sRobustInv, FINAL_ColorAccent2()
+
+        FINAL_StyleChart chDirection.Chart, _
+            "Directional regret as 6M allocation changes", True
 
         With .Axes(xlCategory)
             .MinimumScale = 0
-            .MaximumScale = axisMax
-            .MajorUnit = axisMax / 4#
+            .MaximumScale = 100
+            .MajorUnit = 20
             .HasTitle = True
-            .AxisTitle.Text = "Historical-path average regret (bp)"
+            .AxisTitle.Text = "6M allocation"
+            .TickLabels.NumberFormat = "0\%"
         End With
 
         With .Axes(xlValue)
@@ -286,27 +335,238 @@ Public Sub FINAL_Slide4_Robust()
             .MaximumScale = axisMax
             .MajorUnit = axisMax / 4#
             .HasTitle = True
-            .AxisTitle.Text = "Inverted-path average regret (bp)"
+            .AxisTitle.Text = "Average regret (bp)"
         End With
 
         On Error Resume Next
+        sRobustHist.ApplyDataLabels
+        sRobustHist.DataLabels(1).Text = Format$(histBp, "0.0") & " bp"
+        sRobustHist.DataLabels(1).Position = xlLabelPositionAbove
 
-        sON.ApplyDataLabels
-        sON.DataLabels(1).Text = "100% ON"
-        sON.DataLabels(1).Position = xlLabelPositionRight
-
-        s6M.ApplyDataLabels
-        s6M.DataLabels(1).Text = "100% 6M"
-        s6M.DataLabels(1).Position = xlLabelPositionRight
-
-        sRobust.ApplyDataLabels
-        sRobust.DataLabels(1).Text = "ROBUST" & vbLf & robustText
-        sRobust.DataLabels(1).Position = xlLabelPositionRight
-
+        sRobustInv.ApplyDataLabels
+        sRobustInv.DataLabels(1).Text = Format$(invBp, "0.0") & " bp"
+        sRobustInv.DataLabels(1).Position = xlLabelPositionBelow
         On Error GoTo 0
-
     End With
 
-    ws.Columns("K:N").ColumnWidth = 15
+    '-------------------------------------------------------------
+    ' CHART B - WORST DIRECTIONAL REGRET / PROTECTION CURVE
+    '-------------------------------------------------------------
+    Set chWorst = ws.ChartObjects.Add(Left:=595, Top:=92, Width:=330, Height:=225)
+
+    With chWorst.Chart
+        .ChartType = xlXYScatterLines
+        .HasLegend = False
+
+        Set sWorst = .SeriesCollection.NewSeries
+        With sWorst
+            .Name = "Worst directional regret"
+            .XValues = ws.Range("P31:P41")
+            .Values = ws.Range("S31:S41")
+            .MarkerStyle = xlMarkerStyleCircle
+            .MarkerSize = 5
+            .Format.Line.Weight = 2.25
+        End With
+        FINAL_SetSeriesColor sWorst, FINAL_ColorAccent()
+
+        Set sRobustWorst = .SeriesCollection.NewSeries
+        With sRobustWorst
+            .Name = "Minimum"
+            .XValues = ws.Range("AE31")
+            .Values = ws.Range("AF31")
+            .ChartType = xlXYScatter
+            .MarkerStyle = xlMarkerStyleDiamond
+            .MarkerSize = 11
+            .Format.Line.Visible = msoFalse
+        End With
+        FINAL_SetSeriesColor sRobustWorst, FINAL_ColorAccent2()
+
+        FINAL_StyleChart chWorst.Chart, _
+            "Worst directional regret is minimized near the crossover", False
+
+        With .Axes(xlCategory)
+            .MinimumScale = 0
+            .MaximumScale = 100
+            .MajorUnit = 20
+            .HasTitle = True
+            .AxisTitle.Text = "6M allocation"
+            .TickLabels.NumberFormat = "0\%"
+        End With
+
+        With .Axes(xlValue)
+            .MinimumScale = 0
+            .MaximumScale = axisMax
+            .MajorUnit = axisMax / 4#
+            .HasTitle = True
+            .AxisTitle.Text = "Worst regret (bp)"
+        End With
+
+        On Error Resume Next
+        sRobustWorst.ApplyDataLabels
+        sRobustWorst.DataLabels(1).Text = _
+            Format$(robust6M, "0%") & " 6M" & vbLf & Format$(maxDirBp, "0.0") & " bp"
+        sRobustWorst.DataLabels(1).Position = xlLabelPositionAbove
+        On Error GoTo 0
+    End With
+
+    '-------------------------------------------------------------
+    ' CHART C - NEAR-OPTIMAL ALLOCATION GRANULARITY
+    '-------------------------------------------------------------
+    If displayCount < nearCount Then
+        nearTitle = _
+            "Top " & displayCount & " of " & nearCount & _
+            " portfolios within +" & Format$(S4_NEAR_OPT_BP, "0.00") & " bp"
+    Else
+        nearTitle = _
+            nearCount & " portfolios within +" & Format$(S4_NEAR_OPT_BP, "0.00") & _
+            " bp of the optimum"
+    End If
+
+    Set chNear = ws.ChartObjects.Add(Left:=15, Top:=335, Width:=560, Height:=205)
+
+    With chNear.Chart
+        .ChartType = xlColumnStacked
+        .SetSourceData ws.Range("AH30:AL" & 30 + displayCount)
+        .HasLegend = True
+
+        FINAL_StyleChart chNear.Chart, nearTitle, True
+
+        If .SeriesCollection.Count >= 1 Then FINAL_SetSeriesColor .SeriesCollection(1), FINAL_ColorDark()
+        If .SeriesCollection.Count >= 2 Then FINAL_SetSeriesColor .SeriesCollection(2), FINAL_ColorAccent()
+        If .SeriesCollection.Count >= 3 Then FINAL_SetSeriesColor .SeriesCollection(3), FINAL_ColorGray()
+        If .SeriesCollection.Count >= 4 Then FINAL_SetSeriesColor .SeriesCollection(4), FINAL_ColorRisk()
+
+        With .Axes(xlValue)
+            .MinimumScale = 0
+            .MaximumScale = 1
+            .MajorUnit = 0.25
+            .TickLabels.NumberFormat = "0%"
+            .HasTitle = True
+            .AxisTitle.Text = "Allocation"
+        End With
+
+        On Error Resume Next
+        .Axes(xlCategory).TickLabels.Font.Size = 7
+        .Axes(xlCategory).TickLabels.Orientation = 45
+        .ChartGroups(1).GapWidth = 35
+        On Error GoTo 0
+    End With
+
+    '-------------------------------------------------------------
+    ' DECISION / INTERPRETATION BOX
+    '-------------------------------------------------------------
+    ws.Range("J20:N20").Merge
+    ws.Range("J20").Value = "DECISION FRAMEWORK"
+
+    With ws.Range("J20:N20")
+        .Font.Bold = True
+        .Font.Size = 11
+        .Interior.Color = RGB(243, 244, 246)
+        .HorizontalAlignment = xlCenter
+    End With
+
+    ws.Range("J21").Value = "Selected mix"
+    ws.Range("L21:N21").Merge
+    ws.Range("L21").Value = robustText
+
+    ws.Range("J22").Value = "Historical regret"
+    ws.Range("L22").Value = histBp
+    ws.Range("J23").Value = "Inverted regret"
+    ws.Range("L23").Value = invBp
+    ws.Range("J24").Value = "Worst regret"
+    ws.Range("L24").Value = maxDirBp
+    ws.Range("J25").Value = "Weighted tenor"
+    ws.Range("L25").Value = weightedMonths
+
+    ws.Range("L22:L24").NumberFormat = "0.0 ""bp"""
+    ws.Range("L25").NumberFormat = "0.0 ""months"""
+    ws.Range("J21:J25").Font.Bold = True
+    ws.Range("L21").Font.Bold = True
+    ws.Range("L21").Font.Size = 12
+
+    ws.Range("J27:N27").Merge
+    ws.Range("J27").Value = "ROBUST REGION"
+
+    With ws.Range("J27:N27")
+        .Font.Bold = True
+        .Font.Size = 11
+        .Interior.Color = RGB(243, 244, 246)
+        .HorizontalAlignment = xlCenter
+    End With
+
+    ws.Range("J28:N29").Merge
+
+    If Abs(nearMin6M - nearMax6M) <= S4_EPS Then
+        ws.Range("J28").Value = _
+            nearCount & " portfolios within +" & Format$(S4_NEAR_OPT_BP, "0.00") & _
+            " bp all retain " & Format$(nearMin6M, "0%") & _
+            " in 6M. The short " & Format$(1# - nearMin6M, "0%") & _
+            " can flex across ON / 1M / 3M."
+    Else
+        ws.Range("J28").Value = _
+            nearCount & " portfolios remain within +" & Format$(S4_NEAR_OPT_BP, "0.00") & _
+            " bp, with 6M ranging from " & Format$(nearMin6M, "0%") & _
+            " to " & Format$(nearMax6M, "0%") & "."
+    End If
+
+    With ws.Range("J28:N29")
+        .WrapText = True
+        .VerticalAlignment = xlTop
+        .Font.Size = 10
+        .Font.Color = RGB(75, 85, 99)
+    End With
+
+    ws.Columns("J:N").ColumnWidth = 12
 
 End Sub
+
+'=====================================================================
+' LOCAL HELPERS
+'=====================================================================
+
+Private Function S4_NearRowComesFirst( _
+    ByVal wsPort As Worksheet, _
+    ByVal rowA As Long, _
+    ByVal rowB As Long) As Boolean
+
+    Dim aWorst As Double, bWorst As Double
+    Dim aMonths As Double, bMonths As Double
+
+    aWorst = CDbl(wsPort.Cells(rowA, 9).Value)
+    bWorst = CDbl(wsPort.Cells(rowB, 9).Value)
+
+    If aWorst < bWorst - S4_EPS Then
+        S4_NearRowComesFirst = True
+        Exit Function
+    End If
+
+    If Abs(aWorst - bWorst) <= S4_EPS Then
+        aMonths = CDbl(wsPort.Cells(rowA, 11).Value)
+        bMonths = CDbl(wsPort.Cells(rowB, 11).Value)
+
+        If aMonths < bMonths - S4_EPS Then
+            S4_NearRowComesFirst = True
+            Exit Function
+        End If
+
+        If Abs(aMonths - bMonths) <= S4_EPS Then
+            If rowA < rowB Then
+                S4_NearRowComesFirst = True
+                Exit Function
+            End If
+        End If
+    End If
+
+    S4_NearRowComesFirst = False
+End Function
+
+Private Function S4_CompactWeightLabel( _
+    ByVal wsPort As Worksheet, _
+    ByVal r As Long) As String
+
+    S4_CompactWeightLabel = _
+        Format$(CDbl(wsPort.Cells(r, 1).Value), "0%") & "/" & _
+        Format$(CDbl(wsPort.Cells(r, 2).Value), "0%") & "/" & _
+        Format$(CDbl(wsPort.Cells(r, 3).Value), "0%") & "/" & _
+        Format$(CDbl(wsPort.Cells(r, 4).Value), "0%")
+End Function
