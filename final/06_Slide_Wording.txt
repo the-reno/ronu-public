@@ -69,29 +69,39 @@ Neither protects both.
 SLIDE 4 — ROBUST ALLOCATION
 ---------------------------
 Headline:
-The robust mix equalizes the cost of being wrong at ~5.5 bp
+Robust protection is anchored at 70% 6M; the short bucket remains flexible
 
-Core CFO message:
-ON protects against higher-for-longer / rising rates; 6M protects against falling rates; the allocation is chosen to minimize the cost of being wrong in either direction.
+Framework shown on slide:
+Fix the 6M share at 0%, 10%, ... 100%. For each fixed 6M weight, choose the ON / 1M / 3M combination that minimizes the larger average regret across the Historical and Inverted rate paths. Then compare the resulting directional trade-off.
 
 Direct conclusion:
 Use the dynamic conclusion written by the VBA in S4_Robust!A2.
-With the current full sample, the robust allocation is 10% ON / 20% 1M / 70% 6M, with ~5.5 bp historical and ~5.5 bp inverted average regret.
+With the current full sample, the global minimax allocation is 10% ON / 20% 1M / 70% 6M. Historical average regret is ~5.52 bp and inverted average regret is ~5.48 bp, so worst directional regret is ~5.52 bp.
 
-Chart wording:
-Directional regret by allocation - lower-left is better
-X-axis: Historical-path average regret (bp)
-Y-axis: Inverted-path average regret (bp)
+Chart A:
+Directional regret as 6M allocation changes
+X-axis: 6M allocation
+Y-axis: Average regret (bp)
+Message: increasing 6M protection reduces regret in the falling-rate stress but increases regret in the historical / higher-rate environment. The two risks converge around 70% 6M.
+
+Chart B:
+Worst directional regret is minimized near the crossover
+X-axis: 6M allocation
+Y-axis: Worst directional average regret (bp)
+Message: the minimax protection curve bottoms around 70% 6M.
+
+Chart C:
+Near-optimal allocation region
+Current sample: 9 portfolios remain within +0.25 bp of the optimum. All retain 70% in 6M, while the remaining 30% can be distributed across ON / 1M / 3M with little change in worst directional protection.
+Portfolio labels are shown as ON / 1M / 3M / 6M.
 
 Speaker wording:
-"Each point is one long-only allocation across ON, 1M, 3M and 6M in 10% increments. We choose the portfolio that minimizes the larger average regret across the two directional stress paths. The objective is not to maximize return under one forecast; it is to keep the cost of being wrong small in either direction."
+"The first chart makes the trade-off explicit. As we add 6M, protection improves if rates fall, but the cost increases if rates remain high or rise. For every 6M weight I let the short bucket choose its best mix across ON, 1M and 3M. The two directional risks converge around 70% in 6M, which is also where the maximum of the two regrets is minimized. Importantly, this is not one fragile point: nine portfolios sit within a quarter basis point of the optimum, and all preserve the same 70% 6M anchor. That gives us flexibility to manage the remaining 30% based on liquidity needs and relative pricing."
 
-Interpretation:
-- Lower-left is better.
-- 100% ON protects the historical/rising side.
-- 100% 6M protects the falling-rate side.
-- The robust point is selected by the minimax rule and nearly equalizes the two directional regrets.
-- Historical and inverted paths are stress tests, not forecasts.
+Core CFO message:
+The 70% 6M allocation is the stable duration anchor. The remaining short bucket can be managed tactically without materially changing directional protection.
+
+Historical and inverted paths are stress tests, not forecasts.
 
 SLIDE 5 — EXECUTION
 -------------------
