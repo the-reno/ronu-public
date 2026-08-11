@@ -1,0 +1,174 @@
+Option Explicit
+
+'=====================================================================
+' R_SHOCK_CURVE
+'
+' Excel usage:
+'   =R_SHOCK_CURVE(curve_selection, starting_rate, shock_factor)
+'
+' Example:
+'   =R_SHOCK_CURVE(Curve!A1:E1128, 5.5%, 1)
+'
+' curve_selection:
+'   Header-inclusive range containing at least Date and ON.
+'   Any number of tenor columns can be included.
+'
+' starting_rate:
+'   Starting ON rate for the shocked curve.
+'   Use the SAME units as the selected curve.
+'   Example: if source rates are decimals, 5.5% = 0.055.
+'
+' shock_factor:
+'   1.0 = full inversion of historical moves
+'   0.5 = half-size inversion
+'   0.0 = flat curve path at the shifted starting curve
+'   2.0 = double-size inversion
+'
+' Method for tenor j at time t:
+'
+'   ShockStart_j = StartingRate + (Anchor_j - Anchor_ON)
+'
+'   Shock_j(t) = ShockStart_j
+'                - ShockFactor * (Historical_j(t) - Anchor_j)
+'
+' Therefore:
+'   - the first shocked ON rate equals starting_rate;
+'   - the original first-date tenor spreads versus ON are preserved;
+'   - historical changes are replayed with the opposite sign;
+'   - cross-tenor timing and relative movements are preserved.
+'
+' Excel 365 / dynamic-array Excel:
+'   Enter the formula in one cell and the entire shocked curve spills.
+'
+' No dependency on any other VBA module.
+'=====================================================================
+
+Public Function R_SHOCK_CURVE( _
+    ByVal curveSelection As Range, _
+    ByVal startingRate As Double, _
+    ByVal shockFactor As Double) As Variant
+
+    Dim src As Variant
+    Dim result() As Variant
+
+    Dim nRows As Long
+    Dim nCols As Long
+    Dim dateCol As Long
+    Dim onCol As Long
+    Dim anchorRow As Long
+
+    Dim r As Long
+    Dim c As Long
+
+    Dim headerText As String
+    Dim anchorON As Double
+    Dim anchorRate As Double
+    Dim shockStart As Double
+    Dim histNow As Double
+
+    On Error GoTo fail
+
+    If curveSelection Is Nothing Then
+        R_SHOCK_CURVE = CVErr(xlErrRef)
+        Exit Function
+    End If
+
+    src = curveSelection.Value2
+
+    nRows = UBound(src, 1)
+    nCols = UBound(src, 2)
+
+    If nRows < 2 Or nCols < 2 Then
+        R_SHOCK_CURVE = CVErr(xlErrValue)
+        Exit Function
+    End If
+
+    '-------------------------------------------------------------
+    ' Locate required headers.
+    '-------------------------------------------------------------
+    For c = 1 To nCols
+        headerText = UCase$(Trim$(CStr(src(1, c))))
+
+        If headerText = "DATE" Then dateCol = c
+        If headerText = "ON" Then onCol = c
+    Next c
+
+    If dateCol = 0 Or onCol = 0 Then
+        R_SHOCK_CURVE = CVErr(xlErrValue)
+        Exit Function
+    End If
+
+    '-------------------------------------------------------------
+    ' First usable data row becomes the anchor date.
+    '-------------------------------------------------------------
+    For r = 2 To nRows
+        If Len(CStr(src(r, dateCol))) > 0 And IsNumeric(src(r, onCol)) Then
+            anchorRow = r
+            Exit For
+        End If
+    Next r
+
+    If anchorRow = 0 Then
+        R_SHOCK_CURVE = CVErr(xlErrValue)
+        Exit Function
+    End If
+
+    anchorON = CDbl(src(anchorRow, onCol))
+
+    ReDim result(1 To nRows, 1 To nCols)
+
+    '-------------------------------------------------------------
+    ' Preserve headers exactly.
+    '-------------------------------------------------------------
+    For c = 1 To nCols
+        result(1, c) = src(1, c)
+    Next c
+
+    '-------------------------------------------------------------
+    ' Build shocked curve.
+    '
+    ' Date column is unchanged.
+    ' Numeric tenor columns are transformed.
+    ' Non-numeric / metadata columns are copied unchanged.
+    ' Blank rate cells remain blank.
+    '-------------------------------------------------------------
+    For r = 2 To nRows
+
+        For c = 1 To nCols
+
+            If c = dateCol Then
+
+                result(r, c) = src(r, c)
+
+            ElseIf IsNumeric(src(anchorRow, c)) Then
+
+                anchorRate = CDbl(src(anchorRow, c))
+                shockStart = startingRate + (anchorRate - anchorON)
+
+                If IsNumeric(src(r, c)) Then
+                    histNow = CDbl(src(r, c))
+                    result(r, c) = _
+                        shockStart - shockFactor * (histNow - anchorRate)
+                ElseIf Len(CStr(src(r, c))) = 0 Then
+                    result(r, c) = vbNullString
+                Else
+                    result(r, c) = CVErr(xlErrValue)
+                End If
+
+            Else
+
+                result(r, c) = src(r, c)
+
+            End If
+
+        Next c
+
+    Next r
+
+    R_SHOCK_CURVE = result
+    Exit Function
+
+fail:
+    R_SHOCK_CURVE = CVErr(xlErrValue)
+
+End Function
