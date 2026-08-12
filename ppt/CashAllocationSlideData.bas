@@ -1,0 +1,958 @@
+Attribute VB_Name = "modCashAllocationSlideData"
+Option Explicit
+
+' =============================================================================
+' Cash Allocation slide-data preparation
+'
+' Required input worksheet: Curve
+' Required headers: Date, ON, 1M, 3M, 6M
+' - The header row may be anywhere in rows 1:25.
+' - Additional tenors (for example 2M) are ignored.
+' - Rates may be stored as Excel decimals (3.55% = 0.0355) or percentage
+'   points (3.55% = 3.55). The scale is detected once for the full data set.
+' - Curve dates must be strictly ascending and rates must be populated.
+'
+' Main macro: BuildCashAllocationSlideData
+'
+' Generated / refreshed worksheets:
+'   Slide_Setup      - scenario assumptions and methodology
+'   Slide2_6M        - daily premium and realized six-month returns
+'   Slide3_Paths     - normalized realized and inverted rate paths
+'   Slide3_Returns   - monthly-start returns for both paths
+'   Slide3_Summary   - chart-ready return summary by tenor
+'   Slide_Checks     - data-quality and model checks
+'
+' Return convention:
+' - Common six-month maturity.
+' - ACT/360 simple accrual within each holding interval.
+' - ON resets whenever a new curve date is available.
+' - 1M and 3M reset at monthly tenor dates, snapped backward to the latest
+'   available curve observation.
+' - 6M is locked at the start date through the common maturity.
+'
+' Stress convention:
+' - Both paths begin at the same normalized ON level.
+' - Initial cross-tenor spreads are preserved.
+' - Realized-direction path adds observed daily curve changes.
+' - Inverted-direction path subtracts the same changes.
+' - If needed, the common starting level is lifted just enough to keep all
+'   normalized rates at or above the user-defined minimum plotted rate.
+' =============================================================================
+
+Private Const CURVE_SHEET As String = "Curve"
+Private Const SETUP_SHEET As String = "Slide_Setup"
+Private Const SLIDE2_SHEET As String = "Slide2_6M"
+Private Const PATHS_SHEET As String = "Slide3_Paths"
+Private Const RETURNS_SHEET As String = "Slide3_Returns"
+Private Const SUMMARY_SHEET As String = "Slide3_Summary"
+Private Const CHECKS_SHEET As String = "Slide_Checks"
+
+Private Const DEFAULT_NORMALIZED_ON As Double = 0.055
+Private Const DEFAULT_HOLDING_MONTHS As Long = 6
+Private Const DEFAULT_DAY_BASIS As Double = 360#
+Private Const DEFAULT_RATE_FLOOR As Double = 0.001
+
+Private Const COLOR_NAVY As Long = 6108695       ' RGB(23,54,93)
+Private Const COLOR_BLUE As Long = 11175772      ' RGB(92,135,170)
+Private Const COLOR_AMBER As Long = 4028098      ' RGB(194,118,61)
+Private Const COLOR_TEAL As Long = 7043615       ' RGB(31,122,107)
+Private Const COLOR_LIGHT_BLUE As Long = 16316148 ' RGB(244,246,248)
+Private Const COLOR_LIGHT_AMBER As Long = 15265784 ' RGB(248,239,232)
+Private Const COLOR_LIGHT_TEAL As Long = 15856874 ' RGB(234,244,241)
+
+Public Sub BuildCashAllocationSlideData()
+    Dim oldCalc As XlCalculation
+    Dim oldScreenUpdating As Boolean
+    Dim oldEnableEvents As Boolean
+    Dim wsCurve As Worksheet
+    Dim curveDates() As Double
+    Dim curveRates() As Double
+    Dim normalizedRealized() As Double
+    Dim normalizedInverted() As Double
+    Dim n As Long
+    Dim headerRow As Long
+    Dim rateScale As Double
+    Dim requestedStart As Double
+    Dim effectiveStart As Double
+    Dim rateFloor As Double
+    Dim holdingMonths As Long
+    Dim dayBasis As Double
+    Dim minimumNormalizedRate As Double
+    Dim dailyStartCount As Long
+    Dim monthlyStartCount As Long
+    Dim averageReturns(1 To 2, 1 To 4) As Double
+    Dim excessVersusON(1 To 2, 1 To 4) As Double
+    Dim winCounts(1 To 2, 1 To 4) As Long
+
+    On Error GoTo CleanFail
+
+    oldCalc = Application.Calculation
+    oldScreenUpdating = Application.ScreenUpdating
+    oldEnableEvents = Application.EnableEvents
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "Preparing cash-allocation slide data..."
+
+    Set wsCurve = RequireWorksheet(ThisWorkbook, CURVE_SHEET)
+
+    PrepareSetupSheet ThisWorkbook, requestedStart, holdingMonths, dayBasis, rateFloor
+    LoadCurveData wsCurve, curveDates, curveRates, n, headerRow, rateScale
+
+    If holdingMonths <> 6 Then
+        Err.Raise vbObjectError + 1100, "BuildCashAllocationSlideData", _
+                  "The current slide methodology requires a six-month holding period. " & _
+                  "Set Slide_Setup!B5 to 6 and rerun."
+    End If
+
+    BuildNormalizedPaths curveRates, n, requestedStart, rateFloor, _
+                         normalizedRealized, normalizedInverted, _
+                         effectiveStart, minimumNormalizedRate
+
+    WriteSlide2Data ThisWorkbook, curveDates, curveRates, n, holdingMonths, _
+                    dayBasis, dailyStartCount
+
+    WriteSlide3Paths ThisWorkbook, curveDates, normalizedRealized, _
+                     normalizedInverted, n
+
+    WriteSlide3Returns ThisWorkbook, curveDates, normalizedRealized, _
+                       normalizedInverted, n, holdingMonths, dayBasis, _
+                       monthlyStartCount, averageReturns, excessVersusON, _
+                       winCounts
+
+    WriteSlide3Summary ThisWorkbook, monthlyStartCount, averageReturns, _
+                       excessVersusON, winCounts
+
+    UpdateSetupOutputs ThisWorkbook.Worksheets(SETUP_SHEET), effectiveStart, _
+                       minimumNormalizedRate, n, dailyStartCount, monthlyStartCount
+
+    WriteChecks ThisWorkbook, n, headerRow, rateScale, dailyStartCount, _
+                monthlyStartCount, rateFloor, minimumNormalizedRate, _
+                effectiveStart
+
+    Application.CalculateFull
+    ThisWorkbook.Worksheets(SUMMARY_SHEET).Activate
+    Application.StatusBar = False
+
+    MsgBox "Slide data preparation is complete." & vbCrLf & vbCrLf & _
+           Format$(dailyStartCount, "#,##0") & " fully realized daily 6M starts" & vbCrLf & _
+           Format$(monthlyStartCount, "#,##0") & " monthly scenario starts" & vbCrLf & _
+           "Effective normalized ON start: " & Format$(effectiveStart, "0.00%"), _
+           vbInformation, "Cash Allocation Slide Data"
+
+CleanExit:
+    Application.StatusBar = False
+    Application.Calculation = oldCalc
+    Application.ScreenUpdating = oldScreenUpdating
+    Application.EnableEvents = oldEnableEvents
+    Exit Sub
+
+CleanFail:
+    Application.StatusBar = False
+    MsgBox "The slide-data build stopped:" & vbCrLf & vbCrLf & Err.Description, _
+           vbCritical, "Cash Allocation Slide Data"
+    Resume CleanExit
+End Sub
+
+Private Sub PrepareSetupSheet(ByVal wb As Workbook, _
+                              ByRef normalizedON As Double, _
+                              ByRef holdingMonths As Long, _
+                              ByRef dayBasis As Double, _
+                              ByRef rateFloor As Double)
+    Dim ws As Worksheet
+    Dim isNew As Boolean
+
+    Set ws = GetOrCreateWorksheet(wb, SETUP_SHEET, isNew)
+
+    If isNew Or Len(ws.Range("B4").Value2) = 0 Then ws.Range("B4").Value2 = DEFAULT_NORMALIZED_ON
+    If isNew Or Len(ws.Range("B5").Value2) = 0 Then ws.Range("B5").Value2 = DEFAULT_HOLDING_MONTHS
+    If isNew Or Len(ws.Range("B6").Value2) = 0 Then ws.Range("B6").Value2 = DEFAULT_DAY_BASIS
+    If isNew Or Len(ws.Range("B7").Value2) = 0 Then ws.Range("B7").Value2 = DEFAULT_RATE_FLOOR
+
+    If Not IsNumeric(ws.Range("B4").Value2) Or CDbl(ws.Range("B4").Value2) <= 0 Then
+        Err.Raise vbObjectError + 1101, , "Slide_Setup!B4 must contain a positive normalized ON starting rate."
+    End If
+    If Not IsNumeric(ws.Range("B5").Value2) Or CLng(ws.Range("B5").Value2) <= 0 Then
+        Err.Raise vbObjectError + 1102, , "Slide_Setup!B5 must contain a positive holding period in months."
+    End If
+    If Not IsNumeric(ws.Range("B6").Value2) Or CDbl(ws.Range("B6").Value2) <= 0 Then
+        Err.Raise vbObjectError + 1103, , "Slide_Setup!B6 must contain a positive day-count basis."
+    End If
+    If Not IsNumeric(ws.Range("B7").Value2) Or CDbl(ws.Range("B7").Value2) < 0 Then
+        Err.Raise vbObjectError + 1104, , "Slide_Setup!B7 must contain a non-negative minimum plotted rate."
+    End If
+
+    normalizedON = CDbl(ws.Range("B4").Value2)
+    holdingMonths = CLng(ws.Range("B5").Value2)
+    dayBasis = CDbl(ws.Range("B6").Value2)
+    rateFloor = CDbl(ws.Range("B7").Value2)
+
+    ws.Cells.UnMerge
+    ws.Cells.ClearFormats
+    ws.Range("A1:B1").Merge
+    ws.Range("A1").Value2 = "Cash Allocation Slide Data | Setup"
+    ws.Range("A3").Value2 = "Assumption / output"
+    ws.Range("B3").Value2 = "Value"
+    ws.Range("A4").Value2 = "Requested normalized ON start"
+    ws.Range("A5").Value2 = "Holding period (months)"
+    ws.Range("A6").Value2 = "Day-count basis"
+    ws.Range("A7").Value2 = "Minimum plotted rate"
+    ws.Range("A8").Value2 = "Effective normalized ON start"
+    ws.Range("A9").Value2 = "Minimum normalized rate"
+    ws.Range("A10").Value2 = "Curve observations"
+    ws.Range("A11").Value2 = "Fully realized daily 6M starts"
+    ws.Range("A12").Value2 = "Monthly scenario starts"
+    ws.Range("A13").Value2 = "Last refresh"
+    ws.Range("A15").Value2 = "Stress methodology"
+    ws.Range("B15").Value2 = "Both paths share the same start level and initial tenor spreads. Observed curve moves are added for the realized-direction path and subtracted for the inverted path."
+    ws.Range("A16").Value2 = "Return methodology"
+    ws.Range("B16").Value2 = "Common six-month maturity; ACT/360; ON resets on each available curve date; 1M/3M roll at tenor dates; 6M is locked at inception."
+
+    FormatTitle ws.Range("A1:B1")
+    FormatHeader ws.Range("A3:B3")
+    ws.Range("B4:B7").Font.Color = RGB(0, 0, 255)
+    ws.Range("B4:B7").Interior.Color = RGB(255, 255, 204)
+    ws.Range("B4").NumberFormat = "0.00%"
+    ws.Range("B7:B9").NumberFormat = "0.00%"
+    ws.Range("B5:B6").NumberFormat = "0"
+    ws.Range("B10:B12").NumberFormat = "#,##0"
+    ws.Range("B13").NumberFormat = "yyyy-mm-dd hh:mm"
+    ws.Range("B15:B16").WrapText = True
+    ws.Columns("A").ColumnWidth = 34
+    ws.Columns("B").ColumnWidth = 88
+    ws.Rows("15:16").RowHeight = 44
+    ws.Tab.Color = COLOR_NAVY
+End Sub
+
+Private Sub UpdateSetupOutputs(ByVal ws As Worksheet, _
+                               ByVal effectiveStart As Double, _
+                               ByVal minimumRate As Double, _
+                               ByVal curveCount As Long, _
+                               ByVal dailyCount As Long, _
+                               ByVal monthlyCount As Long)
+    ws.Range("B8").Value2 = effectiveStart
+    ws.Range("B9").Value2 = minimumRate
+    ws.Range("B10").Value2 = curveCount
+    ws.Range("B11").Value2 = dailyCount
+    ws.Range("B12").Value2 = monthlyCount
+    ws.Range("B13").Value = Now
+    ws.Range("B8:B13").Font.Color = RGB(0, 128, 0)
+End Sub
+
+Private Sub LoadCurveData(ByVal ws As Worksheet, _
+                          ByRef curveDates() As Double, _
+                          ByRef curveRates() As Double, _
+                          ByRef n As Long, _
+                          ByRef headerRow As Long, _
+                          ByRef rateScale As Double)
+    Dim dateCol As Long
+    Dim tenorCols(1 To 4) As Long
+    Dim lastRow As Long
+    Dim r As Long
+    Dim i As Long
+    Dim t As Long
+    Dim maxAbsRate As Double
+    Dim rawValue As Variant
+    Dim previousDate As Double
+
+    FindCurveHeaders ws, headerRow, dateCol, tenorCols
+    lastRow = ws.Cells(ws.Rows.Count, dateCol).End(xlUp).Row
+
+    If lastRow <= headerRow Then
+        Err.Raise vbObjectError + 1110, , "No curve observations were found below the header row."
+    End If
+
+    For r = headerRow + 1 To lastRow
+        If Len(Trim$(CStr(ws.Cells(r, dateCol).Value2))) > 0 Then
+            If Not IsDate(ws.Cells(r, dateCol).Value) And Not IsNumeric(ws.Cells(r, dateCol).Value2) Then
+                Err.Raise vbObjectError + 1111, , "Invalid curve date on row " & r & "."
+            End If
+            n = n + 1
+            For t = 1 To 4
+                rawValue = ws.Cells(r, tenorCols(t)).Value2
+                If Not IsNumeric(rawValue) Or Len(Trim$(CStr(rawValue))) = 0 Then
+                    Err.Raise vbObjectError + 1112, , "Missing or non-numeric " & TenorName(t) & " rate on Curve row " & r & "."
+                End If
+                If Abs(CDbl(rawValue)) > maxAbsRate Then maxAbsRate = Abs(CDbl(rawValue))
+            Next t
+        End If
+    Next r
+
+    If n < 2 Then Err.Raise vbObjectError + 1113, , "At least two complete curve observations are required."
+
+    rateScale = IIf(maxAbsRate > 1#, 0.01, 1#)
+    ReDim curveDates(1 To n)
+    ReDim curveRates(1 To n, 1 To 4)
+
+    i = 0
+    For r = headerRow + 1 To lastRow
+        If Len(Trim$(CStr(ws.Cells(r, dateCol).Value2))) > 0 Then
+            i = i + 1
+            curveDates(i) = CDbl(CDate(ws.Cells(r, dateCol).Value))
+
+            If i > 1 And curveDates(i) <= previousDate Then
+                Err.Raise vbObjectError + 1114, , _
+                          "Curve dates must be strictly ascending. Check row " & r & "."
+            End If
+            previousDate = curveDates(i)
+
+            For t = 1 To 4
+                curveRates(i, t) = CDbl(ws.Cells(r, tenorCols(t)).Value2) * rateScale
+            Next t
+        End If
+    Next r
+End Sub
+
+Private Sub FindCurveHeaders(ByVal ws As Worksheet, _
+                             ByRef headerRow As Long, _
+                             ByRef dateCol As Long, _
+                             ByRef tenorCols() As Long)
+    Dim r As Long
+    Dim c As Long
+    Dim key As String
+    Dim lastCol As Long
+    Dim foundCount As Long
+
+    For r = 1 To 25
+        lastCol = ws.Cells(r, ws.Columns.Count).End(xlToLeft).Column
+        If lastCol < 1 Then lastCol = 1
+
+        dateCol = 0
+        For c = 1 To 4
+            tenorCols(c) = 0
+        Next c
+        For c = 1 To Application.Min(lastCol, 100)
+            key = NormalizeHeader(CStr(ws.Cells(r, c).Value2))
+            Select Case key
+                Case "DATE", "STARTDATE", "VALUEDATE"
+                    dateCol = c
+                Case "ON", "OVERNIGHT", "SOFR", "SOFRON", "ONRATE"
+                    tenorCols(1) = c
+                Case "1M", "1MONTH", "1MRATE"
+                    tenorCols(2) = c
+                Case "3M", "3MONTH", "3MRATE"
+                    tenorCols(3) = c
+                Case "6M", "6MONTH", "6MRATE"
+                    tenorCols(4) = c
+            End Select
+        Next c
+
+        foundCount = 0
+        If dateCol > 0 Then foundCount = foundCount + 1
+        For c = 1 To 4
+            If tenorCols(c) > 0 Then foundCount = foundCount + 1
+        Next c
+
+        If foundCount = 5 Then
+            headerRow = r
+            Exit Sub
+        End If
+    Next r
+
+    Err.Raise vbObjectError + 1120, , _
+              "Could not locate Date, ON, 1M, 3M and 6M headers in rows 1:25 of the Curve sheet."
+End Sub
+
+Private Function NormalizeHeader(ByVal textValue As String) As String
+    Dim value As String
+    value = UCase$(Trim$(textValue))
+    value = Replace(value, " ", "")
+    value = Replace(value, "_", "")
+    value = Replace(value, "-", "")
+    value = Replace(value, "/", "")
+    NormalizeHeader = value
+End Function
+
+Private Sub BuildNormalizedPaths(ByRef originalRates() As Double, _
+                                 ByVal n As Long, _
+                                 ByVal requestedStart As Double, _
+                                 ByVal rateFloor As Double, _
+                                 ByRef realizedRates() As Double, _
+                                 ByRef invertedRates() As Double, _
+                                 ByRef effectiveStart As Double, _
+                                 ByRef minimumRate As Double)
+    Dim provisionalMinimum As Double
+    Dim startLevel As Double
+    Dim observedMove As Double
+    Dim valueRealized As Double
+    Dim valueInverted As Double
+    Dim i As Long
+    Dim t As Long
+
+    provisionalMinimum = 1E+100
+
+    For i = 1 To n
+        For t = 1 To 4
+            startLevel = requestedStart + (originalRates(1, t) - originalRates(1, 1))
+            observedMove = originalRates(i, t) - originalRates(1, t)
+            valueRealized = startLevel + observedMove
+            valueInverted = startLevel - observedMove
+            If valueRealized < provisionalMinimum Then provisionalMinimum = valueRealized
+            If valueInverted < provisionalMinimum Then provisionalMinimum = valueInverted
+        Next t
+    Next i
+
+    effectiveStart = requestedStart
+    If provisionalMinimum < rateFloor Then
+        effectiveStart = requestedStart + (rateFloor - provisionalMinimum)
+    End If
+
+    ReDim realizedRates(1 To n, 1 To 4)
+    ReDim invertedRates(1 To n, 1 To 4)
+    minimumRate = 1E+100
+
+    For i = 1 To n
+        For t = 1 To 4
+            startLevel = effectiveStart + (originalRates(1, t) - originalRates(1, 1))
+            observedMove = originalRates(i, t) - originalRates(1, t)
+            realizedRates(i, t) = startLevel + observedMove
+            invertedRates(i, t) = startLevel - observedMove
+            If realizedRates(i, t) < minimumRate Then minimumRate = realizedRates(i, t)
+            If invertedRates(i, t) < minimumRate Then minimumRate = invertedRates(i, t)
+        Next t
+    Next i
+End Sub
+
+Private Sub WriteSlide2Data(ByVal wb As Workbook, _
+                            ByRef curveDates() As Double, _
+                            ByRef curveRates() As Double, _
+                            ByVal n As Long, _
+                            ByVal holdingMonths As Long, _
+                            ByVal dayBasis As Double, _
+                            ByRef outputCount As Long)
+    Dim ws As Worksheet
+    Dim outputData() As Variant
+    Dim exactData() As Variant
+    Dim i As Long
+    Dim maturityIndex As Long
+    Dim maturityTarget As Double
+    Dim rolledON As Double
+    Dim locked6M As Double
+    Dim rowOut As Long
+
+    Set ws = ResetOutputWorksheet(wb, SLIDE2_SHEET)
+    ReDim outputData(1 To n, 1 To 10)
+
+    For i = 1 To n
+        maturityTarget = AddMonthsSerial(curveDates(i), holdingMonths)
+        If maturityTarget <= curveDates(n) Then
+            maturityIndex = FindOnOrBefore(curveDates, n, maturityTarget)
+            If maturityIndex > i Then
+                rolledON = RolledTenorReturn(curveDates, curveRates, n, i, maturityIndex, 1, 0, dayBasis)
+                locked6M = RolledTenorReturn(curveDates, curveRates, n, i, maturityIndex, 4, 6, dayBasis)
+
+                rowOut = rowOut + 1
+                outputData(rowOut, 1) = curveDates(i)
+                outputData(rowOut, 2) = curveDates(maturityIndex)
+                outputData(rowOut, 3) = curveRates(i, 1)
+                outputData(rowOut, 4) = curveRates(i, 4)
+                outputData(rowOut, 5) = (curveRates(i, 4) - curveRates(i, 1)) * 10000#
+                outputData(rowOut, 6) = rolledON
+                outputData(rowOut, 7) = locked6M
+                outputData(rowOut, 8) = (locked6M - rolledON) * 10000#
+                outputData(rowOut, 9) = IIf(locked6M > rolledON, "6M", "ON")
+                outputData(rowOut, 10) = 1
+            End If
+        End If
+    Next i
+
+    outputCount = rowOut
+    WriteHeaders ws, Array("Start Date", "Maturity Date", "ON at Start", "6M at Start", _
+                           "6M-ON Premium at Start | bp", "Rolled ON 6M Return", _
+                           "Locked 6M Return", "Realized 6M Excess vs ON | bp", _
+                           "Winner", "Valid 6M")
+    If rowOut > 0 Then
+        ReDim exactData(1 To rowOut, 1 To 10)
+        CopyArrayBlock outputData, exactData, rowOut, 10
+        ws.Range("A2").Resize(rowOut, 10).Value = exactData
+    End If
+
+    ws.Columns("A:B").NumberFormat = "yyyy-mm-dd"
+    ws.Columns("C:D").NumberFormat = "0.0000%"
+    ws.Columns("E").NumberFormat = "+0.0;-0.0;0.0"
+    ws.Columns("F:G").NumberFormat = "0.0000%"
+    ws.Columns("H").NumberFormat = "+0.0;-0.0;0.0"
+    ws.Columns("J").NumberFormat = "0"
+    FinishOutputSheet ws, "tblSlide2_6M", 10, rowOut + 1, COLOR_BLUE
+End Sub
+
+Private Sub WriteSlide3Paths(ByVal wb As Workbook, _
+                             ByRef curveDates() As Double, _
+                             ByRef realizedRates() As Double, _
+                             ByRef invertedRates() As Double, _
+                             ByVal n As Long)
+    Dim ws As Worksheet
+    Dim outputData() As Variant
+    Dim i As Long
+    Dim t As Long
+
+    Set ws = ResetOutputWorksheet(wb, PATHS_SHEET)
+    ReDim outputData(1 To n, 1 To 9)
+
+    For i = 1 To n
+        outputData(i, 1) = curveDates(i)
+        For t = 1 To 4
+            outputData(i, 1 + t) = realizedRates(i, t)
+            outputData(i, 5 + t) = invertedRates(i, t)
+        Next t
+    Next i
+
+    WriteHeaders ws, Array("Date", "Realized Path ON", "Realized Path 1M", _
+                           "Realized Path 3M", "Realized Path 6M", _
+                           "Inverted Path ON", "Inverted Path 1M", _
+                           "Inverted Path 3M", "Inverted Path 6M")
+    ws.Range("A2").Resize(n, 9).Value = outputData
+    ws.Columns("A").NumberFormat = "yyyy-mm-dd"
+    ws.Columns("B:I").NumberFormat = "0.0000%"
+    FinishOutputSheet ws, "tblSlide3_Paths", 9, n + 1, COLOR_AMBER
+End Sub
+
+Private Sub WriteSlide3Returns(ByVal wb As Workbook, _
+                               ByRef curveDates() As Double, _
+                               ByRef realizedRates() As Double, _
+                               ByRef invertedRates() As Double, _
+                               ByVal n As Long, _
+                               ByVal holdingMonths As Long, _
+                               ByVal dayBasis As Double, _
+                               ByRef monthlyCount As Long, _
+                               ByRef averageReturns() As Double, _
+                               ByRef excessVersusON() As Double, _
+                               ByRef winCounts() As Long)
+    Dim ws As Worksheet
+    Dim outputData() As Variant
+    Dim exactData() As Variant
+    Dim previousMonthKey As String
+    Dim currentMonthKey As String
+    Dim maturityTarget As Double
+    Dim maturityIndex As Long
+    Dim realizedReturn(1 To 4) As Double
+    Dim invertedReturn(1 To 4) As Double
+    Dim sumReturns(1 To 2, 1 To 4) As Double
+    Dim bestRealized As Long
+    Dim bestInverted As Long
+    Dim i As Long
+    Dim t As Long
+    Dim rowOut As Long
+
+    Set ws = ResetOutputWorksheet(wb, RETURNS_SHEET)
+    ReDim outputData(1 To n, 1 To 18)
+
+    For i = 1 To n
+        currentMonthKey = Format$(CDate(curveDates(i)), "yyyy-mm")
+        If currentMonthKey <> previousMonthKey Then
+            maturityTarget = AddMonthsSerial(curveDates(i), holdingMonths)
+            If maturityTarget <= curveDates(n) Then
+                maturityIndex = FindOnOrBefore(curveDates, n, maturityTarget)
+                If maturityIndex > i Then
+                    rowOut = rowOut + 1
+                    outputData(rowOut, 1) = curveDates(i)
+                    outputData(rowOut, 2) = curveDates(maturityIndex)
+
+                    For t = 1 To 4
+                        realizedReturn(t) = RolledTenorReturn(curveDates, realizedRates, n, i, maturityIndex, t, TenorMonths(t), dayBasis)
+                        invertedReturn(t) = RolledTenorReturn(curveDates, invertedRates, n, i, maturityIndex, t, TenorMonths(t), dayBasis)
+                        outputData(rowOut, 2 + t) = realizedReturn(t)
+                        outputData(rowOut, 10 + t) = invertedReturn(t)
+                        sumReturns(1, t) = sumReturns(1, t) + realizedReturn(t)
+                        sumReturns(2, t) = sumReturns(2, t) + invertedReturn(t)
+                    Next t
+
+                    outputData(rowOut, 7) = (realizedReturn(2) - realizedReturn(1)) * 10000#
+                    outputData(rowOut, 8) = (realizedReturn(3) - realizedReturn(1)) * 10000#
+                    outputData(rowOut, 9) = (realizedReturn(4) - realizedReturn(1)) * 10000#
+                    bestRealized = BestTenorIndex(realizedReturn)
+                    outputData(rowOut, 10) = TenorName(bestRealized)
+                    winCounts(1, bestRealized) = winCounts(1, bestRealized) + 1
+
+                    outputData(rowOut, 15) = (invertedReturn(2) - invertedReturn(1)) * 10000#
+                    outputData(rowOut, 16) = (invertedReturn(3) - invertedReturn(1)) * 10000#
+                    outputData(rowOut, 17) = (invertedReturn(4) - invertedReturn(1)) * 10000#
+                    bestInverted = BestTenorIndex(invertedReturn)
+                    outputData(rowOut, 18) = TenorName(bestInverted)
+                    winCounts(2, bestInverted) = winCounts(2, bestInverted) + 1
+                End If
+            End If
+            previousMonthKey = currentMonthKey
+        End If
+    Next i
+
+    monthlyCount = rowOut
+    If monthlyCount = 0 Then Err.Raise vbObjectError + 1130, , "No complete monthly six-month start dates were available."
+
+    For t = 1 To 4
+        averageReturns(1, t) = sumReturns(1, t) / monthlyCount
+        averageReturns(2, t) = sumReturns(2, t) / monthlyCount
+        excessVersusON(1, t) = (averageReturns(1, t) - averageReturns(1, 1)) * 10000#
+        excessVersusON(2, t) = (averageReturns(2, t) - averageReturns(2, 1)) * 10000#
+    Next t
+
+    WriteHeaders ws, Array("Start Date", "Maturity Date", _
+                           "Realized ON Return", "Realized 1M Return", _
+                           "Realized 3M Return", "Realized 6M Return", _
+                           "Realized 1M Excess vs ON | bp", "Realized 3M Excess vs ON | bp", _
+                           "Realized 6M Excess vs ON | bp", "Realized Winner", _
+                           "Inverted ON Return", "Inverted 1M Return", _
+                           "Inverted 3M Return", "Inverted 6M Return", _
+                           "Inverted 1M Excess vs ON | bp", "Inverted 3M Excess vs ON | bp", _
+                           "Inverted 6M Excess vs ON | bp", "Inverted Winner")
+    ReDim exactData(1 To rowOut, 1 To 18)
+    CopyArrayBlock outputData, exactData, rowOut, 18
+    ws.Range("A2").Resize(rowOut, 18).Value = exactData
+    ws.Columns("A:B").NumberFormat = "yyyy-mm-dd"
+    ws.Columns("C:F").NumberFormat = "0.0000%"
+    ws.Columns("G:I").NumberFormat = "+0.0;-0.0;0.0"
+    ws.Columns("K:N").NumberFormat = "0.0000%"
+    ws.Columns("O:Q").NumberFormat = "+0.0;-0.0;0.0"
+    FinishOutputSheet ws, "tblSlide3_Returns", 18, rowOut + 1, COLOR_TEAL
+End Sub
+
+Private Sub WriteSlide3Summary(ByVal wb As Workbook, _
+                               ByVal monthlyCount As Long, _
+                               ByRef averageReturns() As Double, _
+                               ByRef excessVersusON() As Double, _
+                               ByRef winCounts() As Long)
+    Dim ws As Worksheet
+    Dim outputData(1 To 4, 1 To 7) As Variant
+    Dim t As Long
+
+    Set ws = ResetOutputWorksheet(wb, SUMMARY_SHEET)
+
+    For t = 1 To 4
+        outputData(t, 1) = TenorName(t)
+        outputData(t, 2) = averageReturns(1, t)
+        outputData(t, 3) = excessVersusON(1, t)
+        outputData(t, 4) = winCounts(1, t)
+        outputData(t, 5) = averageReturns(2, t)
+        outputData(t, 6) = excessVersusON(2, t)
+        outputData(t, 7) = winCounts(2, t)
+    Next t
+
+    WriteHeaders ws, Array("Tenor", "Realized Path Average 6M Return", _
+                           "Realized Path Excess vs ON | bp", "Realized Path Winning Starts", _
+                           "Inverted Path Average 6M Return", _
+                           "Inverted Path Excess vs ON | bp", "Inverted Path Winning Starts")
+    ws.Range("A2").Resize(4, 7).Value = outputData
+    ws.Columns("B").NumberFormat = "0.0000%"
+    ws.Columns("C").NumberFormat = "+0.0;-0.0;0.0"
+    ws.Columns("D").NumberFormat = "#,##0"
+    ws.Columns("E").NumberFormat = "0.0000%"
+    ws.Columns("F").NumberFormat = "+0.0;-0.0;0.0"
+    ws.Columns("G").NumberFormat = "#,##0"
+    FinishOutputSheet ws, "tblSlide3_Summary", 7, 5, COLOR_NAVY
+
+    ws.Range("I1:J1").Merge
+    ws.Range("I1").Value2 = "Slide 3 decision metrics"
+    FormatTitle ws.Range("I1:J1")
+    ws.Range("I3").Value2 = "Monthly starts"
+    ws.Range("J3").Value2 = monthlyCount
+    ws.Range("I4").Value2 = "Realized path winner"
+    ws.Range("J4").Value2 = TenorName(IndexOfMaximumLong(winCounts, 1))
+    ws.Range("I5").Value2 = "Realized 6M excess vs ON"
+    ws.Range("J5").Value2 = excessVersusON(1, 4)
+    ws.Range("I6").Value2 = "Inverted path winner"
+    ws.Range("J6").Value2 = TenorName(IndexOfMaximumLong(winCounts, 2))
+    ws.Range("I7").Value2 = "Inverted 6M excess vs ON"
+    ws.Range("J7").Value2 = excessVersusON(2, 4)
+    ws.Range("J5:J7").NumberFormat = "+0.0;-0.0;0.0"
+    ws.Range("I3:I7").Font.Bold = True
+    ws.Range("I3:J7").Interior.Color = COLOR_LIGHT_BLUE
+    ws.Columns("I").ColumnWidth = 31
+    ws.Columns("J").ColumnWidth = 18
+End Sub
+
+Private Sub WriteChecks(ByVal wb As Workbook, _
+                        ByVal curveCount As Long, _
+                        ByVal headerRow As Long, _
+                        ByVal rateScale As Double, _
+                        ByVal dailyCount As Long, _
+                        ByVal monthlyCount As Long, _
+                        ByVal rateFloor As Double, _
+                        ByVal minimumRate As Double, _
+                        ByVal effectiveStart As Double)
+    Dim ws As Worksheet
+    Dim checks(1 To 8, 1 To 5) As Variant
+    Dim i As Long
+    Dim allPass As Boolean
+
+    Set ws = ResetOutputWorksheet(wb, CHECKS_SHEET)
+
+    checks(1, 1) = "Required headers located": checks(1, 2) = headerRow: checks(1, 3) = "Rows 1:25": checks(1, 4) = "PASS": checks(1, 5) = "Date, ON, 1M, 3M and 6M found."
+    checks(2, 1) = "Curve observations": checks(2, 2) = curveCount: checks(2, 3) = ">= 2": checks(2, 4) = IIf(curveCount >= 2, "PASS", "FAIL"): checks(2, 5) = "Complete observations loaded."
+    checks(3, 1) = "Rate input scale": checks(3, 2) = rateScale: checks(3, 3) = "1 or 0.01": checks(3, 4) = IIf(rateScale = 1# Or rateScale = 0.01, "PASS", "FAIL"): checks(3, 5) = "0.01 indicates percentage-point inputs."
+    checks(4, 1) = "Fully realized daily starts": checks(4, 2) = dailyCount: checks(4, 3) = "> 0": checks(4, 4) = IIf(dailyCount > 0, "PASS", "FAIL"): checks(4, 5) = "Used for Slide 2."
+    checks(5, 1) = "Monthly scenario starts": checks(5, 2) = monthlyCount: checks(5, 3) = "> 0": checks(5, 4) = IIf(monthlyCount > 0, "PASS", "FAIL"): checks(5, 5) = "First available curve date in each month."
+    checks(6, 1) = "Minimum normalized rate": checks(6, 2) = minimumRate: checks(6, 3) = rateFloor: checks(6, 4) = IIf(minimumRate + 0.0000000001 >= rateFloor, "PASS", "FAIL"): checks(6, 5) = "No negative plotted rates."
+    checks(7, 1) = "Effective normalized ON start": checks(7, 2) = effectiveStart: checks(7, 3) = "> 0": checks(7, 4) = IIf(effectiveStart > 0, "PASS", "FAIL"): checks(7, 5) = "Common start level for both paths."
+    checks(8, 1) = "Generated output sheets": checks(8, 2) = 4: checks(8, 3) = 4: checks(8, 4) = "PASS": checks(8, 5) = "Slide2_6M, Slide3_Paths, Slide3_Returns and Slide3_Summary."
+
+    WriteHeaders ws, Array("Check", "Actual", "Expected / threshold", "Status", "Notes")
+    ws.Range("A2").Resize(8, 5).Value = checks
+    ws.Range("B7:C7").NumberFormat = "0.0000%"
+    ws.Range("B8").NumberFormat = "0.0000%"
+    FinishOutputSheet ws, "tblSlideChecks", 5, 9, COLOR_NAVY
+
+    allPass = True
+    For i = 2 To 9
+        If UCase$(CStr(ws.Cells(i, 4).Value2)) <> "PASS" Then allPass = False
+    Next i
+
+    ws.Range("G1:H1").Merge
+    ws.Range("G1").Value2 = "Model status"
+    FormatTitle ws.Range("G1:H1")
+    ws.Range("G3").Value2 = IIf(allPass, "PASS", "REVIEW")
+    ws.Range("G3:H3").Merge
+    ws.Range("G3:H3").Font.Bold = True
+    ws.Range("G3:H3").HorizontalAlignment = xlCenter
+    ws.Range("G3:H3").Interior.Color = IIf(allPass, RGB(226, 239, 218), RGB(255, 199, 206))
+    ws.Columns("G:H").ColumnWidth = 18
+End Sub
+
+Private Function RolledTenorReturn(ByRef curveDates() As Double, _
+                                   ByRef pathRates() As Double, _
+                                   ByVal n As Long, _
+                                   ByVal startIndex As Long, _
+                                   ByVal maturityIndex As Long, _
+                                   ByVal tenorIndex As Long, _
+                                   ByVal resetMonths As Long, _
+                                   ByVal dayBasis As Double) As Double
+    Dim schedule() As Long
+    Dim scheduleCount As Long
+    Dim targetDate As Double
+    Dim resetIndex As Long
+    Dim k As Long
+    Dim i As Long
+    Dim intervalDays As Double
+    Dim factor As Double
+
+    If maturityIndex <= startIndex Then
+        Err.Raise vbObjectError + 1140, , "Maturity must be after the start date."
+    End If
+
+    factor = 1#
+
+    If resetMonths = 0 Then
+        For i = startIndex To maturityIndex - 1
+            intervalDays = curveDates(i + 1) - curveDates(i)
+            factor = factor * (1# + pathRates(i, tenorIndex) * intervalDays / dayBasis)
+        Next i
+    Else
+        ReDim schedule(1 To 24)
+        scheduleCount = 1
+        schedule(1) = startIndex
+
+        For k = 1 To 24
+            targetDate = AddMonthsSerial(curveDates(startIndex), k * resetMonths)
+            If targetDate > curveDates(maturityIndex) Then Exit For
+            resetIndex = FindOnOrBefore(curveDates, n, targetDate)
+            If resetIndex > schedule(scheduleCount) And resetIndex <= maturityIndex Then
+                scheduleCount = scheduleCount + 1
+                schedule(scheduleCount) = resetIndex
+            End If
+        Next k
+
+        If schedule(scheduleCount) < maturityIndex Then
+            scheduleCount = scheduleCount + 1
+            schedule(scheduleCount) = maturityIndex
+        End If
+
+        For i = 1 To scheduleCount - 1
+            intervalDays = curveDates(schedule(i + 1)) - curveDates(schedule(i))
+            factor = factor * (1# + pathRates(schedule(i), tenorIndex) * intervalDays / dayBasis)
+        Next i
+    End If
+
+    RolledTenorReturn = factor - 1#
+End Function
+
+Private Function FindOnOrBefore(ByRef curveDates() As Double, _
+                                ByVal n As Long, _
+                                ByVal targetDate As Double) As Long
+    Dim low As Long
+    Dim high As Long
+    Dim middle As Long
+    Dim answer As Long
+
+    low = 1
+    high = n
+    answer = 0
+
+    Do While low <= high
+        middle = (low + high) \ 2
+        If curveDates(middle) <= targetDate Then
+            answer = middle
+            low = middle + 1
+        Else
+            high = middle - 1
+        End If
+    Loop
+
+    FindOnOrBefore = answer
+End Function
+
+Private Sub CopyArrayBlock(ByRef sourceData() As Variant, _
+                           ByRef targetData() As Variant, _
+                           ByVal rowCount As Long, _
+                           ByVal columnCount As Long)
+    Dim r As Long
+    Dim c As Long
+
+    For r = 1 To rowCount
+        For c = 1 To columnCount
+            targetData(r, c) = sourceData(r, c)
+        Next c
+    Next r
+End Sub
+
+Private Function AddMonthsSerial(ByVal startSerial As Double, ByVal monthsToAdd As Long) As Double
+    Dim startDate As Date
+    Dim firstOfTargetMonth As Date
+    Dim lastOfTargetMonth As Date
+    Dim targetDay As Long
+
+    startDate = CDate(startSerial)
+    firstOfTargetMonth = DateSerial(Year(startDate), Month(startDate) + monthsToAdd, 1)
+    lastOfTargetMonth = DateSerial(Year(firstOfTargetMonth), Month(firstOfTargetMonth) + 1, 0)
+    targetDay = Day(startDate)
+    If targetDay > Day(lastOfTargetMonth) Then targetDay = Day(lastOfTargetMonth)
+    AddMonthsSerial = CDbl(DateSerial(Year(firstOfTargetMonth), Month(firstOfTargetMonth), targetDay))
+End Function
+
+Private Function BestTenorIndex(ByRef returnsByTenor() As Double) As Long
+    Dim bestIndex As Long
+    Dim t As Long
+
+    bestIndex = 1
+    For t = 2 To 4
+        If returnsByTenor(t) > returnsByTenor(bestIndex) Then bestIndex = t
+    Next t
+    BestTenorIndex = bestIndex
+End Function
+
+Private Function IndexOfMaximumLong(ByRef values() As Long, ByVal scenarioIndex As Long) As Long
+    Dim bestIndex As Long
+    Dim t As Long
+
+    bestIndex = 1
+    For t = 2 To 4
+        If values(scenarioIndex, t) > values(scenarioIndex, bestIndex) Then bestIndex = t
+    Next t
+    IndexOfMaximumLong = bestIndex
+End Function
+
+Private Function TenorName(ByVal tenorIndex As Long) As String
+    Select Case tenorIndex
+        Case 1: TenorName = "ON"
+        Case 2: TenorName = "1M"
+        Case 3: TenorName = "3M"
+        Case 4: TenorName = "6M"
+        Case Else: TenorName = "Unknown"
+    End Select
+End Function
+
+Private Function TenorMonths(ByVal tenorIndex As Long) As Long
+    Select Case tenorIndex
+        Case 1: TenorMonths = 0
+        Case 2: TenorMonths = 1
+        Case 3: TenorMonths = 3
+        Case 4: TenorMonths = 6
+        Case Else: Err.Raise vbObjectError + 1150, , "Unsupported tenor index."
+    End Select
+End Function
+
+Private Function RequireWorksheet(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
+    On Error Resume Next
+    Set RequireWorksheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+    If RequireWorksheet Is Nothing Then
+        Err.Raise vbObjectError + 1160, , "Required worksheet '" & sheetName & "' was not found."
+    End If
+End Function
+
+Private Function GetOrCreateWorksheet(ByVal wb As Workbook, _
+                                      ByVal sheetName As String, _
+                                      ByRef isNew As Boolean) As Worksheet
+    On Error Resume Next
+    Set GetOrCreateWorksheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+
+    If GetOrCreateWorksheet Is Nothing Then
+        Set GetOrCreateWorksheet = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        GetOrCreateWorksheet.Name = sheetName
+        isNew = True
+    Else
+        isNew = False
+    End If
+End Function
+
+Private Function ResetOutputWorksheet(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
+    Dim isNew As Boolean
+    Dim i As Long
+
+    Set ResetOutputWorksheet = GetOrCreateWorksheet(wb, sheetName, isNew)
+    With ResetOutputWorksheet
+        For i = .ListObjects.Count To 1 Step -1
+            .ListObjects(i).Delete
+        Next i
+        .Cells.UnMerge
+        .Cells.Clear
+        .Cells.ClearFormats
+    End With
+End Function
+
+Private Sub WriteHeaders(ByVal ws As Worksheet, ByVal headers As Variant)
+    Dim c As Long
+    For c = LBound(headers) To UBound(headers)
+        ws.Cells(1, c - LBound(headers) + 1).Value2 = headers(c)
+    Next c
+    FormatHeader ws.Range(ws.Cells(1, 1), ws.Cells(1, UBound(headers) - LBound(headers) + 1))
+End Sub
+
+Private Sub FinishOutputSheet(ByVal ws As Worksheet, _
+                              ByVal tableName As String, _
+                              ByVal columnCount As Long, _
+                              ByVal lastRow As Long, _
+                              ByVal tabColor As Long)
+    Dim tableRange As Range
+    Dim lo As ListObject
+    Dim c As Long
+
+    Set tableRange = ws.Range(ws.Cells(1, 1), ws.Cells(Application.Max(lastRow, 2), columnCount))
+    Set lo = ws.ListObjects.Add(xlSrcRange, tableRange, , xlYes)
+    lo.Name = tableName
+    lo.TableStyle = "TableStyleMedium2"
+
+    ws.Rows(1).RowHeight = 34
+    ws.Rows(1).WrapText = True
+    ws.UsedRange.VerticalAlignment = xlCenter
+    ws.UsedRange.Columns.AutoFit
+
+    For c = 1 To columnCount
+        If ws.Columns(c).ColumnWidth > 28 Then ws.Columns(c).ColumnWidth = 28
+        If ws.Columns(c).ColumnWidth < 11 Then ws.Columns(c).ColumnWidth = 11
+    Next c
+
+    ws.Tab.Color = tabColor
+End Sub
+
+Private Sub FormatTitle(ByVal target As Range)
+    With target
+        .Interior.Color = COLOR_NAVY
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .Font.Size = 15
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+        .RowHeight = 28
+    End With
+End Sub
+
+Private Sub FormatHeader(ByVal target As Range)
+    With target
+        .Interior.Color = COLOR_NAVY
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .WrapText = True
+    End With
+End Sub
