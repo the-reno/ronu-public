@@ -1,0 +1,6 @@
+Call USD_WriteMetric(ws, "J24:M27", "Rates rise | 6M", Format(mUpExcess(4), "+0.0;-0.0;0.0") & " bp", "Average excess vs ON")
+Call USD_WriteMetric(ws, "N24:Q27", "Rates fall | 6M", Format(mDownExcess(4), "+0.0;-0.0;0.0") & " bp", "Average excess vs ON")
+Call USD_WriteMetric(ws, "R24:U27", "Falling-path 6M wins", CStr(mDownWins(4)) & " / " & CStr(mMonthlyN), "Monthly six-month starts")
+Call USD_WriteMetric(ws, "J28:M31", "Rising-path ON wins", CStr(mUpWins(1)) & " / " & CStr(mMonthlyN), "Directional reset advantage")
+Call USD_WriteMetric(ws, "N28:Q31", "Rising-path 6M", Format(mUpWins(4), "0") & " wins", "Lock-in disadvantage")
+Call USD_WriteMetric(ws, "R28:U31", "Stress decisions", Format(mMonthlyN, "0"), "First observation per month")
