@@ -8,7 +8,7 @@ Option Explicit
 '   for manual transfer into PowerPoint.
 '
 ' What this module does
-'   1) Runs FINAL_BuildAll, which rebuilds the validated calculation
+'   1) Runs the validated FINAL model stages, rebuilding the calculation
 '      sheets and the five presentation chart sheets.
 '   2) Creates Presentation_Index with the narrative, source map,
 '      robust allocation and independent model checks.
