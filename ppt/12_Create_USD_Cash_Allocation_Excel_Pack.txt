@@ -1,0 +1,1717 @@
+Option Explicit
+
+'====================================================================================
+' USD CASH ALLOCATION | EXCEL-ONLY SLIDE PACK
+'
+' PURPOSE
+'   Creates the complete slide-ready data, charts, committee comments and audit trail
+'   for slides 1-4 inside Excel. It does NOT open or automate PowerPoint.
+'
+' SOURCE WORKBOOK
+'   Designed for 13-aug.xlsx. Required sheets:
+'     Curve          Date | ON | 1M | 3M | 6M
+'     F_Portfolios   allocation grid and robust-solution flag
+'
+' OUTPUT SHEETS
+'   PPT_Index          manual PowerPoint workflow and source map
+'   PPT_S1_Curve       historical curve, macro events and realized examples
+'   PPT_S2_Signal      priced premium versus realized return and regression
+'   PPT_S3_Stress      normalized realized/inverted paths and return effect
+'   PPT_S4_Allocation  risk-balanced allocation and directional regret
+'   PPT_Audit          model checks and reference-value reconciliation
+'
+' USE
+'   1. Save 13-aug.xlsx as an Excel Macro-Enabled Workbook (*.xlsm).
+'   2. Press Alt+F11 and insert a standard Module.
+'   3. Paste this entire TXT file into the Module.
+'   4. Run USD_CreateCashAllocationExcelPack.
+'   5. Copy the Excel charts and nearby comments into PowerPoint manually.
+'====================================================================================
+
+Private Const S_INDEX As String = "PPT_Index"
+Private Const S1 As String = "PPT_S1_Curve"
+Private Const S2 As String = "PPT_S2_Signal"
+Private Const S3 As String = "PPT_S3_Stress"
+Private Const S4 As String = "PPT_S4_Allocation"
+Private Const S_AUDIT As String = "PPT_Audit"
+
+Private Const XL_XY_SCATTER As Long = -4169
+Private Const XL_XY_LINES As Long = 75
+Private Const XL_COLUMN_CLUSTERED As Long = 51
+Private Const XL_BAR_CLUSTERED As Long = 57
+Private Const XL_BAR_STACKED As Long = 58
+Private Const XL_MARKER_NONE As Long = -4142
+Private Const XL_MARKER_CIRCLE As Long = 8
+Private Const XL_LEGEND_TOP As Long = -4160
+Private Const XL_LABEL_OUTSIDE_END As Long = 2
+Private Const XL_CATEGORY As Long = 1
+Private Const XL_VALUE As Long = 2
+Private Const XL_PRIMARY As Long = 1
+Private Const MSO_FALSE As Long = 0
+Private Const MSO_TRUE As Long = -1
+Private Const MSO_LINE_DASH As Long = 4
+
+Private Const STRESS_ON As Double = 0.055
+Private Const SUPPORT_ROW As Long = 40
+Private Const FONT_NAME As String = "Calibri"
+
+Private mDate() As Double
+Private mRate() As Double                 ' tenor, observation
+Private mCurveN As Long
+
+Private mDailyDate() As Double
+Private mDailySpread() As Double
+Private mDailyExcess() As Double
+Private mDailyRolledON() As Double
+Private mDailyLocked6M() As Double
+Private mDailyN As Long
+Private mCorr As Double
+Private mSlope As Double
+Private mIntercept As Double
+Private mR2 As Double
+Private mHitRate As Double
+Private mQ4Mean As Double
+Private mQ4Hit As Double
+
+Private mMonthlyStart() As Long
+Private mMonthlyN As Long
+Private mUpReturn() As Double             ' monthly start, tenor
+Private mDownReturn() As Double
+Private mUpExcess(1 To 4) As Double
+Private mDownExcess(1 To 4) As Double
+Private mUpWins(1 To 4) As Long
+Private mDownWins(1 To 4) As Long
+
+Private mMix(1 To 4) As Double
+Private mWeightedMonths As Double
+Private mMixHistRegret As Double
+Private mMixInvRegret As Double
+Private mMixWorstRegret As Double
+Private mONWorstRegret As Double
+Private mSixWorstRegret As Double
+Private mPortfolioCount As Long
+Private mRobustRow As Long
+
+Public Sub USD_CreateCashAllocationExcelPack()
+
+    Dim oldCalc As Long
+    Dim oldScreen As Boolean
+    Dim oldEvents As Boolean
+    Dim errText As String
+
+    On Error GoTo fail
+
+    oldCalc = Application.Calculation
+    oldScreen = Application.ScreenUpdating
+    oldEvents = Application.EnableEvents
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+    If ThisWorkbook.ProtectStructure Then _
+        Err.Raise vbObjectError + 3099, , "Workbook structure is protected. Unprotect it before running the module."
+    Application.StatusBar = "Building the USD cash-allocation Excel slide pack..."
+
+    USD_ResetState
+    USD_ValidateSourceWorkbook
+    USD_LoadCurve
+    USD_CalculateDailyEvidence
+    USD_CalculateDirectionalStress
+    USD_LoadPortfolioResult
+
+    USD_BuildIndex
+    USD_BuildSlide1Sheet
+    USD_BuildSlide2Sheet
+    USD_BuildSlide3Sheet
+    USD_BuildSlide4Sheet
+    USD_BuildAuditSheet
+
+    Application.CalculateFull
+    ThisWorkbook.Worksheets(S_INDEX).Activate
+    ThisWorkbook.Worksheets(S_INDEX).Range("A1").Select
+
+clean_exit:
+    Application.StatusBar = False
+    Application.Calculation = oldCalc
+    Application.EnableEvents = oldEvents
+    Application.ScreenUpdating = oldScreen
+    If Len(errText) = 0 Then
+        MsgBox "Excel slide pack created." & vbCrLf & vbCrLf & _
+               "No PowerPoint file was created." & vbCrLf & _
+               "Use PPT_Index to copy charts and comments manually.", _
+               vbInformation, "USD cash allocation"
+    End If
+    Exit Sub
+
+fail:
+    errText = Err.Description
+    MsgBox "USD_CreateCashAllocationExcelPack stopped:" & vbCrLf & vbCrLf & errText, _
+           vbCritical, "USD cash allocation"
+    Resume clean_exit
+
+End Sub
+
+'====================================================================================
+' WORKSHEET BUILDERS
+'====================================================================================
+
+Private Sub USD_BuildIndex()
+
+    Dim ws As Worksheet
+    Dim flow As Variant
+    Dim i As Long
+
+    Set ws = USD_GetOrCreateSheet(S_INDEX)
+    USD_ResetOutputSheet ws
+    USD_SetCanvas ws, 20
+    USD_Title ws, "USD CASH ALLOCATION | EXCEL EVIDENCE PACK", _
+        "Four slide-ready analyses, governed in Excel and designed for manual transfer to PowerPoint."
+
+    ws.Range("A5:H5").Merge
+    USD_SectionHeader ws.Range("A5:H5"), "HOW TO USE THIS WORKBOOK"
+    ws.Range("A6:H10").Merge
+    With ws.Range("A6:H10")
+        .Value = "1  Review PPT_Audit before using any output." & vbLf & _
+                 "2  Open each PPT_S# sheet and copy the native Excel chart(s)." & vbLf & _
+                 "3  Copy the adjacent committee message and conclusion." & vbLf & _
+                 "4  Keep the support tables from row 40 onward for traceability." & vbLf & _
+                 "5  PowerPoint is intentionally not created or edited by this module."
+        USD_BodyBox .Cells, USD_LightBlue(), USD_Navy()
+    End With
+
+    ws.Range("J5:T5").Merge
+    USD_SectionHeader ws.Range("J5:T5"), "REFERENCE ALLOCATION | MODEL OUTPUT"
+    ws.Range("J6:T10").Merge
+    With ws.Range("J6:T10")
+        .Value = "ON " & Format(mMix(1), "0%") & "  |  1M " & Format(mMix(2), "0%") & _
+                 "  |  3M " & Format(mMix(3), "0%") & "  |  6M " & Format(mMix(4), "0%") & vbLf & _
+                 "Weighted tenor: " & Format(mWeightedMonths, "0.0") & " months" & vbLf & _
+                 "Worst directional regret: " & Format(mMixWorstRegret, "0.0") & " bp" & vbLf & _
+                 "Governance: a neutral reference mix, not a forecast or return guarantee."
+        USD_BodyBox .Cells, USD_LightAmber(), USD_Navy()
+        .Font.Size = 13
+    End With
+
+    ws.Range("A12:T12").Merge
+    USD_SectionHeader ws.Range("A12:T12"), "COMMITTEE NARRATIVE AND MANUAL COPY MAP"
+    USD_WriteHeaders ws.Range("A13:G13"), Array("Slide", "Excel sheet", "Committee question", "Evidence / chart", "Decision message", "Copy to PowerPoint", "Audit support")
+    ws.Range("A13:A13").ColumnWidth = 8
+    ws.Range("B13:C13").EntireColumn.ColumnWidth = 18
+
+    flow = Array( _
+        Array(1, S1, "What did the curve price, and what actually accrued?", _
+              "SOFR curve + policy/macro events; Jan-22 and Jul-24 holding examples", _
+              "Term premium is compensation for uncertainty, not a guaranteed outcome.", _
+              "Copy 1 chart + the event and realized-return boxes.", "Curve; daily six-month engine"), _
+        Array(2, S2, "Is the 6M-ON spread a reliable allocation signal?", _
+              "Premium vs realized outcome through time + cross-sectional scatter", _
+              "Weak fit and low hit rate argue against single-signal maturity calls.", _
+              "Copy both charts + key metrics + conclusion band.", "1,003 eligible daily decisions"), _
+        Array(3, S3, "What if the rate path moves in the opposite direction?", _
+              "Comparable positive-level realized/inverted paths + return sensitivity", _
+              "Directional concentration creates asymmetric regret: ON loses when rates fall; 6M loses when rates rise.", _
+              "Copy both charts + scenario methodology + conclusion band.", "49 monthly six-month starts"), _
+        Array(4, S4, "How should cash be allocated when direction is uncertain?", _
+              "Risk-balanced maturity mix + worst-direction regret", _
+              "Diversify reset risk and lock-in risk; govern deviations explicitly.", _
+              "Copy both charts + maturity roles + decision rule.", "286 portfolio combinations") _
+    )
+
+    For i = 0 To UBound(flow)
+        USD_WriteArrayRow ws.Cells(14 + i, 1), flow(i)
+        ws.Hyperlinks.Add Anchor:=ws.Cells(14 + i, 2), Address:="", _
+                          SubAddress:="'" & CStr(flow(i)(1)) & "'!A1", _
+                          TextToDisplay:=CStr(flow(i)(1))
+    Next i
+    USD_FormatTableBody ws.Range("A14:G17")
+    ws.Range("A14:G17").WrapText = True
+    ws.Rows("14:17").RowHeight = 53
+    ws.Columns("A").ColumnWidth = 8
+    ws.Columns("B").ColumnWidth = 23
+    ws.Columns("C").ColumnWidth = 34
+    ws.Columns("D").ColumnWidth = 43
+    ws.Columns("E").ColumnWidth = 46
+    ws.Columns("F").ColumnWidth = 38
+    ws.Columns("G").ColumnWidth = 30
+
+    ws.Range("A20:T20").Merge
+    USD_SectionHeader ws.Range("A20:T20"), "MODEL SCOPE, CONVENTIONS AND CONTROL"
+    ws.Range("A21:T26").Merge
+    With ws.Range("A21:T26")
+        .Value = "Source: Curve!A:E (Date, ON, 1M, 3M, 6M) and F_Portfolios!A:L." & vbLf & _
+                 "Return convention: simple ACT/360 accrual; ON compounds across observed date intervals; term deposits reset at 1M/3M and 6M remains locked for the horizon." & vbLf & _
+                 "Maturity convention: six calendar months from the decision date, floored to the latest available curve observation." & vbLf & _
+                 "Stress convention: both paths start at 5.50%; the realized curve changes preserve observed tenor moves, while the inverted path reverses each tenor move around the same initial level." & vbLf & _
+                 "Macro events are contextual annotations entered explicitly in this module; market rates and return results are calculated from the shared workbook." & vbLf & _
+                 "Control: any change in source dates, rows or results is surfaced on PPT_Audit."
+        USD_BodyBox .Cells, RGB(245, 247, 250), USD_Gray()
+    End With
+
+    ws.Range("A29:T31").Merge
+    With ws.Range("A29:T31")
+        .Value = "RISK MANAGER'S READOUT  |  The evidence supports a governed maturity ladder. It does not support betting the liquidity portfolio on a single point forecast."
+        USD_ConclusionBox .Cells
+    End With
+
+    USD_SetPrint ws, "$A$1:$T$31"
+End Sub
+
+Private Sub USD_BuildSlide1Sheet()
+
+    Dim ws As Worksheet
+    Dim i As Long
+    Dim idxJan As Long
+    Dim idxJul As Long
+    Dim dailyJan As Long
+    Dim dailyJul As Long
+    Dim events As Variant
+    Dim ch As ChartObject
+    Dim s As Series
+
+    Set ws = USD_GetOrCreateSheet(S1)
+    USD_ResetOutputSheet ws
+    USD_SetCanvas ws, 22
+    USD_Title ws, "1 | THE CURVE PRICED A TERM PREMIUM—THE REALIZED OUTCOME DEPENDED ON THE RATE PATH", _
+        "Historical SOFR curve, selected macro/policy events, and six-month holding outcomes"
+
+    ws.Range("P5:V5").Merge
+    USD_SectionHeader ws.Range("P5:V5"), "LATEST CURVE | " & Format(CDate(mDate(mCurveN)), "dd-mmm-yyyy")
+    USD_WriteHeaders ws.Range("P6:Q6"), Array("Tenor", "Rate")
+    For i = 1 To 4
+        ws.Cells(6 + i, 16).Value = USD_TenorName(i)
+        ws.Cells(6 + i, 17).Value = mRate(i, mCurveN)
+    Next i
+    USD_FormatTableBody ws.Range("P7:Q10")
+    ws.Range("Q7:Q10").NumberFormat = "0.00%"
+
+    ws.Range("P12:V12").Merge
+    USD_SectionHeader ws.Range("P12:V12"), "SELECTED MACRO / FED EVENTS"
+    events = USD_EventData()
+    For i = 0 To UBound(events)
+        USD_WriteArrayRow ws.Cells(13 + i, 16), events(i)
+    Next i
+    ws.Range("P13:U17").WrapText = True
+    USD_FormatTableBody ws.Range("P13:U17")
+    ws.Columns("P").ColumnWidth = 12
+    ws.Columns("Q").ColumnWidth = 26
+    ws.Columns("R:U").ColumnWidth = 13
+    ws.Rows("13:17").RowHeight = 32
+
+    ws.Range("P19:V19").Merge
+    USD_SectionHeader ws.Range("P19:V19"), "REALIZED SIX-MONTH EXAMPLES"
+    USD_WriteHeaders ws.Range("P20:V20"), Array("Decision", "6M-ON", "Rolled ON", "Locked 6M", "6M excess", "Winner", "Interpretation")
+    idxJan = USD_FindExactIndex(CDbl(DateSerial(2022, 1, 3)))
+    idxJul = USD_FindExactIndex(CDbl(DateSerial(2024, 7, 1)))
+    dailyJan = USD_DailyIndex(CDbl(DateSerial(2022, 1, 3)))
+    dailyJul = USD_DailyIndex(CDbl(DateSerial(2024, 7, 1)))
+    USD_WriteHoldingExample ws, 21, dailyJan, "Small positive premium was overwhelmed by subsequent tightening."
+    USD_WriteHoldingExample ws, 22, dailyJul, "Negative premium was offset by subsequent easing; locked 6M won."
+    USD_FormatTableBody ws.Range("P21:V22")
+    ws.Range("P21:P22").NumberFormat = "dd-mmm-yyyy"
+    ws.Range("Q21:Q22,T21:T22").NumberFormat = "+0.0;-0.0;0.0"
+    ws.Range("R21:S22").NumberFormat = "0.0000%"
+    ws.Columns("V").ColumnWidth = 43
+    ws.Rows("21:22").RowHeight = 42
+
+    ws.Range("P24:V29").Merge
+    With ws.Range("P24:V29")
+        .Value = "COMMITTEE READOUT" & vbLf & _
+                 "A quoted 6M premium is only the rate advantage at inception. The realized comparison is locked 6M return versus ON repeatedly resetting over the next six months. When policy reprices faster than the initial spread can absorb, the sign of the outcome can reverse."
+        USD_BodyBox .Cells, USD_LightAmber(), USD_Navy()
+        .Font.Size = 12
+    End With
+
+    ws.Range("A31:V34").Merge
+    With ws.Range("A31:V34")
+        .Value = "KEY MESSAGE  |  TERM PREMIUM IS COMPENSATION FOR RATE-PATH RISK—NOT A GUARANTEE OF SUPERIOR REALIZED RETURN."
+        USD_ConclusionBox .Cells
+    End With
+
+    'Support table: full curve history.
+    USD_WriteHeaders ws.Range("A" & SUPPORT_ROW & ":E" & SUPPORT_ROW), Array("Date", "ON", "1M", "3M", "6M")
+    For i = 1 To mCurveN
+        ws.Cells(SUPPORT_ROW + i, 1).Value = mDate(i)
+        ws.Cells(SUPPORT_ROW + i, 2).Value = mRate(1, i)
+        ws.Cells(SUPPORT_ROW + i, 3).Value = mRate(2, i)
+        ws.Cells(SUPPORT_ROW + i, 4).Value = mRate(3, i)
+        ws.Cells(SUPPORT_ROW + i, 5).Value = mRate(4, i)
+    Next i
+    ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mCurveN).NumberFormat = "dd-mmm-yyyy"
+    ws.Range("B" & SUPPORT_ROW + 1 & ":E" & SUPPORT_ROW + mCurveN).NumberFormat = "0.0000%"
+    USD_AddTable ws, ws.Range("A" & SUPPORT_ROW & ":E" & SUPPORT_ROW + mCurveN), "tblPPTS1Curve"
+
+    USD_WriteHeaders ws.Range("H" & SUPPORT_ROW & ":N" & SUPPORT_ROW), Array("Event date", "Event", "CPI", "Payroll", "U-3", "Fed decision", "Source type")
+    For i = 0 To UBound(events)
+        USD_WriteArrayRow ws.Cells(SUPPORT_ROW + 1 + i, 8), events(i)
+        ws.Cells(SUPPORT_ROW + 1 + i, 14).Value = "Committee context annotation"
+    Next i
+    ws.Range("H" & SUPPORT_ROW + 1 & ":H" & SUPPORT_ROW + 5).NumberFormat = "dd-mmm-yyyy"
+    USD_AddTable ws, ws.Range("H" & SUPPORT_ROW & ":N" & SUPPORT_ROW + 5), "tblPPTS1Events"
+
+    USD_WriteHeaders ws.Range("P" & SUPPORT_ROW & ":V" & SUPPORT_ROW), Array("Decision", "6M-ON bp", "Rolled ON", "Locked 6M", "Excess bp", "Winner", "Method")
+    USD_WriteHoldingExample ws, SUPPORT_ROW + 1, dailyJan, "ACT/360; six calendar months; maturity floored to curve date."
+    USD_WriteHoldingExample ws, SUPPORT_ROW + 2, dailyJul, "ACT/360; six calendar months; maturity floored to curve date."
+    USD_AddTable ws, ws.Range("P" & SUPPORT_ROW & ":V" & SUPPORT_ROW + 2), "tblPPTS1Examples"
+    ws.Range("P" & SUPPORT_ROW + 1 & ":P" & SUPPORT_ROW + 2).NumberFormat = "dd-mmm-yyyy"
+    ws.Range("R" & SUPPORT_ROW + 1 & ":S" & SUPPORT_ROW + 2).NumberFormat = "0.0000%"
+
+    Set ch = USD_NewChart(ws, "chtPPTS1Curve", XL_XY_LINES, 18, 83, 760, 345)
+    With ch.Chart
+        For i = 1 To 4
+            Set s = .SeriesCollection.NewSeries
+        s.Name = "=""" & USD_TenorName(i) & """"
+            s.XValues = ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mCurveN)
+            s.Values = ws.Range(ws.Cells(SUPPORT_ROW + 1, 1 + i), ws.Cells(SUPPORT_ROW + mCurveN, 1 + i))
+            USD_FormatLineSeries s, USD_TenorColor(i), 1.8, False
+        Next i
+        For i = 0 To UBound(events)
+            Set s = .SeriesCollection.NewSeries
+            s.Name = "=""" & CStr(events(i)(1)) & """"
+            s.XValues = Array(CDbl(events(i)(0)), CDbl(events(i)(0)))
+            s.Values = Array(0#, 0.06)
+            USD_FormatLineSeries s, USD_Amber(), 1#, True
+        Next i
+        USD_ChartTitle ch, "SOFR CURVE AND SELECTED MACRO / POLICY EVENTS", "Date", "Rate"
+        .HasLegend = True
+        .Legend.Position = XL_LEGEND_TOP
+        .Axes(XL_VALUE).MinimumScale = 0#
+        .Axes(XL_VALUE).MaximumScale = 0.06
+        .Axes(XL_VALUE).MajorUnit = 0.01
+        .Axes(XL_VALUE).TickLabels.NumberFormat = "0%"
+        .Axes(XL_CATEGORY).TickLabels.NumberFormat = "mmm-yy"
+        On Error Resume Next
+        For i = .Legend.LegendEntries.Count To 5 Step -1
+            .Legend.LegendEntries(i).Delete
+        Next i
+        On Error GoTo 0
+    End With
+
+    ws.Range("A36:V36").Merge
+    ws.Range("A36").Value = "Manual transfer: copy chtPPTS1Curve plus the three right-hand evidence boxes; retain rows 40+ in Excel for audit."
+    USD_InstructionLine ws.Range("A36:V36")
+    USD_SetPrint ws, "$A$1:$V$36"
+End Sub
+
+Private Function USD_EventData() As Variant
+    USD_EventData = Array( _
+        Array(CDbl(DateSerial(2022, 3, 16)), "MAR 2022 | HIKES START", "CPI 7.9%", "NFP +678k", "U-3 3.8%", "Fed +25 bp"), _
+        Array(CDbl(DateSerial(2022, 7, 27)), "JUL 2022 | CPI PEAK", "CPI 9.1%", "NFP +372k", "U-3 3.6%", "Fed +75 bp"), _
+        Array(CDbl(DateSerial(2023, 7, 26)), "JUL 2023 | POLICY PEAK", "CPI 3.0%", "NFP +209k", "U-3 3.6%", "Upper 5.50%"), _
+        Array(CDbl(DateSerial(2024, 9, 18)), "SEP 2024 | FIRST CUT", "CPI 2.5%", "NFP +142k", "U-3 4.2%", "Fed -50 bp"), _
+        Array(CDbl(DateSerial(2026, 6, 17)), "JUN 2026 | HOLD", "CPI 4.2%", "NFP +172k", "U-3 4.3%", "Fed holds") _
+    )
+End Function
+
+Private Sub USD_WriteHoldingExample(ByVal ws As Worksheet, ByVal targetRow As Long, _
+                                    ByVal dailyIndex As Long, ByVal noteText As String)
+    If dailyIndex = 0 Then Err.Raise vbObjectError + 3130, , "Required holding-period example was not found."
+    ws.Cells(targetRow, 16).Value = mDailyDate(dailyIndex)
+    ws.Cells(targetRow, 17).Value = mDailySpread(dailyIndex)
+    ws.Cells(targetRow, 18).Value = mDailyRolledON(dailyIndex)
+    ws.Cells(targetRow, 19).Value = mDailyLocked6M(dailyIndex)
+    ws.Cells(targetRow, 20).Value = mDailyExcess(dailyIndex)
+    ws.Cells(targetRow, 21).Value = IIf(mDailyExcess(dailyIndex) > 0#, "6M", "ON")
+    ws.Cells(targetRow, 22).Value = noteText
+End Sub
+
+Private Function USD_DailyIndex(ByVal decisionDate As Double) As Long
+    Dim i As Long
+    For i = 1 To mDailyN
+        If Abs(mDailyDate(i) - decisionDate) < 0.00001 Then USD_DailyIndex = i: Exit Function
+    Next i
+End Function
+
+Private Sub USD_BuildSlide2Sheet()
+
+    Dim ws As Worksheet
+    Dim i As Long
+    Dim minX As Double
+    Dim maxX As Double
+    Dim chTime As ChartObject
+    Dim chScatter As ChartObject
+    Dim s As Series
+
+    Set ws = USD_GetOrCreateSheet(S2)
+    USD_ResetOutputSheet ws
+    USD_SetCanvas ws, 22
+    USD_Title ws, "2 | PRICED PREMIUM WAS A WEAK GUIDE TO REALIZED SIX-MONTH EXCESS RETURN", _
+        "Premium priced at the decision date versus locked 6M return minus repeatedly rolled ON return"
+
+    'Auditable daily decision table.
+    USD_WriteHeaders ws.Range("A" & SUPPORT_ROW & ":H" & SUPPORT_ROW), _
+        Array("Decision date", "Maturity date", "6M-ON spread bp", "Rolled ON return", "Locked 6M return", "6M excess bp", "Winner", "Method")
+    minX = mDailySpread(1)
+    maxX = mDailySpread(1)
+    For i = 1 To mDailyN
+        ws.Cells(SUPPORT_ROW + i, 1).Value = mDailyDate(i)
+        ws.Cells(SUPPORT_ROW + i, 2).Value = CDbl(DateAdd("m", 6, CDate(mDailyDate(i))))
+        ws.Cells(SUPPORT_ROW + i, 3).Value = mDailySpread(i)
+        ws.Cells(SUPPORT_ROW + i, 4).Value = mDailyRolledON(i)
+        ws.Cells(SUPPORT_ROW + i, 5).Value = mDailyLocked6M(i)
+        ws.Cells(SUPPORT_ROW + i, 6).Value = mDailyExcess(i)
+        ws.Cells(SUPPORT_ROW + i, 7).Value = IIf(mDailyExcess(i) > 0#, "6M", "ON")
+        ws.Cells(SUPPORT_ROW + i, 8).Value = "ACT/360; six calendar months"
+        If mDailySpread(i) < minX Then minX = mDailySpread(i)
+        If mDailySpread(i) > maxX Then maxX = mDailySpread(i)
+    Next i
+    ws.Range("A" & SUPPORT_ROW + 1 & ":B" & SUPPORT_ROW + mDailyN).NumberFormat = "dd-mmm-yyyy"
+    ws.Range("D" & SUPPORT_ROW + 1 & ":E" & SUPPORT_ROW + mDailyN).NumberFormat = "0.0000%"
+    ws.Range("C" & SUPPORT_ROW + 1 & ":C" & SUPPORT_ROW + mDailyN).NumberFormat = "+0.0;-0.0;0.0"
+    ws.Range("F" & SUPPORT_ROW + 1 & ":F" & SUPPORT_ROW + mDailyN).NumberFormat = "+0.0;-0.0;0.0"
+    USD_AddTable ws, ws.Range("A" & SUPPORT_ROW & ":H" & SUPPORT_ROW + mDailyN), "tblPPTS2Daily"
+
+    USD_WriteHeaders ws.Range("J" & SUPPORT_ROW & ":K" & SUPPORT_ROW), Array("Regression X bp", "Fitted excess bp")
+    ws.Cells(SUPPORT_ROW + 1, 10).Value = minX
+    ws.Cells(SUPPORT_ROW + 1, 11).Value = mIntercept + mSlope * minX
+    ws.Cells(SUPPORT_ROW + 2, 10).Value = maxX
+    ws.Cells(SUPPORT_ROW + 2, 11).Value = mIntercept + mSlope * maxX
+    USD_WriteHeaders ws.Range("M" & SUPPORT_ROW & ":N" & SUPPORT_ROW), Array("Zero date", "Zero bp")
+    ws.Cells(SUPPORT_ROW + 1, 13).Value = mDailyDate(1)
+    ws.Cells(SUPPORT_ROW + 2, 13).Value = mDailyDate(mDailyN)
+    ws.Range("N" & SUPPORT_ROW + 1 & ":N" & SUPPORT_ROW + 2).Value = 0#
+    USD_WriteHeaders ws.Range("P" & SUPPORT_ROW & ":Q" & SUPPORT_ROW), Array("Zero spread bp", "Zero excess bp")
+    ws.Cells(SUPPORT_ROW + 1, 16).Value = minX
+    ws.Cells(SUPPORT_ROW + 2, 16).Value = maxX
+    ws.Range("Q" & SUPPORT_ROW + 1 & ":Q" & SUPPORT_ROW + 2).Value = 0#
+
+    Set chTime = USD_NewChart(ws, "chtPPTS2Time", XL_XY_LINES, 18, 82, 565, 340)
+    With chTime.Chart
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""6M-ON spread at decision"""
+        s.XValues = ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mDailyN)
+        s.Values = ws.Range("C" & SUPPORT_ROW + 1 & ":C" & SUPPORT_ROW + mDailyN)
+        USD_FormatLineSeries s, USD_Amber(), 1.5, False
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Realized 6M excess return"""
+        s.XValues = ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mDailyN)
+        s.Values = ws.Range("F" & SUPPORT_ROW + 1 & ":F" & SUPPORT_ROW + mDailyN)
+        USD_FormatLineSeries s, USD_Blue(), 1.7, False
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Zero"""
+        s.XValues = ws.Range("M" & SUPPORT_ROW + 1 & ":M" & SUPPORT_ROW + 2)
+        s.Values = ws.Range("N" & SUPPORT_ROW + 1 & ":N" & SUPPORT_ROW + 2)
+        USD_FormatLineSeries s, USD_Gray(), 0.8, True
+        USD_ChartTitle chTime, "PREMIUM PRICED VS REALIZED SIX-MONTH HOLDING RETURN", "Decision date", "Basis points"
+        .HasLegend = True
+        .Legend.Position = XL_LEGEND_TOP
+        .Axes(XL_CATEGORY).TickLabels.NumberFormat = "mmm-yy"
+        On Error Resume Next
+        .Legend.LegendEntries(3).Delete
+        On Error GoTo 0
+    End With
+
+    Set chScatter = USD_NewChart(ws, "chtPPTS2Scatter", XL_XY_SCATTER, 602, 82, 574, 340)
+    With chScatter.Chart
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Daily decisions"""
+        s.XValues = ws.Range("C" & SUPPORT_ROW + 1 & ":C" & SUPPORT_ROW + mDailyN)
+        s.Values = ws.Range("F" & SUPPORT_ROW + 1 & ":F" & SUPPORT_ROW + mDailyN)
+        With s
+            .ChartType = XL_XY_SCATTER
+            .MarkerStyle = XL_MARKER_CIRCLE
+            .MarkerSize = 4
+            .MarkerForegroundColor = USD_Blue()
+            .MarkerBackgroundColor = RGB(255, 255, 255)
+            .Format.Line.Visible = MSO_FALSE
+        End With
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Linear fit"""
+        s.XValues = ws.Range("J" & SUPPORT_ROW + 1 & ":J" & SUPPORT_ROW + 2)
+        s.Values = ws.Range("K" & SUPPORT_ROW + 1 & ":K" & SUPPORT_ROW + 2)
+        USD_FormatLineSeries s, USD_Navy(), 2.4, False
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Zero"""
+        s.XValues = ws.Range("P" & SUPPORT_ROW + 1 & ":P" & SUPPORT_ROW + 2)
+        s.Values = ws.Range("Q" & SUPPORT_ROW + 1 & ":Q" & SUPPORT_ROW + 2)
+        USD_FormatLineSeries s, USD_Gray(), 0.8, True
+        USD_ChartTitle chScatter, "SPREAD AT DECISION VS REALIZED 6M EXCESS", "6M-ON spread at decision | bp", "Realized 6M excess return | bp"
+        .HasLegend = False
+        On Error Resume Next
+        .Axes(XL_CATEGORY).MinimumScale = -100#
+        .Axes(XL_CATEGORY).MaximumScale = 180#
+        .Axes(XL_VALUE).MinimumScale = -35#
+        .Axes(XL_VALUE).MaximumScale = 20#
+        On Error GoTo 0
+    End With
+
+    ws.Range("A24:F24").Merge
+    USD_SectionHeader ws.Range("A24:F24"), "OBSERVED SIGNAL QUALITY"
+    USD_WriteMetric ws, "A25:C27", "Correlation", Format(mCorr, "0.00"), "Negative, not economically stable"
+    USD_WriteMetric ws, "D25:F27", "R-squared", Format(mR2, "0.0%"), "Only a small share of outcomes explained"
+    USD_WriteMetric ws, "G25:I27", "6M win rate", Format(mHitRate, "0.0%"), "Across eligible daily decisions"
+    USD_WriteMetric ws, "J25:L27", "Top-spread quartile", Format(mQ4Mean, "+0.0;-0.0;0.0") & " bp", "Average realized 6M excess"
+    USD_WriteMetric ws, "M25:O27", "Top-quartile hit", Format(mQ4Hit, "0.0%"), "6M positive excess frequency"
+    USD_WriteMetric ws, "P25:R27", "Decisions", Format(mDailyN, "#,##0"), "Complete six-month horizons"
+
+    ws.Range("A29:R33").Merge
+    With ws.Range("A29:R33")
+        .Value = "RISK INTERPRETATION" & vbLf & _
+                 "The inception spread contains information about compensation, but it is not a dependable standalone forecast of relative return. The negative slope, low explanatory power and weak hit rate—particularly when the premium was largest—show that subsequent policy repricing dominated the initial carry signal."
+        USD_BodyBox .Cells, USD_LightAmber(), USD_Navy()
+        .Font.Size = 12
+    End With
+
+    ws.Range("A35:V38").Merge
+    With ws.Range("A35:V38")
+        .Value = "KEY MESSAGE  |  DO NOT TURN A SINGLE CURVE SPREAD INTO A CONCENTRATED MATURITY BET. PREMIUM MEASURES COMPENSATION; REALIZED RETURN IS PATH-DEPENDENT."
+        USD_ConclusionBox .Cells
+    End With
+    USD_SetPrint ws, "$A$1:$V$38"
+End Sub
+
+Private Sub USD_BuildSlide3Sheet()
+
+    Dim ws As Worksheet
+    Dim i As Long
+    Dim t As Long
+    Dim chPath As ChartObject
+    Dim chReturn As ChartObject
+    Dim s As Series
+    Dim endIdx As Long
+
+    Set ws = USD_GetOrCreateSheet(S3)
+    USD_ResetOutputSheet ws
+    USD_SetCanvas ws, 24
+    USD_Title ws, "3 | INVERT THE RATE PATH: DIRECTIONAL CONCENTRATION PRODUCES ASYMMETRIC REGRET", _
+        "Observed tenor moves and their mirror image are placed on the same positive-level anchor for a like-for-like stress"
+
+    'Full, comparable rate paths.
+    USD_WriteHeaders ws.Range("A" & SUPPORT_ROW & ":I" & SUPPORT_ROW), _
+        Array("Date", "Realized ON", "Realized 1M", "Realized 3M", "Realized 6M", _
+              "Inverted ON", "Inverted 1M", "Inverted 3M", "Inverted 6M")
+    For i = 1 To mCurveN
+        ws.Cells(SUPPORT_ROW + i, 1).Value = mDate(i)
+        For t = 1 To 4
+            ws.Cells(SUPPORT_ROW + i, 1 + t).Value = USD_PathRate(t, i, 1)
+            ws.Cells(SUPPORT_ROW + i, 5 + t).Value = USD_PathRate(t, i, 2)
+        Next t
+    Next i
+    ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mCurveN).NumberFormat = "dd-mmm-yyyy"
+    ws.Range("B" & SUPPORT_ROW + 1 & ":I" & SUPPORT_ROW + mCurveN).NumberFormat = "0.0000%"
+    USD_AddTable ws, ws.Range("A" & SUPPORT_ROW & ":I" & SUPPORT_ROW + mCurveN), "tblPPTS3Paths"
+
+    'Every monthly six-month decision used in the scenario comparison.
+    USD_WriteHeaders ws.Range("K" & SUPPORT_ROW & ":AC" & SUPPORT_ROW), _
+        Array("Start", "Maturity", "Up ON", "Up 1M", "Up 3M", "Up 6M", _
+              "Down ON", "Down 1M", "Down 3M", "Down 6M", _
+              "Up 1M excess bp", "Up 3M excess bp", "Up 6M excess bp", _
+              "Down 1M excess bp", "Down 3M excess bp", "Down 6M excess bp", _
+              "Up winner", "Down winner", "Method")
+    For i = 1 To mMonthlyN
+        ws.Cells(SUPPORT_ROW + i, 11).Value = mDate(mMonthlyStart(i))
+        endIdx = USD_FloorIndex(CDbl(DateAdd("m", 6, CDate(mDate(mMonthlyStart(i))))))
+        ws.Cells(SUPPORT_ROW + i, 12).Value = mDate(endIdx)
+        For t = 1 To 4
+            ws.Cells(SUPPORT_ROW + i, 12 + t).Value = mUpReturn(i, t)
+            ws.Cells(SUPPORT_ROW + i, 16 + t).Value = mDownReturn(i, t)
+        Next t
+        For t = 2 To 4
+            ws.Cells(SUPPORT_ROW + i, 19 + t).Value = (mUpReturn(i, t) - mUpReturn(i, 1)) * 10000#
+            ws.Cells(SUPPORT_ROW + i, 22 + t).Value = (mDownReturn(i, t) - mDownReturn(i, 1)) * 10000#
+        Next t
+        ws.Cells(SUPPORT_ROW + i, 27).Value = USD_TenorName(USD_BestTenor(mUpReturn, i))
+        ws.Cells(SUPPORT_ROW + i, 28).Value = USD_TenorName(USD_BestTenor(mDownReturn, i))
+        ws.Cells(SUPPORT_ROW + i, 29).Value = "ACT/360; first observation each month"
+    Next i
+    ws.Range("K" & SUPPORT_ROW + 1 & ":L" & SUPPORT_ROW + mMonthlyN).NumberFormat = "dd-mmm-yyyy"
+    ws.Range("M" & SUPPORT_ROW + 1 & ":T" & SUPPORT_ROW + mMonthlyN).NumberFormat = "0.0000%"
+    ws.Range("U" & SUPPORT_ROW + 1 & ":Z" & SUPPORT_ROW + mMonthlyN).NumberFormat = "+0.0;-0.0;0.0"
+    USD_AddTable ws, ws.Range("K" & SUPPORT_ROW & ":AC" & SUPPORT_ROW + mMonthlyN), "tblPPTS3Monthly"
+
+    USD_WriteHeaders ws.Range("AE" & SUPPORT_ROW & ":AG" & SUPPORT_ROW), Array("Tenor", "Rates rise: avg excess bp", "Rates fall: avg excess bp")
+    For t = 2 To 4
+        ws.Cells(SUPPORT_ROW + t - 1, 31).Value = USD_TenorName(t)
+        ws.Cells(SUPPORT_ROW + t - 1, 32).Value = mUpExcess(t)
+        ws.Cells(SUPPORT_ROW + t - 1, 33).Value = mDownExcess(t)
+    Next t
+    USD_AddTable ws, ws.Range("AE" & SUPPORT_ROW & ":AG" & SUPPORT_ROW + 3), "tblPPTS3Summary"
+
+    Set chPath = USD_NewChart(ws, "chtPPTS3Paths", XL_XY_LINES, 18, 82, 720, 340)
+    With chPath.Chart
+        For t = 1 To 4
+            Set s = .SeriesCollection.NewSeries
+            s.Name = "=""Rates rise | " & USD_TenorName(t) & """"
+            s.XValues = ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mCurveN)
+            s.Values = ws.Range(ws.Cells(SUPPORT_ROW + 1, 1 + t), ws.Cells(SUPPORT_ROW + mCurveN, 1 + t))
+            USD_FormatLineSeries s, USD_TenorColor(t), 1.55, False
+        Next t
+        For t = 1 To 4
+            Set s = .SeriesCollection.NewSeries
+            s.Name = "=""Rates fall | " & USD_TenorName(t) & """"
+            s.XValues = ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mCurveN)
+            s.Values = ws.Range(ws.Cells(SUPPORT_ROW + 1, 5 + t), ws.Cells(SUPPORT_ROW + mCurveN, 5 + t))
+            USD_FormatLineSeries s, USD_TenorColor(t), 1.55, True
+        Next t
+        USD_ChartTitle chPath, "COMPARABLE RATE PATHS | COMMON 5.50% ON ANCHOR", "Date", "Rate"
+        .HasLegend = True
+        .Legend.Position = XL_LEGEND_TOP
+        .Axes(XL_VALUE).MinimumScale = 0#
+        .Axes(XL_VALUE).MaximumScale = 0.12
+        .Axes(XL_VALUE).MajorUnit = 0.02
+        .Axes(XL_VALUE).TickLabels.NumberFormat = "0%"
+        .Axes(XL_CATEGORY).TickLabels.NumberFormat = "mmm-yy"
+    End With
+
+    Set chReturn = USD_NewChart(ws, "chtPPTS3Return", XL_COLUMN_CLUSTERED, 755, 82, 426, 340)
+    With chReturn.Chart
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Rates rise"""
+        s.XValues = ws.Range("AE" & SUPPORT_ROW + 1 & ":AE" & SUPPORT_ROW + 3)
+        s.Values = ws.Range("AF" & SUPPORT_ROW + 1 & ":AF" & SUPPORT_ROW + 3)
+        s.Format.Fill.ForeColor.RGB = USD_Blue()
+        s.Format.Line.ForeColor.RGB = USD_Blue()
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Rates fall"""
+        s.XValues = ws.Range("AE" & SUPPORT_ROW + 1 & ":AE" & SUPPORT_ROW + 3)
+        s.Values = ws.Range("AG" & SUPPORT_ROW + 1 & ":AG" & SUPPORT_ROW + 3)
+        s.Format.Fill.ForeColor.RGB = USD_Amber()
+        s.Format.Line.ForeColor.RGB = USD_Amber()
+        USD_ChartTitle chReturn, "AVERAGE EXCESS RETURN VS ON", "Tenor", "Basis points"
+        .HasLegend = True
+        .Legend.Position = XL_LEGEND_TOP
+        .ApplyDataLabels
+        .SeriesCollection(1).DataLabels.NumberFormat = "+0.0;-0.0;0.0"
+        .SeriesCollection(2).DataLabels.NumberFormat = "+0.0;-0.0;0.0"
+        .Axes(XL_VALUE).MinimumScale = -20#
+        .Axes(XL_VALUE).MaximumScale = 20#
+        .Axes(XL_VALUE).MajorUnit = 5#
+    End With
+
+    ws.Range("A24:H24").Merge
+    USD_SectionHeader ws.Range("A24:H24"), "SCENARIO DESIGN | SAME START, OPPOSITE MOVE"
+    ws.Range("A25:H30").Merge
+    With ws.Range("A25:H30")
+        .Value = "Both scenarios retain the initial tenor structure and use the same 5.50% ON anchor." & vbLf & _
+                 "Rates rise: each tenor follows its observed change from the first curve date." & vbLf & _
+                 "Rates fall: each tenor change is reflected around its initial level." & vbLf & _
+                 "All rates remain on positive, directly comparable levels; returns use the same reset and ACT/360 conventions."
+        USD_BodyBox .Cells, USD_LightBlue(), USD_Navy()
+    End With
+
+    USD_WriteMetric ws, "J24:M27", "Rates rise | 6M", Format(mUpExcess(4), "+0.0;-0.0;0.0") & " bp", "Average excess vs ON")
+    USD_WriteMetric ws, "N24:Q27", "Rates fall | 6M", Format(mDownExcess(4), "+0.0;-0.0;0.0") & " bp", "Average excess vs ON")
+    USD_WriteMetric ws, "R24:U27", "Falling-path 6M wins", CStr(mDownWins(4)) & " / " & CStr(mMonthlyN), "Monthly six-month starts")
+    USD_WriteMetric ws, "J28:M31", "Rising-path ON wins", CStr(mUpWins(1)) & " / " & CStr(mMonthlyN), "Directional reset advantage")
+    USD_WriteMetric ws, "N28:Q31", "Rising-path 6M", Format(mUpWins(4), "0") & " wins", "Lock-in disadvantage")
+    USD_WriteMetric ws, "R28:U31", "Stress decisions", Format(mMonthlyN, "0"), "First observation per month")
+
+    ws.Range("A33:V37").Merge
+    With ws.Range("A33:V37")
+        .Value = "KEY MESSAGE  |  IF RATES RISE, SHORT RESETTING TENORS DEFEND RETURN; IF RATES FALL, LOCKED 6M PROTECTS CARRY. A ONE-DIRECTION POSITION CONVERTS FORECAST ERROR INTO MATERIAL REGRET."
+        USD_ConclusionBox .Cells
+    End With
+    USD_SetPrint ws, "$A$1:$V$37"
+End Sub
+
+Private Sub USD_BuildSlide4Sheet()
+
+    Dim ws As Worksheet
+    Dim src As Worksheet
+    Dim srcLast As Long
+    Dim portfolioData As Variant
+    Dim i As Long
+    Dim t As Long
+    Dim chMix As ChartObject
+    Dim chRegret As ChartObject
+    Dim s As Series
+    Dim robustTargetRow As Long
+
+    Set ws = USD_GetOrCreateSheet(S4)
+    USD_ResetOutputSheet ws
+    USD_SetCanvas ws, 22
+    USD_Title ws, "4 | ALLOCATE ACROSS RESET SPEEDS TO CONTROL FORECAST ERROR", _
+        "A risk-managed liquidity portfolio balances reinvestment opportunity, carry lock-in and directional regret"
+
+    USD_WriteHeaders ws.Range("A" & SUPPORT_ROW & ":E" & SUPPORT_ROW), Array("Portfolio", "ON", "1M", "3M", "6M")
+    ws.Cells(SUPPORT_ROW + 1, 1).Value = "Reference mix"
+    For t = 1 To 4
+        ws.Cells(SUPPORT_ROW + 1, 1 + t).Value = mMix(t)
+    Next t
+    ws.Range("B" & SUPPORT_ROW + 1 & ":E" & SUPPORT_ROW + 1).NumberFormat = "0%"
+
+    USD_WriteHeaders ws.Range("G" & SUPPORT_ROW & ":H" & SUPPORT_ROW), Array("Portfolio", "Worst-direction regret bp")
+    ws.Cells(SUPPORT_ROW + 1, 7).Value = "100% ON"
+    ws.Cells(SUPPORT_ROW + 1, 8).Value = mONWorstRegret
+    ws.Cells(SUPPORT_ROW + 2, 7).Value = "100% 6M"
+    ws.Cells(SUPPORT_ROW + 2, 8).Value = mSixWorstRegret
+    ws.Cells(SUPPORT_ROW + 3, 7).Value = "Reference mix"
+    ws.Cells(SUPPORT_ROW + 3, 8).Value = mMixWorstRegret
+
+    'Preserve the complete portfolio grid for review and re-performance.
+    Set src = ThisWorkbook.Worksheets("F_Portfolios")
+    srcLast = src.Cells(src.Rows.Count, "A").End(xlUp).Row
+    portfolioData = src.Range("A1:L" & srcLast).Value2
+    ws.Range("J" & SUPPORT_ROW & ":U" & SUPPORT_ROW + srcLast - 1).Value2 = portfolioData
+    USD_AddTable ws, ws.Range("J" & SUPPORT_ROW & ":U" & SUPPORT_ROW + srcLast - 1), "tblPPTS4PortfolioGrid"
+    robustTargetRow = SUPPORT_ROW + mRobustRow - 1
+    With ws.Range("J" & robustTargetRow & ":U" & robustTargetRow)
+        .Interior.Color = USD_LightAmber()
+        .Font.Bold = True
+    End With
+    ws.Range("J" & SUPPORT_ROW + 1 & ":Q" & SUPPORT_ROW + srcLast - 1).NumberFormat = "0.0000%"
+    ws.Range("R" & SUPPORT_ROW + 1 & ":S" & SUPPORT_ROW + srcLast - 1).NumberFormat = "0.0000"
+    ws.Range("T" & SUPPORT_ROW + 1 & ":T" & SUPPORT_ROW + srcLast - 1).NumberFormat = "0.0"
+
+    Set chMix = USD_NewChart(ws, "chtPPTS4Mix", XL_BAR_STACKED, 18, 82, 550, 270)
+    With chMix.Chart
+        For t = 1 To 4
+            Set s = .SeriesCollection.NewSeries
+            s.Name = "=""" & USD_TenorName(t) & """"
+            s.XValues = ws.Range("A" & SUPPORT_ROW + 1)
+            s.Values = ws.Cells(SUPPORT_ROW + 1, 1 + t)
+            s.Format.Fill.ForeColor.RGB = USD_TenorColor(t)
+            s.Format.Line.ForeColor.RGB = RGB(255, 255, 255)
+        Next t
+        USD_ChartTitle chMix, "REFERENCE MATURITY MIX", "Portfolio", "Allocation"
+        .HasLegend = True
+        .Legend.Position = XL_LEGEND_TOP
+        .Axes(XL_VALUE).MinimumScale = 0#
+        .Axes(XL_VALUE).MaximumScale = 1#
+        .Axes(XL_VALUE).TickLabels.NumberFormat = "0%"
+        .ApplyDataLabels
+        For t = 1 To 4
+            .SeriesCollection(t).DataLabels.NumberFormat = "0%"
+        Next t
+    End With
+
+    Set chRegret = USD_NewChart(ws, "chtPPTS4Regret", XL_BAR_CLUSTERED, 590, 82, 590, 270)
+    With chRegret.Chart
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Worst-direction regret"""
+        s.XValues = ws.Range("G" & SUPPORT_ROW + 1 & ":G" & SUPPORT_ROW + 3)
+        s.Values = ws.Range("H" & SUPPORT_ROW + 1 & ":H" & SUPPORT_ROW + 3)
+        s.Format.Fill.ForeColor.RGB = USD_Blue()
+        s.Format.Line.ForeColor.RGB = USD_Blue()
+        USD_ChartTitle chRegret, "REGRET IF THE RATE DIRECTION IS WRONG", "Portfolio", "Basis points"
+        .HasLegend = False
+        .ApplyDataLabels
+        .SeriesCollection(1).DataLabels.NumberFormat = "0.0"
+        .Axes(XL_VALUE).MinimumScale = 0#
+        .Axes(XL_VALUE).MaximumScale = 20#
+        .Axes(XL_VALUE).MajorUnit = 5#
+        .Axes(XL_CATEGORY).ReversePlotOrder = True
+    End With
+
+    ws.Range("A19:J19").Merge
+    USD_SectionHeader ws.Range("A19:J19"), "ROLE OF EACH MATURITY BUCKET"
+    ws.Range("A20:A20").Value = "Bucket"
+    ws.Range("B20:D20").Merge
+    ws.Range("B20").Value = "Portfolio role"
+    ws.Range("E20:G20").Merge
+    ws.Range("E20").Value = "Risk controlled"
+    ws.Range("H20:J20").Merge
+    ws.Range("H20").Value = "Governance condition"
+    With ws.Range("A20:J20")
+        .Interior.Color = USD_Navy()
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .Borders.Color = RGB(255, 255, 255)
+        .Borders.Weight = xlThin
+    End With
+    USD_WriteRoleRow ws, 21, "ON", "Immediate liquidity and fastest reset", "Protects when rates rise", "Maintain operating-liquidity floor"
+    USD_WriteRoleRow ws, 22, "1M", "Near-term bridge and scheduled reset", "Reduces jump between ON and term", "Roll monthly; monitor cash forecast"
+    USD_WriteRoleRow ws, 23, "3M", "Optional intermediate sleeve", "Smooths maturity ladder", "Use only if liquidity and spread justify"
+    USD_WriteRoleRow ws, 24, "6M", "Lock-in sleeve", "Protects carry when rates fall", "Cap concentration; size to risk budget"
+    USD_FormatTableBody ws.Range("A21:J24")
+    ws.Range("A20:J24").WrapText = True
+    ws.Columns("A").ColumnWidth = 9
+    ws.Rows("21:24").RowHeight = 35
+
+    ws.Range("L19:V19").Merge
+    USD_SectionHeader ws.Range("L19:V19"), "REFERENCE MIX | RISK CONTROLS"
+    USD_WriteMetric ws, "L20:O23", "Weighted tenor", Format(mWeightedMonths, "0.0") & " months", "Neutral duration anchor")
+    USD_WriteMetric ws, "P20:S23", "Worst regret", Format(mMixWorstRegret, "0.0") & " bp", "Maximum of two directions")
+    USD_WriteMetric ws, "T20:V23", "Portfolio grid", Format(mPortfolioCount, "#,##0"), "Feasible mixes tested")
+    USD_WriteMetric ws, "L25:O28", "Historical-path regret", Format(mMixHistRegret, "0.0") & " bp", "Rates-rise stress")
+    USD_WriteMetric ws, "P25:S28", "Inverted-path regret", Format(mMixInvRegret, "0.0") & " bp", "Rates-fall stress")
+    USD_WriteMetric ws, "T25:V28", "3M allocation", Format(mMix(3), "0%"), "Zero in reference solution")
+
+    ws.Range("A31:V35").Merge
+    With ws.Range("A31:V35")
+        .Value = "COMMITTEE DECISION  |  APPROVE 10% ON / 20% 1M / 0% 3M / 70% 6M AS THE NEUTRAL REFERENCE MIX. REQUIRE ANY TACTICAL DEVIATION TO IDENTIFY THE RATE-PATH VIEW, LIQUIDITY IMPACT, REGRET LIMIT AND EXIT TRIGGER."
+        USD_ConclusionBox .Cells
+    End With
+    ws.Range("A37:V37").Merge
+    ws.Range("A37").Value = "Risk ownership: Treasury proposes execution; Risk validates limits and scenario impact; Committee approves material deviations."
+    USD_InstructionLine ws.Range("A37:V37")
+    USD_SetPrint ws, "$A$1:$V$37"
+End Sub
+
+Private Sub USD_WriteRoleRow(ByVal ws As Worksheet, ByVal targetRow As Long, _
+                             ByVal bucketText As String, ByVal roleText As String, _
+                             ByVal riskText As String, ByVal governanceText As String)
+    ws.Cells(targetRow, 1).Value = bucketText
+    ws.Range("B" & targetRow & ":D" & targetRow).Merge
+    ws.Cells(targetRow, 2).Value = roleText
+    ws.Range("E" & targetRow & ":G" & targetRow).Merge
+    ws.Cells(targetRow, 5).Value = riskText
+    ws.Range("H" & targetRow & ":J" & targetRow).Merge
+    ws.Cells(targetRow, 8).Value = governanceText
+End Sub
+
+'====================================================================================
+' EXCEL PRESENTATION AND AUDIT HELPERS
+'====================================================================================
+
+Private Function USD_GetOrCreateSheet(ByVal sheetName As String) As Worksheet
+    If USD_SheetExists(sheetName) Then
+        Set USD_GetOrCreateSheet = ThisWorkbook.Worksheets(sheetName)
+    Else
+        Set USD_GetOrCreateSheet = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        USD_GetOrCreateSheet.Name = sheetName
+    End If
+End Function
+
+Private Sub USD_ResetOutputSheet(ByVal ws As Worksheet)
+    Dim i As Long
+    On Error Resume Next
+    For i = ws.ListObjects.Count To 1 Step -1
+        ws.ListObjects(i).Unlist
+    Next i
+    For i = ws.Shapes.Count To 1 Step -1
+        ws.Shapes(i).Delete
+    Next i
+    ws.Cells.UnMerge
+    ws.Cells.Clear
+    ws.Cells.ClearFormats
+    On Error GoTo 0
+End Sub
+
+Private Sub USD_SetCanvas(ByVal ws As Worksheet, ByVal canvasColumns As Long)
+    Dim i As Long
+    With ws.Cells
+        .Font.Name = FONT_NAME
+        .Font.Size = 10
+        .Font.Color = USD_Gray()
+        .VerticalAlignment = xlCenter
+    End With
+    For i = 1 To canvasColumns
+        ws.Columns(i).ColumnWidth = 9
+    Next i
+    ws.Rows("1:2").RowHeight = 27
+    ws.Rows("3:39").RowHeight = 20
+    ws.Tab.Color = USD_Blue()
+    On Error Resume Next
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+    ActiveWindow.Zoom = 82
+    On Error GoTo 0
+End Sub
+
+Private Sub USD_Title(ByVal ws As Worksheet, ByVal titleText As String, ByVal subtitleText As String)
+    Dim endColumn As String
+    If ws.Name = S_AUDIT Then
+        endColumn = "G"
+    ElseIf ws.Name = S_INDEX Then
+        endColumn = "T"
+    Else
+        endColumn = "V"
+    End If
+    ws.Range("A1:" & endColumn & "1").Merge
+    With ws.Range("A1:" & endColumn & "1")
+        .Value = titleText
+        .Interior.Color = USD_Navy()
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .Font.Size = 18
+        .HorizontalAlignment = xlLeft
+        .IndentLevel = 1
+    End With
+    ws.Range("A2:" & endColumn & "2").Merge
+    With ws.Range("A2:" & endColumn & "2")
+        .Value = subtitleText
+        .Interior.Color = RGB(232, 238, 246)
+        .Font.Color = USD_Navy()
+        .Font.Italic = True
+        .Font.Size = 11
+        .HorizontalAlignment = xlLeft
+        .IndentLevel = 1
+    End With
+End Sub
+
+Private Sub USD_SectionHeader(ByVal rng As Range, ByVal headerText As String)
+    With rng
+        .Value = headerText
+        .Interior.Color = USD_Blue()
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .Font.Size = 10
+        .HorizontalAlignment = xlLeft
+        .IndentLevel = 1
+    End With
+End Sub
+
+Private Sub USD_BodyBox(ByVal rng As Range, ByVal fillColor As Long, ByVal fontColor As Long)
+    With rng
+        .Interior.Color = fillColor
+        .Font.Color = fontColor
+        .Font.Size = 11
+        .WrapText = True
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+        .IndentLevel = 1
+        .Borders.Color = RGB(205, 213, 223)
+        .Borders.Weight = xlThin
+    End With
+End Sub
+
+Private Sub USD_ConclusionBox(ByVal rng As Range)
+    With rng
+        .Interior.Color = USD_Navy()
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .Font.Size = 14
+        .WrapText = True
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+        .IndentLevel = 1
+        .Borders.Color = USD_Amber()
+        .Borders.Weight = xlMedium
+    End With
+End Sub
+
+Private Sub USD_InstructionLine(ByVal rng As Range)
+    With rng
+        .Interior.Color = RGB(245, 247, 250)
+        .Font.Color = USD_Gray()
+        .Font.Italic = True
+        .Font.Size = 9
+        .HorizontalAlignment = xlLeft
+        .IndentLevel = 1
+    End With
+End Sub
+
+Private Sub USD_WriteHeaders(ByVal targetRange As Range, ByVal headerValues As Variant)
+    Dim i As Long
+    Dim firstCol As Long
+    firstCol = targetRange.Column
+    For i = LBound(headerValues) To UBound(headerValues)
+        targetRange.Worksheet.Cells(targetRange.Row, firstCol + i - LBound(headerValues)).Value = headerValues(i)
+    Next i
+    With targetRange
+        .Interior.Color = USD_Navy()
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .WrapText = True
+        .HorizontalAlignment = xlCenter
+        .Borders.Color = RGB(255, 255, 255)
+        .Borders.Weight = xlThin
+    End With
+End Sub
+
+Private Sub USD_WriteArrayRow(ByVal firstCell As Range, ByVal values As Variant)
+    Dim i As Long
+    For i = LBound(values) To UBound(values)
+        firstCell.Offset(0, i - LBound(values)).Value = values(i)
+    Next i
+End Sub
+
+Private Sub USD_FormatTableBody(ByVal rng As Range)
+    With rng
+        .Borders.Color = RGB(215, 220, 228)
+        .Borders.Weight = xlThin
+        .VerticalAlignment = xlCenter
+        .WrapText = True
+    End With
+End Sub
+
+Private Sub USD_WriteMetric(ByVal ws As Worksheet, ByVal addressText As String, _
+                            ByVal labelText As String, ByVal valueText As String, _
+                            ByVal noteText As String)
+    Dim rng As Range
+    Set rng = ws.Range(addressText)
+    rng.Merge
+    With rng
+        .Value = UCase$(labelText) & vbLf & valueText & vbLf & noteText
+        .Interior.Color = RGB(245, 247, 250)
+        .Font.Color = USD_Navy()
+        .Font.Size = 10
+        .WrapText = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .Borders.Color = RGB(205, 213, 223)
+        .Borders.Weight = xlThin
+    End With
+    rng.Characters(Len(labelText) + 2, Len(valueText)).Font.Bold = True
+    rng.Characters(Len(labelText) + 2, Len(valueText)).Font.Size = 16
+End Sub
+
+Private Sub USD_AddTable(ByVal ws As Worksheet, ByVal sourceRange As Range, ByVal tableName As String)
+    Dim lo As ListObject
+    Set lo = ws.ListObjects.Add(xlSrcRange, sourceRange, , xlYes)
+    lo.Name = tableName
+    lo.TableStyle = "TableStyleMedium2"
+    lo.ShowTableStyleRowStripes = True
+End Sub
+
+Private Function USD_NewChart(ByVal ws As Worksheet, ByVal chartName As String, _
+                              ByVal chartTypeValue As Long, ByVal leftValue As Double, _
+                              ByVal topValue As Double, ByVal widthValue As Double, _
+                              ByVal heightValue As Double) As ChartObject
+    Dim ch As ChartObject
+    Dim i As Long
+    Set ch = ws.ChartObjects.Add(leftValue, topValue, widthValue, heightValue)
+    ch.Name = chartName
+    ch.Chart.ChartType = chartTypeValue
+    For i = ch.Chart.SeriesCollection.Count To 1 Step -1
+        ch.Chart.SeriesCollection(i).Delete
+    Next i
+    Set USD_NewChart = ch
+End Function
+
+Private Sub USD_FormatLineSeries(ByVal s As Series, ByVal lineColor As Long, _
+                                 ByVal lineWeight As Double, ByVal dashed As Boolean)
+    With s
+        .ChartType = XL_XY_LINES
+        .MarkerStyle = XL_MARKER_NONE
+        .Format.Line.Visible = MSO_TRUE
+        .Format.Line.ForeColor.RGB = lineColor
+        .Format.Line.Weight = lineWeight
+        If dashed Then .Format.Line.DashStyle = MSO_LINE_DASH
+    End With
+End Sub
+
+Private Sub USD_ChartTitle(ByVal ch As ChartObject, ByVal titleText As String, _
+                           ByVal xAxisText As String, ByVal yAxisText As String)
+    With ch.Chart
+        .HasTitle = True
+        .ChartTitle.Text = titleText
+        .ChartTitle.Format.TextFrame2.TextRange.Font.Name = FONT_NAME
+        .ChartTitle.Format.TextFrame2.TextRange.Font.Size = 12
+        .ChartTitle.Format.TextFrame2.TextRange.Font.Bold = MSO_TRUE
+        .ChartTitle.Format.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = USD_Navy()
+        .HasLegend = True
+        .ChartArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+        .ChartArea.Format.Line.ForeColor.RGB = RGB(205, 213, 223)
+        .PlotArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+        On Error Resume Next
+        .Axes(XL_CATEGORY).HasTitle = True
+        .Axes(XL_CATEGORY).AxisTitle.Text = xAxisText
+        .Axes(XL_CATEGORY).AxisTitle.Font.Name = FONT_NAME
+        .Axes(XL_CATEGORY).AxisTitle.Font.Size = 9
+        .Axes(XL_VALUE).HasTitle = True
+        .Axes(XL_VALUE).AxisTitle.Text = yAxisText
+        .Axes(XL_VALUE).AxisTitle.Font.Name = FONT_NAME
+        .Axes(XL_VALUE).AxisTitle.Font.Size = 9
+        .Axes(XL_VALUE).HasMajorGridlines = True
+        .Axes(XL_VALUE).MajorGridlines.Format.Line.ForeColor.RGB = RGB(225, 229, 235)
+        .Axes(XL_CATEGORY).TickLabels.Font.Name = FONT_NAME
+        .Axes(XL_VALUE).TickLabels.Font.Name = FONT_NAME
+        .Legend.Font.Name = FONT_NAME
+        .Legend.Font.Size = 9
+        On Error GoTo 0
+    End With
+End Sub
+
+Private Sub USD_ColorAuditStatus(ByVal statusRange As Range)
+    Dim cell As Range
+    For Each cell In statusRange.Cells
+        If UCase$(CStr(cell.Value)) = "PASS" Then
+            cell.Interior.Color = USD_LightGreen()
+            cell.Font.Color = USD_Green()
+        Else
+            cell.Interior.Color = USD_LightRed()
+            cell.Font.Color = USD_Red()
+        End If
+    Next cell
+End Sub
+
+Private Sub USD_SetPrint(ByVal ws As Worksheet, ByVal printAreaText As String)
+    On Error Resume Next
+    With ws.PageSetup
+        .PrintArea = printAreaText
+        .Orientation = xlLandscape
+        .Zoom = False
+        .FitToPagesWide = 1
+        .FitToPagesTall = 1
+        .LeftMargin = Application.InchesToPoints(0.25)
+        .RightMargin = Application.InchesToPoints(0.25)
+        .TopMargin = Application.InchesToPoints(0.35)
+        .BottomMargin = Application.InchesToPoints(0.35)
+        .CenterHorizontally = True
+    End With
+    On Error GoTo 0
+End Sub
+
+Private Function USD_TenorColor(ByVal tenorIndex As Long) As Long
+    Select Case tenorIndex
+        Case 1: USD_TenorColor = USD_Navy()
+        Case 2: USD_TenorColor = USD_Blue()
+        Case 3: USD_TenorColor = RGB(33, 145, 140)
+        Case 4: USD_TenorColor = USD_Amber()
+    End Select
+End Function
+
+Private Function USD_Navy() As Long
+    USD_Navy = RGB(23, 54, 93)
+End Function
+
+Private Function USD_Blue() As Long
+    USD_Blue = RGB(16, 102, 150)
+End Function
+
+Private Function USD_Amber() As Long
+    USD_Amber = RGB(229, 148, 0)
+End Function
+
+Private Function USD_Gray() As Long
+    USD_Gray = RGB(86, 95, 109)
+End Function
+
+Private Function USD_Green() As Long
+    USD_Green = RGB(35, 110, 72)
+End Function
+
+Private Function USD_Red() As Long
+    USD_Red = RGB(176, 50, 50)
+End Function
+
+Private Function USD_LightBlue() As Long
+    USD_LightBlue = RGB(232, 241, 248)
+End Function
+
+Private Function USD_LightAmber() As Long
+    USD_LightAmber = RGB(255, 244, 218)
+End Function
+
+Private Function USD_LightGreen() As Long
+    USD_LightGreen = RGB(226, 241, 232)
+End Function
+
+Private Function USD_LightRed() As Long
+    USD_LightRed = RGB(250, 229, 229)
+End Function
+
+Private Sub USD_BuildAuditSheet()
+
+    Dim ws As Worksheet
+    Dim auditRow As Long
+    Dim allPass As Boolean
+    Dim expectedStart As Double
+    Dim expectedEnd As Double
+    Dim dailyJan As Long
+    Dim dailyJul As Long
+
+    Set ws = USD_GetOrCreateSheet(S_AUDIT)
+    USD_ResetOutputSheet ws
+    USD_SetCanvas ws, 13
+    USD_Title ws, "MODEL AUDIT | SOURCE, METHOD AND REFERENCE-VALUE RECONCILIATION", _
+        "Review this sheet before any chart or conclusion is transferred to PowerPoint"
+
+    USD_WriteHeaders ws.Range("A6:G6"), Array("Check", "Actual", "Expected", "Tolerance", "Status", "Source / method", "Risk note")
+    auditRow = 7
+    allPass = True
+    expectedStart = CDbl(DateSerial(2022, 1, 3))
+    expectedEnd = CDbl(DateSerial(2026, 7, 10))
+    dailyJan = USD_DailyIndex(expectedStart)
+    dailyJul = USD_DailyIndex(CDbl(DateSerial(2024, 7, 1)))
+
+    USD_AddAudit ws, auditRow, "Required sheet: Curve", USD_SheetExists("Curve"), True, 0#, "Workbook structure", "Rates cannot be rebuilt without Curve.", allPass
+    USD_AddAudit ws, auditRow, "Required sheet: F_Portfolios", USD_SheetExists("F_Portfolios"), True, 0#, "Workbook structure", "Allocation result cannot be rebuilt without portfolio grid.", allPass
+    USD_AddAudit ws, auditRow, "Curve observations", mCurveN, 1127, 0#, "Curve!A:E", "Reference workbook row count.", allPass
+    USD_AddAudit ws, auditRow, "Curve start date", mDate(1), expectedStart, 0#, "Curve!A2", "Dates must remain aligned with reference analysis.", allPass, "dd-mmm-yyyy"
+    USD_AddAudit ws, auditRow, "Curve end date", mDate(mCurveN), expectedEnd, 0#, "Curve final row", "Latest observation used by reference analysis.", allPass, "dd-mmm-yyyy"
+    USD_AddAudit ws, auditRow, "Eligible daily decisions", mDailyN, 1003, 0#, "Six-month horizon filter", "Slide 2 sample size.", allPass
+    USD_AddAudit ws, auditRow, "Monthly scenario starts", mMonthlyN, 49, 0#, "First observation per month", "Slide 3 sample size.", allPass
+    USD_AddAudit ws, auditRow, "Jan-22 6M excess bp", mDailyExcess(dailyJan), -10.1258, 0.001, "Daily return engine", "Positive inception premium did not offset rapid tightening.", allPass, "+0.0000;-0.0000;0.0000"
+    USD_AddAudit ws, auditRow, "Jul-24 6M excess bp", mDailyExcess(dailyJul), 10.9661, 0.001, "Daily return engine", "Locked 6M outperformed as ON fell.", allPass, "+0.0000;-0.0000;0.0000"
+    USD_AddAudit ws, auditRow, "Spread/outcome correlation", mCorr, -0.2792907, 0.000001, "Daily regression", "Direction and magnitude are reference diagnostics.", allPass, "0.000000"
+    USD_AddAudit ws, auditRow, "Regression R-squared", mR2, 0.0780033, 0.000001, "Correlation squared", "Low standalone explanatory power.", allPass, "0.000000"
+    USD_AddAudit ws, auditRow, "6M win rate", mHitRate, 0.3160518, 0.000001, "Daily excess > 0", "Share of decisions where 6M beat rolled ON.", allPass, "0.0000%"
+    USD_AddAudit ws, auditRow, "Top-spread quartile mean bp", mQ4Mean, -9.62522, 0.001, "Sorted daily spreads", "Highest premiums did not deliver positive average excess.", allPass, "+0.0000;-0.0000;0.0000"
+    USD_AddAudit ws, auditRow, "Top-spread quartile hit", mQ4Hit, 0.262948, 0.000001, "Sorted daily spreads", "Weak realized win frequency.", allPass, "0.0000%"
+    USD_AddAudit ws, auditRow, "Rates-rise 6M excess bp", mUpExcess(4), -15.03438, 0.001, "Monthly directional stress", "Lock-in cost when rates rise.", allPass, "+0.0000;-0.0000;0.0000"
+    USD_AddAudit ws, auditRow, "Rates-fall 6M excess bp", mDownExcess(4), 17.63904, 0.001, "Monthly directional stress", "Carry protection when rates fall.", allPass, "+0.0000;-0.0000;0.0000"
+    USD_AddAudit ws, auditRow, "Rates-fall 6M wins", mDownWins(4), 48, 0#, "Monthly best-tenor test", "6M dominated most falling-path decisions.", allPass
+    USD_AddAudit ws, auditRow, "Portfolio combinations", mPortfolioCount, 286, 0#, "F_Portfolios", "Feasible allocation set.", allPass
+    USD_AddAudit ws, auditRow, "Reference ON weight", mMix(1), 0.1, 0.000001, "Is_Robust = TRUE", "Reference allocation.", allPass, "0%"
+    USD_AddAudit ws, auditRow, "Reference 1M weight", mMix(2), 0.2, 0.000001, "Is_Robust = TRUE", "Reference allocation.", allPass, "0%"
+    USD_AddAudit ws, auditRow, "Reference 3M weight", mMix(3), 0#, 0.000001, "Is_Robust = TRUE", "Reference allocation.", allPass, "0%"
+    USD_AddAudit ws, auditRow, "Reference 6M weight", mMix(4), 0.7, 0.000001, "Is_Robust = TRUE", "Reference allocation.", allPass, "0%"
+    USD_AddAudit ws, auditRow, "Reference worst regret bp", mMixWorstRegret, 5.5214, 0.001, "F_Portfolios", "Max of directional regrets.", allPass, "0.0000"
+    USD_AddAudit ws, auditRow, "100% ON worst regret bp", mONWorstRegret, 17.7033, 0.001, "F_Portfolios", "Falling-rate concentration.", allPass, "0.0000"
+    USD_AddAudit ws, auditRow, "100% 6M worst regret bp", mSixWorstRegret, 7.22146, 0.001, "F_Portfolios", "Rising-rate concentration.", allPass, "0.0000"
+    USD_AddAudit ws, auditRow, "Slide 1 chart count", ThisWorkbook.Worksheets(S1).ChartObjects.Count, 1, 0#, S1, "Native Excel charts generated.", allPass
+    USD_AddAudit ws, auditRow, "Slide 2 chart count", ThisWorkbook.Worksheets(S2).ChartObjects.Count, 2, 0#, S2, "Native Excel charts generated.", allPass
+    USD_AddAudit ws, auditRow, "Slide 3 chart count", ThisWorkbook.Worksheets(S3).ChartObjects.Count, 2, 0#, S3, "Native Excel charts generated.", allPass
+    USD_AddAudit ws, auditRow, "Slide 4 chart count", ThisWorkbook.Worksheets(S4).ChartObjects.Count, 2, 0#, S4, "Native Excel charts generated.", allPass
+
+    ws.Columns("A").ColumnWidth = 31
+    ws.Columns("B:C").ColumnWidth = 17
+    ws.Columns("D").ColumnWidth = 12
+    ws.Columns("E").ColumnWidth = 11
+    ws.Columns("F").ColumnWidth = 28
+    ws.Columns("G").ColumnWidth = 48
+    ws.Range("A6:G" & auditRow - 1).WrapText = True
+    ws.Rows("7:" & auditRow - 1).RowHeight = 31
+    USD_FormatTableBody ws.Range("A7:G" & auditRow - 1)
+    ws.Range("E7:E" & auditRow - 1).Font.Bold = True
+    USD_ColorAuditStatus ws.Range("E7:E" & auditRow - 1)
+
+    ws.Range("A3:G4").Merge
+    With ws.Range("A3:G4")
+        If allPass Then
+            .Value = "CONTROL STATUS: PASS  |  All model outputs reconcile to the reference workbook and expected slide evidence."
+            .Interior.Color = USD_LightGreen()
+            .Font.Color = USD_Green()
+        Else
+            .Value = "CONTROL STATUS: REVIEW REQUIRED  |  One or more results differ from the reference evidence. Do not transfer charts until resolved."
+            .Interior.Color = USD_LightRed()
+            .Font.Color = USD_Red()
+        End If
+        .Font.Bold = True
+        .Font.Size = 14
+        .VerticalAlignment = xlCenter
+    End With
+
+    ws.Range("A" & auditRow + 2 & ":G" & auditRow + 6).Merge
+    With ws.Range("A" & auditRow + 2 & ":G" & auditRow + 6)
+        .Value = "LIMITATIONS AND OWNERSHIP" & vbLf & _
+                 "Macro labels are contextual annotations and are not calculation inputs. The directional stress is a transparent path reversal, not a probabilistic forecast. Returns exclude credit spread, transaction cost, tax and operational constraints. Treasury owns source refresh and execution assumptions; Risk owns method validation and limit interpretation."
+        USD_BodyBox .Cells, RGB(245, 247, 250), USD_Gray()
+    End With
+    USD_SetPrint ws, "$A$1:$G$" & CStr(auditRow + 6)
+End Sub
+
+Private Sub USD_AddAudit(ByVal ws As Worksheet, ByRef targetRow As Long, _
+                         ByVal checkName As String, ByVal actualValue As Variant, _
+                         ByVal expectedValue As Variant, ByVal tolerance As Double, _
+                         ByVal sourceText As String, ByVal riskNote As String, _
+                         ByRef allPass As Boolean, Optional ByVal numberFormat As String = "General")
+    Dim passed As Boolean
+    If VarType(actualValue) = vbBoolean Or VarType(expectedValue) = vbBoolean Then
+        passed = (CBool(actualValue) = CBool(expectedValue))
+    ElseIf IsNumeric(actualValue) And IsNumeric(expectedValue) Then
+        passed = (Abs(CDbl(actualValue) - CDbl(expectedValue)) <= tolerance)
+    Else
+        passed = (CStr(actualValue) = CStr(expectedValue))
+    End If
+    ws.Cells(targetRow, 1).Value = checkName
+    ws.Cells(targetRow, 2).Value = actualValue
+    ws.Cells(targetRow, 3).Value = expectedValue
+    ws.Cells(targetRow, 4).Value = tolerance
+    ws.Cells(targetRow, 5).Value = IIf(passed, "PASS", "REVIEW")
+    ws.Cells(targetRow, 6).Value = sourceText
+    ws.Cells(targetRow, 7).Value = riskNote
+    ws.Cells(targetRow, 2).NumberFormat = numberFormat
+    ws.Cells(targetRow, 3).NumberFormat = numberFormat
+    If Not passed Then allPass = False
+    targetRow = targetRow + 1
+End Sub
+
+Private Sub USD_ResetState()
+    Dim i As Long
+    mCurveN = 0
+    mDailyN = 0
+    mMonthlyN = 0
+    mCorr = 0#
+    mSlope = 0#
+    mIntercept = 0#
+    mR2 = 0#
+    mHitRate = 0#
+    mQ4Mean = 0#
+    mQ4Hit = 0#
+    mWeightedMonths = 0#
+    mMixHistRegret = 0#
+    mMixInvRegret = 0#
+    mMixWorstRegret = 0#
+    mONWorstRegret = 0#
+    mSixWorstRegret = 0#
+    mPortfolioCount = 0
+    mRobustRow = 0
+    For i = 1 To 4
+        mUpExcess(i) = 0#
+        mDownExcess(i) = 0#
+        mUpWins(i) = 0
+        mDownWins(i) = 0
+        mMix(i) = 0#
+    Next i
+End Sub
+
+Private Sub USD_ValidateSourceWorkbook()
+    If Not USD_SheetExists("Curve") Then _
+        Err.Raise vbObjectError + 3100, , "Required source sheet 'Curve' was not found."
+    If Not USD_SheetExists("F_Portfolios") Then _
+        Err.Raise vbObjectError + 3101, , "Required source sheet 'F_Portfolios' was not found."
+End Sub
+
+Private Function USD_SheetExists(ByVal sheetName As String) As Boolean
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    USD_SheetExists = Not ws Is Nothing
+    On Error GoTo 0
+End Function
+
+Private Sub USD_LoadCurve()
+
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim v As Variant
+    Dim i As Long
+    Dim j As Long
+
+    Set ws = ThisWorkbook.Worksheets("Curve")
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 3 Then Err.Raise vbObjectError + 3102, , "Curve has no usable observations."
+
+    If UCase$(Trim$(CStr(ws.Cells(1, 1).Value))) <> "DATE" Then _
+        Err.Raise vbObjectError + 3103, , "Curve column A must be Date."
+    If UCase$(Trim$(CStr(ws.Cells(1, 2).Value))) <> "ON" Then _
+        Err.Raise vbObjectError + 3104, , "Curve column B must be ON."
+    If UCase$(Trim$(CStr(ws.Cells(1, 3).Value))) <> "1M" Or _
+       UCase$(Trim$(CStr(ws.Cells(1, 4).Value))) <> "3M" Or _
+       UCase$(Trim$(CStr(ws.Cells(1, 5).Value))) <> "6M" Then _
+        Err.Raise vbObjectError + 3105, , "Curve columns B:E must be ON, 1M, 3M and 6M."
+
+    v = ws.Range("A2:E" & lastRow).Value2
+    mCurveN = UBound(v, 1)
+    ReDim mDate(1 To mCurveN)
+    ReDim mRate(1 To 4, 1 To mCurveN)
+
+    For i = 1 To mCurveN
+        If Not IsNumeric(v(i, 1)) Then _
+            Err.Raise vbObjectError + 3106, , "Curve contains a non-date value at row " & CStr(i + 1) & "."
+        mDate(i) = CDbl(v(i, 1))
+        If i > 1 Then
+            If mDate(i) <= mDate(i - 1) Then _
+                Err.Raise vbObjectError + 3107, , "Curve dates must be strictly increasing."
+        End If
+        For j = 1 To 4
+            If Not IsNumeric(v(i, j + 1)) Then _
+                Err.Raise vbObjectError + 3108, , "Curve contains a blank/non-numeric rate at row " & CStr(i + 1) & "."
+            mRate(j, i) = CDbl(v(i, j + 1))
+        Next j
+    Next i
+
+End Sub
+
+Private Sub USD_CalculateDailyEvidence()
+
+    Dim i As Long
+    Dim n As Long
+    Dim lastDate As Double
+    Dim onRet As Double
+    Dim sixRet As Double
+    Dim meanX As Double
+    Dim meanY As Double
+    Dim sumXX As Double
+    Dim sumYY As Double
+    Dim sumXY As Double
+    Dim dx As Double
+    Dim dy As Double
+    Dim hits As Long
+    Dim sx() As Double
+    Dim sy() As Double
+    Dim q4Count As Long
+    Dim q4Start As Long
+    Dim q4Sum As Double
+    Dim q4Hits As Long
+
+    lastDate = mDate(mCurveN)
+    For i = 1 To mCurveN
+        If CDbl(DateAdd("m", 6, CDate(mDate(i)))) <= lastDate Then n = n + 1
+    Next i
+    If n = 0 Then Err.Raise vbObjectError + 3110, , "Curve does not contain a complete six-month horizon."
+
+    mDailyN = n
+    ReDim mDailyDate(1 To n)
+    ReDim mDailySpread(1 To n)
+    ReDim mDailyExcess(1 To n)
+    ReDim mDailyRolledON(1 To n)
+    ReDim mDailyLocked6M(1 To n)
+
+    n = 0
+    For i = 1 To mCurveN
+        If CDbl(DateAdd("m", 6, CDate(mDate(i)))) <= lastDate Then
+            n = n + 1
+            onRet = USD_PathReturn(i, 1, 0, 0)
+            sixRet = USD_PathReturn(i, 4, 6, 0)
+            mDailyDate(n) = mDate(i)
+            mDailySpread(n) = (mRate(4, i) - mRate(1, i)) * 10000#
+            mDailyRolledON(n) = onRet
+            mDailyLocked6M(n) = sixRet
+            mDailyExcess(n) = (sixRet - onRet) * 10000#
+            meanX = meanX + mDailySpread(n)
+            meanY = meanY + mDailyExcess(n)
+            If mDailyExcess(n) > 0# Then hits = hits + 1
+        End If
+    Next i
+
+    meanX = meanX / mDailyN
+    meanY = meanY / mDailyN
+    For i = 1 To mDailyN
+        dx = mDailySpread(i) - meanX
+        dy = mDailyExcess(i) - meanY
+        sumXX = sumXX + dx * dx
+        sumYY = sumYY + dy * dy
+        sumXY = sumXY + dx * dy
+    Next i
+    If sumXX = 0# Or sumYY = 0# Then _
+        Err.Raise vbObjectError + 3111, , "Regression cannot be calculated from constant data."
+
+    mSlope = sumXY / sumXX
+    mIntercept = meanY - mSlope * meanX
+    mCorr = sumXY / Sqr(sumXX * sumYY)
+    mR2 = mCorr * mCorr
+    mHitRate = hits / mDailyN
+
+    ReDim sx(1 To mDailyN)
+    ReDim sy(1 To mDailyN)
+    For i = 1 To mDailyN
+        sx(i) = mDailySpread(i)
+        sy(i) = mDailyExcess(i)
+    Next i
+    USD_QuickSortPair sx, sy, 1, mDailyN
+    q4Count = (mDailyN + 3) \ 4
+    q4Start = mDailyN - q4Count + 1
+    For i = q4Start To mDailyN
+        q4Sum = q4Sum + sy(i)
+        If sy(i) > 0# Then q4Hits = q4Hits + 1
+    Next i
+    mQ4Mean = q4Sum / q4Count
+    mQ4Hit = q4Hits / q4Count
+
+End Sub
+
+Private Sub USD_CalculateDirectionalStress()
+
+    Dim starts() As Long
+    Dim count As Long
+    Dim i As Long
+    Dim monthKey As Long
+    Dim priorKey As Long
+    Dim tenor As Long
+    Dim bestUp As Long
+    Dim bestDown As Long
+
+    ReDim starts(1 To mCurveN)
+    For i = 1 To mCurveN
+        If CDbl(DateAdd("m", 6, CDate(mDate(i)))) <= mDate(mCurveN) Then
+            monthKey = Year(CDate(mDate(i))) * 100 + Month(CDate(mDate(i)))
+            If monthKey <> priorKey Then
+                count = count + 1
+                starts(count) = i
+                priorKey = monthKey
+            End If
+        End If
+    Next i
+    If count = 0 Then Err.Raise vbObjectError + 3112, , "No monthly scenario starts were available."
+
+    mMonthlyN = count
+    ReDim mMonthlyStart(1 To count)
+    ReDim mUpReturn(1 To count, 1 To 4)
+    ReDim mDownReturn(1 To count, 1 To 4)
+
+    For i = 1 To count
+        mMonthlyStart(i) = starts(i)
+        For tenor = 1 To 4
+            mUpReturn(i, tenor) = USD_PathReturn(starts(i), tenor, USD_TenorMonths(tenor), 1)
+            mDownReturn(i, tenor) = USD_PathReturn(starts(i), tenor, USD_TenorMonths(tenor), 2)
+            mUpExcess(tenor) = mUpExcess(tenor) + (mUpReturn(i, tenor) - mUpReturn(i, 1)) * 10000#
+            mDownExcess(tenor) = mDownExcess(tenor) + (mDownReturn(i, tenor) - mDownReturn(i, 1)) * 10000#
+        Next tenor
+        bestUp = USD_BestTenor(mUpReturn, i)
+        bestDown = USD_BestTenor(mDownReturn, i)
+        mUpWins(bestUp) = mUpWins(bestUp) + 1
+        mDownWins(bestDown) = mDownWins(bestDown) + 1
+    Next i
+
+    For tenor = 1 To 4
+        mUpExcess(tenor) = mUpExcess(tenor) / count
+        mDownExcess(tenor) = mDownExcess(tenor) / count
+    Next tenor
+
+End Sub
+
+Private Sub USD_LoadPortfolioResult()
+
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim v As Variant
+    Dim i As Long
+    Dim robustFound As Boolean
+
+    Set ws = ThisWorkbook.Worksheets("F_Portfolios")
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 3 Then Err.Raise vbObjectError + 3120, , "F_Portfolios has no usable allocation grid."
+    v = ws.Range("A2:L" & lastRow).Value2
+    mPortfolioCount = UBound(v, 1)
+
+    For i = 1 To UBound(v, 1)
+        If Abs(CDbl(v(i, 1)) - 1#) < 0.0000001 And _
+           Abs(CDbl(v(i, 2))) < 0.0000001 And _
+           Abs(CDbl(v(i, 3))) < 0.0000001 And _
+           Abs(CDbl(v(i, 4))) < 0.0000001 Then mONWorstRegret = CDbl(v(i, 9)) * 10000#
+
+        If Abs(CDbl(v(i, 4)) - 1#) < 0.0000001 And _
+           Abs(CDbl(v(i, 1))) < 0.0000001 And _
+           Abs(CDbl(v(i, 2))) < 0.0000001 And _
+           Abs(CDbl(v(i, 3))) < 0.0000001 Then mSixWorstRegret = CDbl(v(i, 9)) * 10000#
+
+        If USD_IsTrue(v(i, 12)) Then
+            mMix(1) = CDbl(v(i, 1))
+            mMix(2) = CDbl(v(i, 2))
+            mMix(3) = CDbl(v(i, 3))
+            mMix(4) = CDbl(v(i, 4))
+            mMixHistRegret = CDbl(v(i, 7)) * 10000#
+            mMixInvRegret = CDbl(v(i, 8)) * 10000#
+            mMixWorstRegret = CDbl(v(i, 9)) * 10000#
+            mWeightedMonths = CDbl(v(i, 11))
+            mRobustRow = i + 1
+            robustFound = True
+        End If
+    Next i
+
+    If Not robustFound Then _
+        Err.Raise vbObjectError + 3121, , "F_Portfolios has no row marked Is_Robust = TRUE."
+
+End Sub
+
+Private Function USD_PathReturn( _
+    ByVal startIndex As Long, ByVal tenorIndex As Long, _
+    ByVal tenorMonths As Long, ByVal pathCode As Long) As Double
+
+    Dim startDate As Date
+    Dim maturityDate As Date
+    Dim endIndex As Long
+    Dim currentIndex As Long
+    Dim nextIndex As Long
+    Dim nextTarget As Date
+    Dim factor As Double
+    Dim k As Long
+    Dim rateValue As Double
+
+    startDate = CDate(mDate(startIndex))
+    maturityDate = DateAdd("m", 6, startDate)
+    endIndex = USD_FloorIndex(CDbl(maturityDate))
+    If endIndex <= startIndex Then Exit Function
+    factor = 1#
+
+    If tenorMonths = 0 Then
+        For currentIndex = startIndex To endIndex - 1
+            rateValue = USD_PathRate(tenorIndex, currentIndex, pathCode)
+            factor = factor * (1# + rateValue * (mDate(currentIndex + 1) - mDate(currentIndex)) / 360#)
+        Next currentIndex
+    Else
+        currentIndex = startIndex
+        k = 1
+        Do While currentIndex < endIndex
+            nextTarget = DateAdd("m", tenorMonths * k, startDate)
+            If nextTarget >= maturityDate Then
+                nextIndex = endIndex
+            Else
+                nextIndex = USD_FloorIndex(CDbl(nextTarget))
+            End If
+            If nextIndex <= currentIndex Then
+                k = k + 1
+            Else
+                rateValue = USD_PathRate(tenorIndex, currentIndex, pathCode)
+                factor = factor * (1# + rateValue * (mDate(nextIndex) - mDate(currentIndex)) / 360#)
+                currentIndex = nextIndex
+                If nextTarget < maturityDate Then k = k + 1
+            End If
+        Loop
+    End If
+
+    USD_PathReturn = factor - 1#
+
+End Function
+
+Private Function USD_PathRate(ByVal tenorIndex As Long, ByVal observation As Long, ByVal pathCode As Long) As Double
+    Select Case pathCode
+        Case 0
+            USD_PathRate = mRate(tenorIndex, observation)
+        Case 1
+            USD_PathRate = STRESS_ON + mRate(tenorIndex, observation) - mRate(1, 1)
+        Case 2
+            USD_PathRate = STRESS_ON + 2# * mRate(tenorIndex, 1) - mRate(1, 1) - mRate(tenorIndex, observation)
+        Case Else
+            Err.Raise vbObjectError + 3122, , "Invalid directional path code."
+    End Select
+End Function
+
+Private Function USD_TenorMonths(ByVal tenorIndex As Long) As Long
+    Select Case tenorIndex
+        Case 1: USD_TenorMonths = 0
+        Case 2: USD_TenorMonths = 1
+        Case 3: USD_TenorMonths = 3
+        Case 4: USD_TenorMonths = 6
+    End Select
+End Function
+
+Private Function USD_TenorName(ByVal tenorIndex As Long) As String
+    Select Case tenorIndex
+        Case 1: USD_TenorName = "ON"
+        Case 2: USD_TenorName = "1M"
+        Case 3: USD_TenorName = "3M"
+        Case 4: USD_TenorName = "6M"
+    End Select
+End Function
+
+Private Function USD_BestTenor(ByRef returnsMatrix() As Double, ByVal rowIndex As Long) As Long
+    Dim t As Long
+    USD_BestTenor = 1
+    For t = 2 To 4
+        If returnsMatrix(rowIndex, t) > returnsMatrix(rowIndex, USD_BestTenor) Then USD_BestTenor = t
+    Next t
+End Function
+
+Private Function USD_FloorIndex(ByVal targetDate As Double) As Long
+    Dim lo As Long
+    Dim hi As Long
+    Dim mid As Long
+    If targetDate <= mDate(1) Then USD_FloorIndex = 1: Exit Function
+    If targetDate >= mDate(mCurveN) Then USD_FloorIndex = mCurveN: Exit Function
+    lo = 1
+    hi = mCurveN
+    Do While lo <= hi
+        mid = (lo + hi) \ 2
+        If mDate(mid) = targetDate Then
+            USD_FloorIndex = mid
+            Exit Function
+        ElseIf mDate(mid) < targetDate Then
+            lo = mid + 1
+        Else
+            hi = mid - 1
+        End If
+    Loop
+    USD_FloorIndex = hi
+End Function
+
+Private Function USD_FindExactIndex(ByVal targetDate As Double) As Long
+    Dim idx As Long
+    idx = USD_FloorIndex(targetDate)
+    If Abs(mDate(idx) - targetDate) < 0.00001 Then USD_FindExactIndex = idx
+End Function
+
+Private Function USD_IsTrue(ByVal value As Variant) As Boolean
+    If VarType(value) = vbBoolean Then
+        USD_IsTrue = CBool(value)
+    Else
+        USD_IsTrue = (UCase$(Trim$(CStr(value))) = "TRUE" Or CDbl(Val(CStr(value))) = 1#)
+    End If
+End Function
+
+Private Sub USD_QuickSortPair(ByRef x() As Double, ByRef y() As Double, ByVal first As Long, ByVal last As Long)
+    Dim i As Long
+    Dim j As Long
+    Dim pivot As Double
+    Dim tx As Double
+    Dim ty As Double
+    i = first
+    j = last
+    pivot = x((first + last) \ 2)
+    Do While i <= j
+        Do While x(i) < pivot: i = i + 1: Loop
+        Do While x(j) > pivot: j = j - 1: Loop
+        If i <= j Then
+            tx = x(i): x(i) = x(j): x(j) = tx
+            ty = y(i): y(i) = y(j): y(j) = ty
+            i = i + 1
+            j = j - 1
+        End If
+    Loop
+    If first < j Then USD_QuickSortPair x, y, first, j
+    If i < last Then USD_QuickSortPair x, y, i, last
+End Sub
