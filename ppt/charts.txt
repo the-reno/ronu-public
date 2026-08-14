@@ -1,0 +1,1486 @@
+Option Explicit
+
+'====================================================================================
+' USD CASH ALLOCATION - EXCEL DASHBOARD
+'
+' PURPOSE
+'   Rebuilds the cash-allocation analysis directly from a single input sheet: Curve.
+'   The workbook may start with ONLY the Curve tab.
+'
+' INPUT SHEET
+'   Curve!A:E
+'   A = Date | B = ON | C = 1M | D = 3M | E = 6M
+'   Rates must be decimals (example: 0.055 = 5.50%).
+'
+' OUTPUT
+'   USD_Dashboard  - visible, editable chart controls + presentation-ready charts
+'   _USD_Calc      - hidden calculation data used by the charts
+'
+' MODEL LOGIC
+'   1) Historical 6M decision: compare locked 6M vs ON rolled over the same 6M horizon.
+'   2) Premium signal: 6M-ON spread at inception vs realized 6M excess return.
+'   3) Directional stress: replay observed rate moves and the opposite-sign moves,
+'      both rebased to the same starting ON level (default 5.50%).
+'   4) Portfolio: test long-only ON/1M/3M/6M allocations and minimize the worse
+'      average regret across historical and inverted paths.
+'
+' SOURCE LOGIC REVIEWED
+'   https://github.com/the-reno/ronu-public/blob/main/ppt/11_Create_USD_Cash_Allocation_Slides_1_4.txt
+'
+' USE
+'   1. Put the Curve data in a sheet named Curve.
+'   2. Alt+F11 > Insert > Module > paste/import this module.
+'   3. Run USD_BuildDashboard.
+'   4. Edit BLUE cells in USD_Dashboard.
+'   5. Run USD_ApplyStyle after color/arrow changes.
+'   6. Run USD_RefreshDashboard after Curve/model-input changes.
+'
+' NOTES
+'   - Charts remain native Excel charts so they can be copied manually to PowerPoint.
+'   - Chart 1 annotations are embedded inside the chart; they copy with the chart.
+'====================================================================================
+
+Private Const DASH_SHEET As String = "USD_Dashboard"
+Private Const CALC_SHEET As String = "_USD_Calc"
+Private Const CURVE_SHEET As String = "Curve"
+Private Const DEFAULT_STRESS_ON As Double = 0.055
+Private Const DEFAULT_ALLOC_STEP As Double = 0.1
+
+Private mDate() As Double
+Private mRate() As Double                 ' tenor, observation: 1=ON, 2=1M, 3=3M, 4=6M
+Private mCurveN As Long
+
+Private mDailyDate() As Double
+Private mDailySpread() As Double
+Private mDailyExcess() As Double
+Private mDailyONReturn() As Double
+Private mDaily6MReturn() As Double
+Private mDailyN As Long
+
+Private mCorr As Double
+Private mSlope As Double
+Private mIntercept As Double
+Private mR2 As Double
+Private mHitRate As Double
+Private mQ4Mean As Double
+Private mQ4Hit As Double
+
+Private mMonthlyStart() As Double
+Private mHistRet() As Double              ' tenor, monthly start
+Private mInvRet() As Double               ' tenor, monthly start
+Private mUpRet() As Double                ' normalized realized-move path
+Private mMonthlyN As Long
+Private mUpExcess(1 To 4) As Double
+Private mInvExcess(1 To 4) As Double
+Private mInv6MWins As Long
+
+Private mRobustW(1 To 4) As Double
+Private mRobustHistRegret As Double
+Private mRobustInvRegret As Double
+Private mRobustWorstRegret As Double
+Private mONWorstRegret As Double
+Private m6MWorstRegret As Double
+Private mWeightedMonths As Double
+Private mAllocationCount As Long
+Private mStressON As Double
+Private mAllocationStep As Double
+
+'============================== PUBLIC MACROS ========================================
+
+Public Sub USD_BuildDashboard()
+    USD_RefreshDashboard
+End Sub
+
+Public Sub USD_RefreshDashboard()
+    Dim oldCalc As XlCalculation
+    Dim oldScreen As Boolean
+    Dim oldAlerts As Boolean
+    Dim wsDash As Worksheet
+
+    On Error GoTo fail
+
+    oldCalc = Application.Calculation
+    oldScreen = Application.ScreenUpdating
+    oldAlerts = Application.DisplayAlerts
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "USD cash allocation: validating Curve..."
+
+    USD_LoadCurve
+    Set wsDash = USD_EnsureDashboard
+    USD_ReadModelSettings wsDash
+
+    Application.StatusBar = "USD cash allocation: calculating realized evidence..."
+    USD_CalculateDailyEvidence
+    USD_CalculateMonthlyEvidence
+
+    Application.StatusBar = "USD cash allocation: optimizing portfolio..."
+    USD_OptimizePortfolio
+
+    Application.StatusBar = "USD cash allocation: writing dashboard data..."
+    USD_WriteCalcSheet
+    USD_UpdateDashboardKPIs wsDash
+
+    Application.StatusBar = "USD cash allocation: building charts..."
+    USD_BuildCharts wsDash
+    USD_ApplyStyleCore wsDash
+
+    On Error Resume Next
+    ThisWorkbook.Worksheets(CALC_SHEET).Visible = xlSheetVeryHidden
+    On Error GoTo fail
+
+    wsDash.Activate
+    ActiveWindow.DisplayGridlines = False
+
+    Application.StatusBar = False
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = oldAlerts
+    Application.ScreenUpdating = oldScreen
+    Exit Sub
+
+fail:
+    Application.StatusBar = False
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = oldAlerts
+    Application.ScreenUpdating = oldScreen
+    MsgBox "USD_RefreshDashboard stopped: " & Err.Description, vbCritical
+End Sub
+
+Public Sub USD_ApplyStyle()
+    Dim ws As Worksheet
+    On Error GoTo fail
+
+    If Not USD_SheetExists(DASH_SHEET) Then
+        MsgBox "Run USD_BuildDashboard first.", vbInformation
+        Exit Sub
+    End If
+
+    Set ws = ThisWorkbook.Worksheets(DASH_SHEET)
+    USD_ApplyStyleCore ws
+    Exit Sub
+
+fail:
+    MsgBox "USD_ApplyStyle stopped: " & Err.Description, vbCritical
+End Sub
+
+Public Sub USD_ResetDashboardSettings()
+    Dim ws As Worksheet
+    If Not USD_SheetExists(DASH_SHEET) Then
+        MsgBox "Run USD_BuildDashboard first.", vbInformation
+        Exit Sub
+    End If
+
+    Set ws = ThisWorkbook.Worksheets(DASH_SHEET)
+    USD_WriteDefaultSettings ws, True
+    USD_ApplyStyle
+End Sub
+
+'============================== INPUT / SETTINGS =====================================
+
+Private Sub USD_LoadCurve()
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim v As Variant
+    Dim i As Long, j As Long
+
+    If Not USD_SheetExists(CURVE_SHEET) Then _
+        Err.Raise vbObjectError + 3000, , "Required sheet 'Curve' was not found."
+
+    Set ws = ThisWorkbook.Worksheets(CURVE_SHEET)
+    lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
+    If lastRow < 3 Then Err.Raise vbObjectError + 3001, , "Curve has no usable observations."
+
+    If UCase$(Trim$(CStr(ws.Cells(1, 1).value))) <> "DATE" Then _
+        Err.Raise vbObjectError + 3002, , "Curve column A must be Date."
+    If UCase$(Trim$(CStr(ws.Cells(1, 2).value))) <> "ON" Or _
+       UCase$(Trim$(CStr(ws.Cells(1, 3).value))) <> "1M" Or _
+       UCase$(Trim$(CStr(ws.Cells(1, 4).value))) <> "3M" Or _
+       UCase$(Trim$(CStr(ws.Cells(1, 5).value))) <> "6M" Then _
+        Err.Raise vbObjectError + 3003, , "Curve columns B:E must be ON, 1M, 3M and 6M."
+
+    v = ws.Range("A2:E" & lastRow).Value2
+    mCurveN = UBound(v, 1)
+    ReDim mDate(1 To mCurveN)
+    ReDim mRate(1 To 4, 1 To mCurveN)
+
+    For i = 1 To mCurveN
+        If Not IsNumeric(v(i, 1)) Then _
+            Err.Raise vbObjectError + 3004, , "Non-date value in Curve row " & CStr(i + 1) & "."
+        mDate(i) = CDbl(v(i, 1))
+        If i > 1 Then
+            If mDate(i) <= mDate(i - 1) Then _
+                Err.Raise vbObjectError + 3005, , "Curve dates must be strictly increasing."
+        End If
+
+        For j = 1 To 4
+            If Not IsNumeric(v(i, j + 1)) Then _
+                Err.Raise vbObjectError + 3006, , "Blank/non-numeric rate in Curve row " & CStr(i + 1) & "."
+            mRate(j, i) = CDbl(v(i, j + 1))
+        Next j
+    Next i
+End Sub
+
+Private Function USD_EnsureDashboard() As Worksheet
+    Dim ws As Worksheet
+    Dim created As Boolean
+
+    If USD_SheetExists(DASH_SHEET) Then
+        Set ws = ThisWorkbook.Worksheets(DASH_SHEET)
+    Else
+        Set ws = ThisWorkbook.Worksheets.Add(Before:=ThisWorkbook.Worksheets(1))
+        ws.Name = DASH_SHEET
+        created = True
+    End If
+
+    USD_LayoutDashboard ws
+    USD_WriteDefaultSettings ws, created
+    USD_AddDashboardButtons ws
+
+    Set USD_EnsureDashboard = ws
+End Function
+
+Private Sub USD_LayoutDashboard(ByVal ws As Worksheet)
+    Dim i As Long
+
+    ws.Cells.Font.Name = "Calibri"
+    ws.Cells.Font.Size = 10
+    ws.Cells.Interior.Pattern = xlNone
+
+    For i = 1 To 21
+        ws.Columns(i).ColumnWidth = 10.5
+    Next i
+    ws.Columns("A").ColumnWidth = 13
+    ws.Columns("B").ColumnWidth = 13
+    ws.Columns("D").ColumnWidth = 17
+    ws.Columns("E").ColumnWidth = 13
+    ws.Columns("H").ColumnWidth = 8
+    ws.Columns("I").ColumnWidth = 13
+    ws.Columns("J").ColumnWidth = 10
+    ws.Columns("K").ColumnWidth = 24
+    ws.Columns("L").ColumnWidth = 12
+    ws.Columns("M:N").ColumnWidth = 9
+    ws.Columns("P").ColumnWidth = 22
+    ws.Columns("Q:R").ColumnWidth = 14
+
+    ws.Rows("1:12").RowHeight = 20
+    ws.Rows("1").RowHeight = 30
+
+    ws.Range("A1:U1").Merge
+    With ws.Range("A1")
+        .value = "USD CASH ALLOCATION | ANALYSIS & CHART WORKBENCH"
+        .Font.Bold = True
+        .Font.Size = 18
+        .Font.Color = RGB(255, 255, 255)
+        .Interior.Color = RGB(23, 54, 93)
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+    End With
+
+    USD_SectionHeader ws.Range("A3:B3"), "SERIES COLORS"
+    USD_SectionHeader ws.Range("D3:E3"), "CHART / MODEL CONTROLS"
+    USD_SectionHeader ws.Range("H3:N3"), "CHART 1 ANNOTATIONS"
+    USD_SectionHeader ws.Range("P3:R3"), "KEY OUTPUTS"
+
+    ws.Range("A12:U12").Merge
+    With ws.Range("A12")
+        .value = "Edit blue cells. Apply Style = chart colors/arrows only. Refresh Analysis = recalculate after Curve, stress anchor or allocation-step changes."
+        .Font.Italic = True
+        .Font.Color = RGB(89, 97, 107)
+        .Interior.Color = RGB(244, 246, 248)
+    End With
+
+    ws.Range("A2:U12").Borders.Color = RGB(229, 232, 236)
+End Sub
+
+Private Sub USD_WriteDefaultSettings(ByVal ws As Worksheet, ByVal forceReset As Boolean)
+    If forceReset Or Len(CStr(ws.Range("B4").value)) = 0 Then
+        ws.Range("A4:A10").value = Application.Transpose(Array("ON", "1M", "3M", "6M", "Positive", "Negative", "Stress"))
+        ws.Range("B4:B10").value = Application.Transpose(Array("#949BA4", "#5C87AA", "#1F7A6B", "#17365D", "#4E7C3C", "#A62E2E", "#C2763D"))
+    End If
+
+    If forceReset Or Len(CStr(ws.Range("E4").value)) = 0 Then ws.Range("E4").value = CDate(mDate(1))
+    If forceReset Or Len(CStr(ws.Range("E5").value)) = 0 Then ws.Range("E5").value = CDate(mDate(mCurveN))
+    If forceReset Or Len(CStr(ws.Range("E6").value)) = 0 Then ws.Range("E6").value = 2
+    If forceReset Then ws.Range("E7:E8").ClearContents
+    If forceReset Or Len(CStr(ws.Range("E9").value)) = 0 Then ws.Range("E9").value = DEFAULT_STRESS_ON
+    If forceReset Or Len(CStr(ws.Range("E10").value)) = 0 Then ws.Range("E10").value = DEFAULT_ALLOC_STEP
+
+    ws.Range("D4:D10").value = Application.Transpose(Array( _
+        "Chart start date", "Chart end date", "Line width", "Curve Y min (optional)", _
+        "Curve Y max (optional)", "Stress ON anchor", "Allocation step"))
+
+    ws.Range("E4:E5").NumberFormat = "dd-mmm-yy"
+    ws.Range("E9:E10").NumberFormat = "0.0%"
+
+    If forceReset Or Len(CStr(ws.Range("H4").value)) = 0 Then
+        USD_WriteRow ws.Range("H4:N4"), Array("Show", "Date", "Tenor", "Label", "Color", "X off", "Y off")
+
+        ws.Range("H5:N9").ClearContents
+        USD_WriteRow ws.Range("H5:N5"), Array(True, DateSerial(2022, 3, 16), "6M", "Hikes start", "#C2763D", 0, -42)
+        USD_WriteRow ws.Range("H6:N6"), Array(True, DateSerial(2023, 7, 26), "ON", "Policy peak", "#17365D", 0, -42)
+        USD_WriteRow ws.Range("H7:N7"), Array(True, DateSerial(2024, 9, 18), "6M", "First cut", "#1F7A6B", 0, -42)
+        USD_WriteRow ws.Range("H8:N8"), Array(False, DateSerial(2022, 7, 27), "6M", "CPI peak", "#A62E2E", 0, -42)
+        USD_WriteRow ws.Range("H9:N9"), Array(False, DateSerial(2026, 6, 17), "ON", "Hold", "#A62E2E", 0, -42)
+    End If
+
+    ws.Range("I5:I9").NumberFormat = "dd-mmm-yy"
+    ws.Range("M5:N9").NumberFormat = "0"
+    On Error Resume Next
+    ws.Range("H5:H9").Validation.Delete
+    ws.Range("H5:H9").Validation.Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, Formula1:="TRUE,FALSE"
+    ws.Range("J5:J9").Validation.Delete
+    ws.Range("J5:J9").Validation.Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, Formula1:="ON,1M,3M,6M"
+    On Error GoTo 0
+
+    'User-editable cells: blue font.
+    ws.Range("B4:B10,E4:E10,H5:N9").Font.Color = RGB(0, 0, 255)
+    ws.Range("A4:A10,D4:D10,H4:N4").Font.Color = RGB(37, 42, 49)
+    ws.Range("A4:A10,D4:D10,H4:N4").Font.Bold = True
+
+    USD_PaintColorCells ws
+End Sub
+
+Private Sub USD_ReadModelSettings(ByVal ws As Worksheet)
+    mStressON = DEFAULT_STRESS_ON
+    mAllocationStep = DEFAULT_ALLOC_STEP
+
+    If IsNumeric(ws.Range("E9").value) Then mStressON = CDbl(ws.Range("E9").value)
+    If IsNumeric(ws.Range("E10").value) Then mAllocationStep = CDbl(ws.Range("E10").value)
+
+    If mStressON <= 0 Or mStressON > 0.25 Then _
+        Err.Raise vbObjectError + 3010, , "Stress ON anchor must be between 0% and 25%."
+
+    If mAllocationStep <= 0 Or mAllocationStep > 0.5 Then _
+        Err.Raise vbObjectError + 3011, , "Allocation step must be >0% and <=50%."
+
+    If Abs((1# / mAllocationStep) - Round(1# / mAllocationStep, 0)) > 0.0000001 Then _
+        Err.Raise vbObjectError + 3012, , "Allocation step must divide 100% exactly (for example 5%, 10%, 20%, 25%)."
+End Sub
+
+Private Sub USD_AddDashboardButtons(ByVal ws As Worksheet)
+    Dim shp As Shape
+
+    On Error Resume Next
+    ws.Shapes("btn_refresh").Delete
+    ws.Shapes("btn_style").Delete
+    ws.Shapes("btn_reset").Delete
+    On Error GoTo 0
+
+    Set shp = ws.Shapes.AddShape(msoShapeRoundedRectangle, ws.Range("A11").Left, ws.Range("A11").Top, 120, 22)
+    shp.Name = "btn_refresh"
+    USD_FormatButton shp, "Refresh Analysis", "USD_RefreshDashboard", RGB(23, 54, 93)
+
+    Set shp = ws.Shapes.AddShape(msoShapeRoundedRectangle, ws.Range("C11").Left, ws.Range("C11").Top, 105, 22)
+    shp.Name = "btn_style"
+    USD_FormatButton shp, "Apply Style", "USD_ApplyStyle", RGB(31, 122, 107)
+
+    Set shp = ws.Shapes.AddShape(msoShapeRoundedRectangle, ws.Range("E11").Left, ws.Range("E11").Top, 105, 22)
+    shp.Name = "btn_reset"
+    USD_FormatButton shp, "Reset Defaults", "USD_ResetDashboardSettings", RGB(115, 123, 133)
+End Sub
+
+Private Sub USD_FormatButton(ByVal shp As Shape, ByVal txt As String, ByVal macroName As String, ByVal fillColor As Long)
+    With shp
+        .Fill.ForeColor.RGB = fillColor
+        .Line.Visible = msoFalse
+        .TextFrame2.TextRange.Text = txt
+        .TextFrame2.TextRange.Font.Name = "Calibri"
+        .TextFrame2.TextRange.Font.Size = 10
+        .TextFrame2.TextRange.Font.Bold = msoTrue
+        .TextFrame2.TextRange.Font.Fill.ForeColor.RGB = RGB(255, 255, 255)
+        .TextFrame2.VerticalAnchor = msoAnchorMiddle
+        .TextFrame2.TextRange.ParagraphFormat.Alignment = msoAlignCenter
+        .OnAction = macroName
+    End With
+End Sub
+
+Private Sub USD_SectionHeader(ByVal rng As Range, ByVal txt As String)
+    rng.Merge
+    With rng.Cells(1, 1)
+        .value = txt
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .Interior.Color = RGB(47, 95, 143)
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+    End With
+End Sub
+
+'============================== CALCULATIONS =========================================
+
+Private Sub USD_CalculateDailyEvidence()
+    Dim i As Long, n As Long
+    Dim lastDate As Double
+    Dim startDate As Date
+    Dim onRet As Double, sixRet As Double
+    Dim meanX As Double, meanY As Double
+    Dim sumXX As Double, sumYY As Double, sumXY As Double
+    Dim dx As Double, dy As Double
+    Dim hits As Long
+    Dim sx() As Double, sy() As Double
+    Dim q4Count As Long, q4Start As Long
+    Dim q4Sum As Double, q4Hits As Long
+
+    lastDate = mDate(mCurveN)
+
+    For i = 1 To mCurveN
+        startDate = CDate(mDate(i))
+        If CDbl(DateAdd("m", 6, startDate)) <= lastDate Then n = n + 1
+    Next i
+
+    If n = 0 Then Err.Raise vbObjectError + 3020, , "Curve does not contain a fully realized six-month horizon."
+
+    mDailyN = n
+    ReDim mDailyDate(1 To n)
+    ReDim mDailySpread(1 To n)
+    ReDim mDailyExcess(1 To n)
+    ReDim mDailyONReturn(1 To n)
+    ReDim mDaily6MReturn(1 To n)
+
+    n = 0
+    For i = 1 To mCurveN
+        startDate = CDate(mDate(i))
+        If CDbl(DateAdd("m", 6, startDate)) <= lastDate Then
+            n = n + 1
+            onRet = USD_PathReturn(i, 1, 0, 0)
+            sixRet = USD_PathReturn(i, 4, 6, 0)
+
+            mDailyDate(n) = mDate(i)
+            mDailySpread(n) = (mRate(4, i) - mRate(1, i)) * 10000#
+            mDailyExcess(n) = (sixRet - onRet) * 10000#
+            mDailyONReturn(n) = onRet
+            mDaily6MReturn(n) = sixRet
+
+            meanX = meanX + mDailySpread(n)
+            meanY = meanY + mDailyExcess(n)
+            If mDailyExcess(n) > 0# Then hits = hits + 1
+        End If
+    Next i
+
+    meanX = meanX / mDailyN
+    meanY = meanY / mDailyN
+
+    For i = 1 To mDailyN
+        dx = mDailySpread(i) - meanX
+        dy = mDailyExcess(i) - meanY
+        sumXX = sumXX + dx * dx
+        sumYY = sumYY + dy * dy
+        sumXY = sumXY + dx * dy
+    Next i
+
+    If sumXX > 0# And sumYY > 0# Then
+        mSlope = sumXY / sumXX
+        mIntercept = meanY - mSlope * meanX
+        mCorr = sumXY / Sqr(sumXX * sumYY)
+        mR2 = mCorr * mCorr
+    End If
+    mHitRate = hits / mDailyN
+
+    ReDim sx(1 To mDailyN)
+    ReDim sy(1 To mDailyN)
+    For i = 1 To mDailyN
+        sx(i) = mDailySpread(i)
+        sy(i) = mDailyExcess(i)
+    Next i
+    USD_QuickSortPair sx, sy, 1, mDailyN
+
+    q4Count = (mDailyN + 3) \ 4
+    q4Start = mDailyN - q4Count + 1
+    For i = q4Start To mDailyN
+        q4Sum = q4Sum + sy(i)
+        If sy(i) > 0# Then q4Hits = q4Hits + 1
+    Next i
+    mQ4Mean = q4Sum / q4Count
+    mQ4Hit = q4Hits / q4Count
+End Sub
+
+Private Sub USD_CalculateMonthlyEvidence()
+    Dim starts() As Long
+    Dim count As Long
+    Dim i As Long, t As Long
+    Dim monthKey As Long, priorKey As Long
+    Dim best As Double
+
+    ReDim starts(1 To mCurveN)
+
+    For i = 1 To mCurveN
+        If CDbl(DateAdd("m", 6, CDate(mDate(i)))) <= mDate(mCurveN) Then
+            monthKey = Year(CDate(mDate(i))) * 100 + Month(CDate(mDate(i)))
+            If monthKey <> priorKey Then
+                count = count + 1
+                starts(count) = i
+                priorKey = monthKey
+            End If
+        End If
+    Next i
+
+    If count = 0 Then Err.Raise vbObjectError + 3021, , "No monthly six-month start dates were found."
+
+    mMonthlyN = count
+    ReDim mMonthlyStart(1 To count)
+    ReDim mHistRet(1 To 4, 1 To count)
+    ReDim mInvRet(1 To 4, 1 To count)
+    ReDim mUpRet(1 To 4, 1 To count)
+
+    For t = 1 To 4
+        mUpExcess(t) = 0#
+        mInvExcess(t) = 0#
+    Next t
+    mInv6MWins = 0
+
+    For i = 1 To count
+        mMonthlyStart(i) = mDate(starts(i))
+        For t = 1 To 4
+            mHistRet(t, i) = USD_PathReturn(starts(i), t, USD_TenorMonths(t), 0)
+            mUpRet(t, i) = USD_PathReturn(starts(i), t, USD_TenorMonths(t), 1)
+            mInvRet(t, i) = USD_PathReturn(starts(i), t, USD_TenorMonths(t), 2)
+        Next t
+
+        For t = 1 To 4
+            mUpExcess(t) = mUpExcess(t) + (mUpRet(t, i) - mUpRet(1, i)) * 10000#
+            mInvExcess(t) = mInvExcess(t) + (mInvRet(t, i) - mInvRet(1, i)) * 10000#
+        Next t
+
+        best = mInvRet(1, i)
+        For t = 2 To 4
+            If mInvRet(t, i) > best Then best = mInvRet(t, i)
+        Next t
+        If Abs(mInvRet(4, i) - best) < 0.0000000001 Then mInv6MWins = mInv6MWins + 1
+    Next i
+
+    For t = 1 To 4
+        mUpExcess(t) = mUpExcess(t) / count
+        mInvExcess(t) = mInvExcess(t) / count
+    Next t
+End Sub
+
+Private Sub USD_OptimizePortfolio()
+    Dim units As Long
+    Dim a As Long, b As Long, c As Long, d As Long
+    Dim i As Long, t As Long
+    Dim w(1 To 4) As Double
+    Dim histBest() As Double, invBest() As Double
+    Dim histPort As Double, invPort As Double
+    Dim histReg As Double, invReg As Double, worstReg As Double, meanReg As Double
+    Dim bestWorst As Double, bestMean As Double
+    Dim first As Boolean
+
+    mAllocationCount = 0
+    units = CLng(Round(1# / mAllocationStep, 0))
+    If units < 2 Then Err.Raise vbObjectError + 3022, , "Allocation step is too large."
+
+    ReDim histBest(1 To mMonthlyN)
+    ReDim invBest(1 To mMonthlyN)
+
+    For i = 1 To mMonthlyN
+        histBest(i) = mHistRet(1, i)
+        invBest(i) = mInvRet(1, i)
+        For t = 2 To 4
+            If mHistRet(t, i) > histBest(i) Then histBest(i) = mHistRet(t, i)
+            If mInvRet(t, i) > invBest(i) Then invBest(i) = mInvRet(t, i)
+        Next t
+    Next i
+
+
+    first = True
+
+    For a = 0 To units
+        For b = 0 To units - a
+            For c = 0 To units - a - b
+                d = units - a - b - c
+
+                w(1) = a / units
+                w(2) = b / units
+                w(3) = c / units
+                w(4) = d / units
+
+                histReg = 0#: invReg = 0#
+                For i = 1 To mMonthlyN
+                    histPort = 0#: invPort = 0#
+                    For t = 1 To 4
+                        histPort = histPort + w(t) * mHistRet(t, i)
+                        invPort = invPort + w(t) * mInvRet(t, i)
+                    Next t
+                    histReg = histReg + (histBest(i) - histPort)
+                    invReg = invReg + (invBest(i) - invPort)
+                Next i
+
+                histReg = histReg / mMonthlyN
+                invReg = invReg / mMonthlyN
+                worstReg = WorksheetFunction.Max(histReg, invReg)
+                meanReg = (histReg + invReg) / 2#
+
+                mAllocationCount = mAllocationCount + 1
+
+
+                If first Or worstReg < bestWorst - 0.000000000001 Or _
+                   (Abs(worstReg - bestWorst) < 0.000000000001 And meanReg < bestMean) Then
+                    first = False
+                    bestWorst = worstReg
+                    bestMean = meanReg
+                    For t = 1 To 4
+                        mRobustW(t) = w(t)
+                    Next t
+                    mRobustHistRegret = histReg
+                    mRobustInvRegret = invReg
+                    mRobustWorstRegret = worstReg
+                    mWeightedMonths = w(2) + 3# * w(3) + 6# * w(4)
+                End If
+
+                If a = units And b = 0 And c = 0 Then mONWorstRegret = worstReg
+                If d = units And a = 0 And b = 0 And c = 0 Then m6MWorstRegret = worstReg
+            Next c
+        Next b
+    Next a
+
+End Sub
+
+'============================== RETURN ENGINE ========================================
+
+Private Function USD_PathReturn( _
+    ByVal startIndex As Long, _
+    ByVal tenorIndex As Long, _
+    ByVal tenorMonths As Long, _
+    ByVal pathCode As Long) As Double
+
+    Dim startDate As Date
+    Dim maturityDate As Date
+    Dim endIndex As Long
+    Dim currentIndex As Long
+    Dim nextIndex As Long
+    Dim nextTarget As Date
+    Dim factor As Double
+    Dim k As Long
+    Dim rateValue As Double
+
+    startDate = CDate(mDate(startIndex))
+    maturityDate = DateAdd("m", 6, startDate)
+    endIndex = USD_FloorIndex(CDbl(maturityDate))
+    If endIndex <= startIndex Then Exit Function
+
+    factor = 1#
+
+    If tenorMonths = 0 Then
+        For currentIndex = startIndex To endIndex - 1
+            rateValue = USD_PathRate(tenorIndex, currentIndex, pathCode)
+            factor = factor * (1# + rateValue * (mDate(currentIndex + 1) - mDate(currentIndex)) / 360#)
+        Next currentIndex
+    Else
+        currentIndex = startIndex
+        k = 1
+        Do While currentIndex < endIndex
+            nextTarget = DateAdd("m", tenorMonths * k, startDate)
+            If nextTarget >= maturityDate Then
+                nextIndex = endIndex
+            Else
+                nextIndex = USD_FloorIndex(CDbl(nextTarget))
+            End If
+
+            If nextIndex <= currentIndex Then
+                k = k + 1
+            Else
+                rateValue = USD_PathRate(tenorIndex, currentIndex, pathCode)
+                factor = factor * (1# + rateValue * (mDate(nextIndex) - mDate(currentIndex)) / 360#)
+                currentIndex = nextIndex
+                If nextTarget < maturityDate Then k = k + 1
+            End If
+        Loop
+    End If
+
+    USD_PathReturn = factor - 1#
+End Function
+
+Private Function USD_PathRate(ByVal tenorIndex As Long, ByVal observation As Long, ByVal pathCode As Long) As Double
+    Select Case pathCode
+        Case 0      'Actual historical path
+            USD_PathRate = mRate(tenorIndex, observation)
+        Case 1      'Observed moves, rebased to common starting ON
+            USD_PathRate = mStressON + mRate(tenorIndex, observation) - mRate(1, 1)
+        Case 2      'Opposite-sign moves, same initial cross-tenor relationships
+            USD_PathRate = mStressON + 2# * mRate(tenorIndex, 1) - mRate(1, 1) - mRate(tenorIndex, observation)
+        Case Else
+            Err.Raise vbObjectError + 3030, , "Invalid path code."
+    End Select
+End Function
+
+Private Function USD_TenorMonths(ByVal tenorIndex As Long) As Long
+    Select Case tenorIndex
+        Case 1: USD_TenorMonths = 0
+        Case 2: USD_TenorMonths = 1
+        Case 3: USD_TenorMonths = 3
+        Case 4: USD_TenorMonths = 6
+    End Select
+End Function
+
+Private Function USD_FloorIndex(ByVal targetDate As Double) As Long
+    Dim lo As Long, hi As Long, mid As Long
+
+    If targetDate <= mDate(1) Then USD_FloorIndex = 1: Exit Function
+    If targetDate >= mDate(mCurveN) Then USD_FloorIndex = mCurveN: Exit Function
+
+    lo = 1: hi = mCurveN
+    Do While lo <= hi
+        mid = (lo + hi) \ 2
+        If mDate(mid) = targetDate Then
+            USD_FloorIndex = mid
+            Exit Function
+        ElseIf mDate(mid) < targetDate Then
+            lo = mid + 1
+        Else
+            hi = mid - 1
+        End If
+    Loop
+    USD_FloorIndex = hi
+End Function
+
+'============================== CALC SHEET ===========================================
+
+Private Sub USD_WriteCalcSheet()
+    Dim ws As Worksheet
+    Dim i As Long, t As Long
+    Dim curveData() As Variant
+    Dim dailyData() As Variant
+    Dim monthData() As Variant
+
+    USD_DeleteSheetIfExists CALC_SHEET
+    Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.count))
+    ws.Name = CALC_SHEET
+
+    ReDim curveData(1 To mCurveN + 1, 1 To 5)
+    curveData(1, 1) = "Date": curveData(1, 2) = "ON": curveData(1, 3) = "1M": curveData(1, 4) = "3M": curveData(1, 5) = "6M"
+    For i = 1 To mCurveN
+        curveData(i + 1, 1) = mDate(i)
+        For t = 1 To 4
+            curveData(i + 1, t + 1) = mRate(t, i)
+        Next t
+    Next i
+    ws.Range("A1").Resize(UBound(curveData, 1), 5).Value2 = curveData
+    ws.Range("A2:A" & CStr(mCurveN + 1)).NumberFormat = "dd-mmm-yy"
+    ws.Range("B2:E" & CStr(mCurveN + 1)).NumberFormat = "0.00%"
+
+    ReDim dailyData(1 To mDailyN + 1, 1 To 5)
+    dailyData(1, 1) = "Date": dailyData(1, 2) = "6M-ON spread bp": dailyData(1, 3) = "Realized 6M excess bp": dailyData(1, 4) = "Rolled ON return": dailyData(1, 5) = "Locked 6M return"
+    For i = 1 To mDailyN
+        dailyData(i + 1, 1) = mDailyDate(i)
+        dailyData(i + 1, 2) = mDailySpread(i)
+        dailyData(i + 1, 3) = mDailyExcess(i)
+        dailyData(i + 1, 4) = mDailyONReturn(i)
+        dailyData(i + 1, 5) = mDaily6MReturn(i)
+    Next i
+    ws.Range("G1").Resize(UBound(dailyData, 1), 5).Value2 = dailyData
+    ws.Range("G2:G" & CStr(mDailyN + 1)).NumberFormat = "dd-mmm-yy"
+    ws.Range("J2:K" & CStr(mDailyN + 1)).NumberFormat = "0.000%"
+
+    ReDim monthData(1 To mMonthlyN + 1, 1 To 9)
+    monthData(1, 1) = "Start"
+    monthData(1, 2) = "Hist ON": monthData(1, 3) = "Hist 1M": monthData(1, 4) = "Hist 3M": monthData(1, 5) = "Hist 6M"
+    monthData(1, 6) = "Inv ON": monthData(1, 7) = "Inv 1M": monthData(1, 8) = "Inv 3M": monthData(1, 9) = "Inv 6M"
+    For i = 1 To mMonthlyN
+        monthData(i + 1, 1) = mMonthlyStart(i)
+        For t = 1 To 4
+            monthData(i + 1, t + 1) = mHistRet(t, i)
+            monthData(i + 1, t + 5) = mInvRet(t, i)
+        Next t
+    Next i
+    ws.Range("M1").Resize(UBound(monthData, 1), 9).Value2 = monthData
+    ws.Range("M2:M" & CStr(mMonthlyN + 1)).NumberFormat = "dd-mmm-yy"
+    ws.Range("N2:U" & CStr(mMonthlyN + 1)).NumberFormat = "0.000%"
+
+    ws.Range("W1:Y5").ClearContents
+    USD_WriteRow ws.Range("W1:Y1"), Array("Tenor", "Realized moves excess bp", "Inverted moves excess bp")
+    For t = 1 To 4
+        ws.Cells(t + 1, "W").value = USD_TenorName(t)
+        ws.Cells(t + 1, "X").value = mUpExcess(t)
+        ws.Cells(t + 1, "Y").value = mInvExcess(t)
+    Next t
+
+    USD_WriteRow ws.Range("AA1:AB1"), Array("Allocation", "Worst-direction regret bp")
+    USD_WriteRow ws.Range("AA2:AB2"), Array("100% ON", mONWorstRegret * 10000#)
+    USD_WriteRow ws.Range("AA3:AB3"), Array("100% 6M", m6MWorstRegret * 10000#)
+    USD_WriteRow ws.Range("AA4:AB4"), Array("Robust mix", mRobustWorstRegret * 10000#)
+
+    USD_WriteRow ws.Range("AD1:AE1"), Array("Tenor", "Weight")
+    USD_WriteRow ws.Range("AD2:AE2"), Array("ON", mRobustW(1))
+    USD_WriteRow ws.Range("AD3:AE3"), Array("1M", mRobustW(2))
+    USD_WriteRow ws.Range("AD4:AE4"), Array("3M", mRobustW(3))
+    USD_WriteRow ws.Range("AD5:AE5"), Array("6M", mRobustW(4))
+    ws.Range("AE2:AE5").NumberFormat = "0%"
+
+    ws.Cells.Font.Name = "Calibri"
+    ws.Rows(1).Font.Bold = True
+    ws.Columns("A:AZ").AutoFit
+End Sub
+
+'============================== DASHBOARD OUTPUT =====================================
+
+Private Sub USD_UpdateDashboardKPIs(ByVal ws As Worksheet)
+    ws.Range("P4:P11").value = Application.Transpose(Array( _
+        "Curve observations", "Realized daily starts", "Premium / excess corr.", "R-squared", _
+        "6M win rate", "High-premium Q4 avg excess", "Robust mix", "Worst regret"))
+
+    ws.Range("Q4").value = mCurveN
+    ws.Range("Q5").value = mDailyN
+    ws.Range("Q6").value = mCorr
+    ws.Range("Q7").value = mR2
+    ws.Range("Q8").value = mHitRate
+    ws.Range("Q9").value = mQ4Mean
+    ws.Range("Q10").value = USD_MixLabel
+    ws.Range("Q11").value = mRobustWorstRegret * 10000#
+
+    ws.Range("Q6").NumberFormat = "0.00"
+    ws.Range("Q7:Q8").NumberFormat = "0.0%"
+    ws.Range("Q9").NumberFormat = "0.0"
+    ws.Range("Q11").NumberFormat = "0.0"
+
+    ws.Range("P4:P11").Font.Bold = True
+    ws.Range("Q4:Q11").Font.Bold = True
+    ws.Range("Q4:Q11").Font.Color = RGB(23, 54, 93)
+
+    ws.Range("R4").value = ""
+    ws.Range("R5").value = ""
+    ws.Range("R6").value = ""
+    ws.Range("R7").value = ""
+    ws.Range("R8").value = ""
+    ws.Range("R9").value = "bp"
+    ws.Range("R10").value = Format(mWeightedMonths, "0.0") & " mo WAM"
+    ws.Range("R11").value = "bp"
+    ws.Range("R4:R11").Font.Color = RGB(115, 123, 133)
+End Sub
+
+Private Function USD_MixLabel() As String
+    USD_MixLabel = Format(mRobustW(1), "0%") & " ON / " & _
+                   Format(mRobustW(2), "0%") & " 1M / " & _
+                   Format(mRobustW(3), "0%") & " 3M / " & _
+                   Format(mRobustW(4), "0%") & " 6M"
+End Function
+
+'============================== CHARTS ================================================
+
+Private Sub USD_BuildCharts(ByVal wsDash As Worksheet)
+    Dim co As ChartObject
+
+    For Each co In wsDash.ChartObjects
+        co.Delete
+    Next co
+
+    USD_ChartCurve wsDash, "A15:J32"
+    USD_ChartPremiumTime wsDash, "L15:U32"
+    USD_ChartPremiumScatter wsDash, "A35:J52"
+    USD_ChartDirectionalStress wsDash, "L35:U52"
+    USD_ChartRegret wsDash, "A55:J72"
+    USD_ChartMix wsDash, "L55:U72"
+End Sub
+
+Private Sub USD_ChartCurve(ByVal wsDash As Worksheet, ByVal anchorRange As String)
+    Dim wsCalc As Worksheet, co As ChartObject, ch As Chart
+    Dim s As Series
+
+    Set wsCalc = ThisWorkbook.Worksheets(CALC_SHEET)
+    Set co = USD_NewChart(wsDash, "chtCurve", anchorRange)
+    Set ch = co.Chart
+    ch.ChartType = xlXYScatterLinesNoMarkers
+
+    USD_ClearSeries ch
+
+    Set s = ch.SeriesCollection.NewSeries
+    s.Name = "ON": s.XValues = wsCalc.Range("A2:A" & CStr(mCurveN + 1)): s.Values = wsCalc.Range("B2:B" & CStr(mCurveN + 1))
+    Set s = ch.SeriesCollection.NewSeries
+    s.Name = "1M": s.XValues = wsCalc.Range("A2:A" & CStr(mCurveN + 1)): s.Values = wsCalc.Range("C2:C" & CStr(mCurveN + 1))
+    Set s = ch.SeriesCollection.NewSeries
+    s.Name = "3M": s.XValues = wsCalc.Range("A2:A" & CStr(mCurveN + 1)): s.Values = wsCalc.Range("D2:D" & CStr(mCurveN + 1))
+    Set s = ch.SeriesCollection.NewSeries
+    s.Name = "6M": s.XValues = wsCalc.Range("A2:A" & CStr(mCurveN + 1)): s.Values = wsCalc.Range("E2:E" & CStr(mCurveN + 1))
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "SOFR cash curve by tenor"
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+
+    USD_FormatXYChart ch, "0.0%", True
+End Sub
+
+Private Sub USD_ChartPremiumTime(ByVal wsDash As Worksheet, ByVal anchorRange As String)
+    Dim wsCalc As Worksheet, co As ChartObject, ch As Chart
+    Dim s As Series
+
+    Set wsCalc = ThisWorkbook.Worksheets(CALC_SHEET)
+    Set co = USD_NewChart(wsDash, "chtPremiumTime", anchorRange)
+    Set ch = co.Chart
+    ch.ChartType = xlXYScatterLinesNoMarkers
+    USD_ClearSeries ch
+
+    Set s = ch.SeriesCollection.NewSeries
+    s.Name = "6M-ON premium": s.XValues = wsCalc.Range("G2:G" & CStr(mDailyN + 1)): s.Values = wsCalc.Range("H2:H" & CStr(mDailyN + 1))
+    Set s = ch.SeriesCollection.NewSeries
+    s.Name = "Realized 6M excess": s.XValues = wsCalc.Range("G2:G" & CStr(mDailyN + 1)): s.Values = wsCalc.Range("I2:I" & CStr(mDailyN + 1))
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "Premium priced vs realized six-month excess"
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+    USD_FormatXYChart ch, "0", False
+
+    On Error Resume Next
+    ch.Axes(xlValue).CrossesAt = 0
+    On Error GoTo 0
+End Sub
+
+Private Sub USD_ChartPremiumScatter(ByVal wsDash As Worksheet, ByVal anchorRange As String)
+    Dim wsCalc As Worksheet, co As ChartObject, ch As Chart
+    Dim s As Series, tr As Trendline
+
+    Set wsCalc = ThisWorkbook.Worksheets(CALC_SHEET)
+    Set co = USD_NewChart(wsDash, "chtPremiumScatter", anchorRange)
+    Set ch = co.Chart
+    ch.ChartType = xlXYScatter
+    USD_ClearSeries ch
+
+    Set s = ch.SeriesCollection.NewSeries
+    s.Name = "Daily decisions"
+    s.XValues = wsCalc.Range("H2:H" & CStr(mDailyN + 1))
+    s.Values = wsCalc.Range("I2:I" & CStr(mDailyN + 1))
+    s.MarkerStyle = xlMarkerStyleCircle
+    s.MarkerSize = 3
+    s.Format.Line.Visible = msoFalse
+
+    On Error Resume Next
+    Set tr = s.Trendlines.Add(Type:=xlLinear)
+    tr.DisplayRSquared = True
+    tr.DisplayEquation = False
+    On Error GoTo 0
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "Did a wider 6M premium predict outperformance?"
+    ch.HasLegend = False
+    USD_FormatScatterChart ch
+End Sub
+
+Private Sub USD_ChartDirectionalStress(ByVal wsDash As Worksheet, ByVal anchorRange As String)
+    Dim wsCalc As Worksheet, co As ChartObject, ch As Chart
+
+    Set wsCalc = ThisWorkbook.Worksheets(CALC_SHEET)
+    Set co = USD_NewChart(wsDash, "chtStress", anchorRange)
+    Set ch = co.Chart
+    ch.ChartType = xlColumnClustered
+    ch.SetSourceData wsCalc.Range("W1:Y5")
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "Six-month excess return under opposite rate directions"
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+    USD_FormatCategoryChart ch, "0"
+    On Error Resume Next
+    ch.Axes(xlValue).CrossesAt = 0
+    On Error GoTo 0
+End Sub
+
+Private Sub USD_ChartRegret(ByVal wsDash As Worksheet, ByVal anchorRange As String)
+    Dim wsCalc As Worksheet, co As ChartObject, ch As Chart
+    Dim s As Series
+
+    Set wsCalc = ThisWorkbook.Worksheets(CALC_SHEET)
+    Set co = USD_NewChart(wsDash, "chtRegret", anchorRange)
+    Set ch = co.Chart
+    ch.ChartType = xlBarClustered
+    ch.SetSourceData wsCalc.Range("AA1:AB4")
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "Worst-direction average regret"
+    ch.HasLegend = False
+    USD_FormatCategoryChart ch, "0.0"
+
+    If ch.SeriesCollection.count > 0 Then
+        Set s = ch.SeriesCollection(1)
+        s.ApplyDataLabels
+        s.DataLabels.NumberFormat = "0.0"
+        s.DataLabels.Position = xlLabelPositionOutsideEnd
+    End If
+End Sub
+
+Private Sub USD_ChartMix(ByVal wsDash As Worksheet, ByVal anchorRange As String)
+    Dim co As ChartObject, ch As Chart
+    Dim wsCalc As Worksheet
+    Dim s As Series, t As Long
+
+    Set wsCalc = ThisWorkbook.Worksheets(CALC_SHEET)
+    Set co = USD_NewChart(wsDash, "chtMix", anchorRange)
+    Set ch = co.Chart
+    ch.ChartType = xlBarStacked
+    USD_ClearSeries ch
+
+    For t = 1 To 4
+        Set s = ch.SeriesCollection.NewSeries
+        s.Name = USD_TenorName(t)
+        s.Values = Array(mRobustW(t))
+        s.XValues = Array("Robust mix")
+        s.ApplyDataLabels
+        s.DataLabels.NumberFormat = "0%"
+        s.DataLabels.Position = xlLabelPositionCenter
+    Next t
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "Reference allocation minimizing worst-direction regret"
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+
+    USD_FormatCategoryChart ch, "0%"
+    On Error Resume Next
+    ch.Axes(xlValue).MinimumScale = 0
+    ch.Axes(xlValue).MaximumScale = 1
+    ch.Axes(xlValue).MajorUnit = 0.25
+    On Error GoTo 0
+End Sub
+
+Private Function USD_NewChart(ByVal ws As Worksheet, ByVal chartName As String, ByVal anchorRange As String) As ChartObject
+    Dim r As Range
+    Dim co As ChartObject
+
+    Set r = ws.Range(anchorRange)
+    Set co = ws.ChartObjects.Add(r.Left, r.Top, r.Width, r.Height)
+    co.Name = chartName
+
+    With co.Chart
+        .ChartArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+        .ChartArea.Format.Line.Visible = msoFalse
+        .PlotArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+        .PlotArea.Format.Line.Visible = msoFalse
+    End With
+
+    Set USD_NewChart = co
+End Function
+
+Private Sub USD_ClearSeries(ByVal ch As Chart)
+    Do While ch.SeriesCollection.count > 0
+        ch.SeriesCollection(1).Delete
+    Loop
+End Sub
+
+Private Sub USD_FormatXYChart(ByVal ch As Chart, ByVal yFormat As String, ByVal percentRates As Boolean)
+    On Error Resume Next
+
+    With ch.ChartTitle.Format.TextFrame2.TextRange.Font
+        .Name = "Calibri"
+        .Size = 13
+        .Bold = msoTrue
+        .Fill.ForeColor.RGB = RGB(37, 42, 49)
+    End With
+
+    With ch.Axes(xlCategory)
+        .TickLabels.NumberFormat = "mmm-yy"
+        .TickLabels.Font.Name = "Calibri"
+        .TickLabels.Font.Size = 9
+        .HasMajorGridlines = False
+        .Format.Line.ForeColor.RGB = RGB(183, 189, 196)
+    End With
+
+    With ch.Axes(xlValue)
+        .TickLabels.NumberFormat = yFormat
+        .TickLabels.Font.Name = "Calibri"
+        .TickLabels.Font.Size = 9
+        .HasMajorGridlines = True
+        .MajorGridlines.Format.Line.ForeColor.RGB = RGB(229, 232, 236)
+        .Format.Line.Visible = msoFalse
+    End With
+
+    If ch.HasLegend Then
+        ch.Legend.Font.Name = "Calibri"
+        ch.Legend.Font.Size = 9
+    End If
+
+    On Error GoTo 0
+End Sub
+
+Private Sub USD_FormatScatterChart(ByVal ch As Chart)
+    On Error Resume Next
+    With ch.ChartTitle.Format.TextFrame2.TextRange.Font
+        .Name = "Calibri": .Size = 13: .Bold = msoTrue: .Fill.ForeColor.RGB = RGB(37, 42, 49)
+    End With
+    With ch.Axes(xlCategory)
+        .TickLabels.NumberFormat = "0"
+        .TickLabels.Font.Name = "Calibri": .TickLabels.Font.Size = 9
+        .HasMajorGridlines = True
+        .MajorGridlines.Format.Line.ForeColor.RGB = RGB(229, 232, 236)
+        .HasTitle = True
+        .AxisTitle.Text = "6M-ON premium at inception | bp"
+    End With
+    With ch.Axes(xlValue)
+        .TickLabels.NumberFormat = "0"
+        .TickLabels.Font.Name = "Calibri": .TickLabels.Font.Size = 9
+        .HasMajorGridlines = True
+        .MajorGridlines.Format.Line.ForeColor.RGB = RGB(229, 232, 236)
+        .HasTitle = True
+        .AxisTitle.Text = "Realized 6M excess vs rolled ON | bp"
+        .CrossesAt = 0
+    End With
+    On Error GoTo 0
+End Sub
+
+Private Sub USD_FormatCategoryChart(ByVal ch As Chart, ByVal valueFormat As String)
+    On Error Resume Next
+    With ch.ChartTitle.Format.TextFrame2.TextRange.Font
+        .Name = "Calibri": .Size = 13: .Bold = msoTrue: .Fill.ForeColor.RGB = RGB(37, 42, 49)
+    End With
+    With ch.Axes(xlValue)
+        .TickLabels.NumberFormat = valueFormat
+        .TickLabels.Font.Name = "Calibri": .TickLabels.Font.Size = 9
+        .HasMajorGridlines = True
+        .MajorGridlines.Format.Line.ForeColor.RGB = RGB(229, 232, 236)
+        .Format.Line.Visible = msoFalse
+    End With
+    With ch.Axes(xlCategory)
+        .TickLabels.Font.Name = "Calibri": .TickLabels.Font.Size = 9
+        .HasMajorGridlines = False
+        .Format.Line.ForeColor.RGB = RGB(183, 189, 196)
+    End With
+    If ch.HasLegend Then
+        ch.Legend.Font.Name = "Calibri"
+        ch.Legend.Font.Size = 9
+    End If
+    On Error GoTo 0
+End Sub
+
+'============================== STYLE / ANNOTATIONS ==================================
+
+Private Sub USD_ApplyStyleCore(ByVal ws As Worksheet)
+    Dim cON As Long, c1M As Long, c3M As Long, c6M As Long
+    Dim cPos As Long, cNeg As Long, cStress As Long
+    Dim lineWidth As Double
+    Dim ch As Chart
+
+    cON = USD_HexColor(CStr(ws.Range("B4").value), RGB(148, 155, 164))
+    c1M = USD_HexColor(CStr(ws.Range("B5").value), RGB(92, 135, 170))
+    c3M = USD_HexColor(CStr(ws.Range("B6").value), RGB(31, 122, 107))
+    c6M = USD_HexColor(CStr(ws.Range("B7").value), RGB(23, 54, 93))
+    cPos = USD_HexColor(CStr(ws.Range("B8").value), RGB(78, 124, 60))
+    cNeg = USD_HexColor(CStr(ws.Range("B9").value), RGB(166, 46, 46))
+    cStress = USD_HexColor(CStr(ws.Range("B10").value), RGB(194, 118, 61))
+
+    lineWidth = 2
+    If IsNumeric(ws.Range("E6").value) Then lineWidth = CDbl(ws.Range("E6").value)
+    If lineWidth <= 0 Then lineWidth = 2
+
+    USD_PaintColorCells ws
+
+    'Chart 1 - curve
+    If USD_ChartExists(ws, "chtCurve") Then
+        Set ch = ws.ChartObjects("chtCurve").Chart
+        USD_SetLineSeries ch, 1, cON, lineWidth
+        USD_SetLineSeries ch, 2, c1M, lineWidth
+        USD_SetLineSeries ch, 3, c3M, lineWidth
+        USD_SetLineSeries ch, 4, c6M, lineWidth + 0.5
+        USD_SetDateAxisFromDashboard ch, ws
+        USD_SetOptionalCurveYScale ch, ws
+        USD_ApplyCurveAnnotations ch, ws
+    End If
+
+    'Chart 2 - premium vs realized
+    If USD_ChartExists(ws, "chtPremiumTime") Then
+        Set ch = ws.ChartObjects("chtPremiumTime").Chart
+        USD_SetLineSeries ch, 1, c1M, lineWidth
+        USD_SetLineSeries ch, 2, c6M, lineWidth + 0.25
+        USD_SetDateAxisFromDashboard ch, ws
+    End If
+
+    'Chart 3 - scatter
+    If USD_ChartExists(ws, "chtPremiumScatter") Then
+        Set ch = ws.ChartObjects("chtPremiumScatter").Chart
+        If ch.SeriesCollection.count > 0 Then
+            ch.SeriesCollection(1).MarkerForegroundColor = c6M
+            ch.SeriesCollection(1).MarkerBackgroundColor = c6M
+        End If
+        On Error Resume Next
+        If ch.SeriesCollection(1).Trendlines.count > 0 Then ch.SeriesCollection(1).Trendlines(1).Format.Line.ForeColor.RGB = cNeg
+        On Error GoTo 0
+    End If
+
+    'Chart 4 - directional stress
+    If USD_ChartExists(ws, "chtStress") Then
+        Set ch = ws.ChartObjects("chtStress").Chart
+        If ch.SeriesCollection.count >= 2 Then
+            ch.SeriesCollection(1).Format.Fill.ForeColor.RGB = c6M
+            ch.SeriesCollection(1).Format.Line.Visible = msoFalse
+            ch.SeriesCollection(2).Format.Fill.ForeColor.RGB = cStress
+            ch.SeriesCollection(2).Format.Line.Visible = msoFalse
+        End If
+    End If
+
+    'Chart 5 - regret
+    If USD_ChartExists(ws, "chtRegret") Then
+        Set ch = ws.ChartObjects("chtRegret").Chart
+        If ch.SeriesCollection.count > 0 Then
+            ch.SeriesCollection(1).Format.Fill.ForeColor.RGB = c6M
+            ch.SeriesCollection(1).Format.Line.Visible = msoFalse
+        End If
+    End If
+
+    'Chart 6 - mix
+    If USD_ChartExists(ws, "chtMix") Then
+        Set ch = ws.ChartObjects("chtMix").Chart
+        If ch.SeriesCollection.count >= 4 Then
+            ch.SeriesCollection(1).Format.Fill.ForeColor.RGB = cON
+            ch.SeriesCollection(2).Format.Fill.ForeColor.RGB = c1M
+            ch.SeriesCollection(3).Format.Fill.ForeColor.RGB = c3M
+            ch.SeriesCollection(4).Format.Fill.ForeColor.RGB = c6M
+            ch.SeriesCollection(1).Format.Line.Visible = msoFalse
+            ch.SeriesCollection(2).Format.Line.Visible = msoFalse
+            ch.SeriesCollection(3).Format.Line.Visible = msoFalse
+            ch.SeriesCollection(4).Format.Line.Visible = msoFalse
+        End If
+    End If
+End Sub
+
+Private Sub USD_SetLineSeries(ByVal ch As Chart, ByVal seriesIndex As Long, ByVal colorValue As Long, ByVal weightValue As Double)
+    If ch.SeriesCollection.count < seriesIndex Then Exit Sub
+    With ch.SeriesCollection(seriesIndex).Format.Line
+        .Visible = msoTrue
+        .ForeColor.RGB = colorValue
+        .Weight = weightValue
+    End With
+End Sub
+
+Private Sub USD_SetDateAxisFromDashboard(ByVal ch As Chart, ByVal ws As Worksheet)
+    Dim minD As Double, maxD As Double
+    minD = mDate(1): maxD = mDate(mCurveN)
+
+    If IsDate(ws.Range("E4").value) Then minD = CDbl(CDate(ws.Range("E4").value))
+    If IsDate(ws.Range("E5").value) Then maxD = CDbl(CDate(ws.Range("E5").value))
+
+    If minD < mDate(1) Then minD = mDate(1)
+    If maxD > mDate(mCurveN) Then maxD = mDate(mCurveN)
+    If maxD <= minD Then
+        minD = mDate(1)
+        maxD = mDate(mCurveN)
+    End If
+
+    On Error Resume Next
+    ch.Axes(xlCategory).MinimumScale = minD
+    ch.Axes(xlCategory).MaximumScale = maxD
+    ch.Axes(xlCategory).MajorUnit = WorksheetFunction.Max(30, (maxD - minD) / 8#)
+    On Error GoTo 0
+End Sub
+
+Private Sub USD_SetOptionalCurveYScale(ByVal ch As Chart, ByVal ws As Worksheet)
+    On Error Resume Next
+    ch.Axes(xlValue).MinimumScaleIsAuto = True
+    ch.Axes(xlValue).MaximumScaleIsAuto = True
+    If IsNumeric(ws.Range("E7").value) And Len(CStr(ws.Range("E7").value)) > 0 Then ch.Axes(xlValue).MinimumScale = CDbl(ws.Range("E7").value)
+    If IsNumeric(ws.Range("E8").value) And Len(CStr(ws.Range("E8").value)) > 0 Then ch.Axes(xlValue).MaximumScale = CDbl(ws.Range("E8").value)
+    On Error GoTo 0
+End Sub
+
+Private Sub USD_ApplyCurveAnnotations(ByVal ch As Chart, ByVal ws As Worksheet)
+    Dim i As Long, rowN As Long
+    Dim showIt As Boolean
+    Dim eventDate As Double, tenor As String, labelText As String
+    Dim colorValue As Long
+    Dim xOffset As Double, yOffset As Double
+    Dim idx As Long, tenorIdx As Long
+    Dim rateValue As Double
+    Dim xMin As Double, xMax As Double, yMin As Double, yMax As Double
+    Dim xPoint As Double, yPoint As Double
+    Dim tx As Double, ty As Double
+    Dim ln As Shape, tb As Shape
+
+    On Error Resume Next
+    For i = ch.Shapes.count To 1 Step -1
+        If Left$(ch.Shapes(i).Name, 4) = "ANN_" Then ch.Shapes(i).Delete
+    Next i
+    On Error GoTo 0
+
+    ch.Refresh
+    DoEvents
+
+    On Error Resume Next
+    xMin = ch.Axes(xlCategory).MinimumScale
+    xMax = ch.Axes(xlCategory).MaximumScale
+    yMin = ch.Axes(xlValue).MinimumScale
+    yMax = ch.Axes(xlValue).MaximumScale
+    On Error GoTo 0
+
+    If xMax <= xMin Or yMax <= yMin Then Exit Sub
+
+    For rowN = 5 To 9
+        showIt = USD_IsTrue(ws.Cells(rowN, "H").value)
+        If showIt And IsDate(ws.Cells(rowN, "I").value) Then
+            eventDate = CDbl(CDate(ws.Cells(rowN, "I").value))
+            tenor = UCase$(Trim$(CStr(ws.Cells(rowN, "J").value)))
+            labelText = CStr(ws.Cells(rowN, "K").value)
+            colorValue = USD_HexColor(CStr(ws.Cells(rowN, "L").value), RGB(23, 54, 93))
+            xOffset = USD_NumberOrZero(ws.Cells(rowN, "M").value)
+            yOffset = USD_NumberOrZero(ws.Cells(rowN, "N").value)
+
+            tenorIdx = USD_TenorIndex(tenor)
+            If tenorIdx > 0 And eventDate >= xMin And eventDate <= xMax Then
+                idx = USD_FloorIndex(eventDate)
+                rateValue = mRate(tenorIdx, idx)
+
+                If rateValue >= yMin And rateValue <= yMax Then
+                    xPoint = ch.PlotArea.InsideLeft + (eventDate - xMin) / (xMax - xMin) * ch.PlotArea.InsideWidth
+                    yPoint = ch.PlotArea.InsideTop + (yMax - rateValue) / (yMax - yMin) * ch.PlotArea.InsideHeight
+
+                    tx = xPoint + xOffset - 55
+                    ty = yPoint + yOffset
+
+                    If tx < 2 Then tx = 2
+                    If ty < 2 Then ty = 2
+                    If tx > ch.ChartArea.Width - 112 Then tx = ch.ChartArea.Width - 112
+                    If ty > ch.ChartArea.Height - 34 Then ty = ch.ChartArea.Height - 34
+
+                    Set ln = ch.Shapes.AddLine(tx + 55, ty + 28, xPoint, yPoint)
+                    ln.Name = "ANN_LINE_" & CStr(rowN)
+                    With ln.Line
+                        .ForeColor.RGB = colorValue
+                        .Weight = 1.5
+                        .EndArrowheadStyle = msoArrowheadTriangle
+                    End With
+
+                    Set tb = ch.Shapes.AddTextbox(msoTextOrientationHorizontal, tx, ty, 110, 28)
+                    tb.Name = "ANN_TEXT_" & CStr(rowN)
+                    tb.Fill.Visible = msoFalse
+                    tb.Line.Visible = msoFalse
+                    With tb.TextFrame2
+                        .TextRange.Text = labelText
+                        .TextRange.Font.Name = "Calibri"
+                        .TextRange.Font.Size = 8.5
+                        .TextRange.Font.Bold = msoTrue
+                        .TextRange.Font.Fill.ForeColor.RGB = colorValue
+                        .TextRange.ParagraphFormat.Alignment = msoAlignCenter
+                        .VerticalAnchor = msoAnchorMiddle
+                    End With
+                End If
+            End If
+        End If
+    Next rowN
+End Sub
+
+Private Sub USD_PaintColorCells(ByVal ws As Worksheet)
+    Dim r As Long, c As Long, v As Long
+    For r = 4 To 10
+        v = USD_HexColor(CStr(ws.Cells(r, "B").value), RGB(255, 255, 255))
+        ws.Cells(r, "B").Interior.Color = v
+        ws.Cells(r, "B").Font.Color = USD_ContrastFont(v)
+        ws.Cells(r, "B").Font.Bold = True
+    Next r
+
+    For r = 5 To 9
+        v = USD_HexColor(CStr(ws.Cells(r, "L").value), RGB(255, 255, 255))
+        ws.Cells(r, "L").Interior.Color = v
+        ws.Cells(r, "L").Font.Color = USD_ContrastFont(v)
+        ws.Cells(r, "L").Font.Bold = True
+    Next r
+End Sub
+
+'============================== HELPERS ===============================================
+
+Private Function USD_SheetExists(ByVal sheetName As String) As Boolean
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    USD_SheetExists = Not ws Is Nothing
+    On Error GoTo 0
+End Function
+
+Private Sub USD_DeleteSheetIfExists(ByVal sheetName As String)
+    On Error Resume Next
+    ThisWorkbook.Worksheets(sheetName).Delete
+    On Error GoTo 0
+End Sub
+
+Private Function USD_ChartExists(ByVal ws As Worksheet, ByVal chartName As String) As Boolean
+    Dim co As ChartObject
+    On Error Resume Next
+    Set co = ws.ChartObjects(chartName)
+    USD_ChartExists = Not co Is Nothing
+    On Error GoTo 0
+End Function
+
+Private Function USD_TenorName(ByVal tenorIndex As Long) As String
+    Select Case tenorIndex
+        Case 1: USD_TenorName = "ON"
+        Case 2: USD_TenorName = "1M"
+        Case 3: USD_TenorName = "3M"
+        Case 4: USD_TenorName = "6M"
+    End Select
+End Function
+
+Private Function USD_TenorIndex(ByVal tenorName As String) As Long
+    Select Case UCase$(Trim$(tenorName))
+        Case "ON": USD_TenorIndex = 1
+        Case "1M": USD_TenorIndex = 2
+        Case "3M": USD_TenorIndex = 3
+        Case "6M": USD_TenorIndex = 4
+        Case Else: USD_TenorIndex = 0
+    End Select
+End Function
+
+Private Function USD_IsTrue(ByVal value As Variant) As Boolean
+    If VarType(value) = vbBoolean Then
+        USD_IsTrue = CBool(value)
+    Else
+        USD_IsTrue = (UCase$(Trim$(CStr(value))) = "TRUE" Or Val(CStr(value)) = 1)
+    End If
+End Function
+
+Private Function USD_NumberOrZero(ByVal value As Variant) As Double
+    If IsNumeric(value) Then USD_NumberOrZero = CDbl(value) Else USD_NumberOrZero = 0#
+End Function
+
+Private Function USD_HexColor(ByVal hexText As String, ByVal fallback As Long) As Long
+    Dim s As String
+    Dim r As Long, g As Long, b As Long
+
+    On Error GoTo bad
+    s = Replace(Trim$(hexText), "#", "")
+    If Len(s) <> 6 Then GoTo bad
+
+    r = CLng("&H" & mid$(s, 1, 2))
+    g = CLng("&H" & mid$(s, 3, 2))
+    b = CLng("&H" & mid$(s, 5, 2))
+    USD_HexColor = RGB(r, g, b)
+    Exit Function
+bad:
+    USD_HexColor = fallback
+End Function
+
+Private Function USD_ContrastFont(ByVal fillColor As Long) As Long
+    Dim r As Long, g As Long, b As Long
+    Dim luminance As Double
+    r = fillColor Mod 256
+    g = (fillColor \ 256) Mod 256
+    b = (fillColor \ 65536) Mod 256
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    If luminance < 145 Then USD_ContrastFont = RGB(255, 255, 255) Else USD_ContrastFont = RGB(37, 42, 49)
+End Function
+
+Private Sub USD_WriteRow(ByVal rng As Range, ByVal vals As Variant)
+    Dim i As Long
+    For i = LBound(vals) To UBound(vals)
+        rng.Cells(1, i - LBound(vals) + 1).value = vals(i)
+    Next i
+End Sub
+
+Private Sub USD_QuickSortPair(ByRef x() As Double, ByRef y() As Double, ByVal first As Long, ByVal last As Long)
+    Dim i As Long, j As Long
+    Dim pivot As Double, tx As Double, ty As Double
+
+    i = first: j = last
+    pivot = x((first + last) \ 2)
+
+    Do While i <= j
+        Do While x(i) < pivot: i = i + 1: Loop
+        Do While x(j) > pivot: j = j - 1: Loop
+        If i <= j Then
+            tx = x(i): x(i) = x(j): x(j) = tx
+            ty = y(i): y(i) = y(j): y(j) = ty
+            i = i + 1
+            j = j - 1
+        End If
+    Loop
+
+    If first < j Then USD_QuickSortPair x, y, first, j
+    If i < last Then USD_QuickSortPair x, y, i, last
+End Sub
+
+
