@@ -16,6 +16,7 @@ Option Explicit
 '
 ' OUTPUT SHEETS
 '   PPT_Index          manual PowerPoint workflow and source map
+'   PPT_Object_Map     object-level source, range, formula and decision logic
 '   PPT_S1_Curve       historical curve, macro events and realized examples
 '   PPT_S2_Signal      priced premium versus realized return and regression
 '   PPT_S3_Stress      normalized realized/inverted paths and return effect
@@ -32,6 +33,7 @@ Option Explicit
 '====================================================================================
 
 Private Const S_INDEX As String = "PPT_Index"
+Private Const S_OBJECTS As String = "PPT_Object_Map"
 Private Const S1 As String = "PPT_S1_Curve"
 Private Const S2 As String = "PPT_S2_Signal"
 Private Const S3 As String = "PPT_S3_Stress"
@@ -112,6 +114,7 @@ Private mPortfolioRegret() As Double
 Private mPortfolioWorst() As Double
 Private mPortfolioAverage() As Double
 Private mPortfolioLowest() As Double
+Private mObjectCount As Long
 
 Public Sub USD_CreateCashAllocationExcelPack()
 
@@ -140,6 +143,7 @@ Public Sub USD_CreateCashAllocationExcelPack()
     USD_CalculateDirectionalStress
     USD_CalculateForwardAllocation
 
+    USD_BuildObjectMap
     USD_BuildIndex
     USD_BuildSlide1Sheet
     USD_BuildSlide2Sheet
@@ -193,13 +197,19 @@ Private Sub USD_BuildIndex()
     USD_SectionHeader ws.Range("A5:H5"), "HOW TO USE THIS WORKBOOK"
     ws.Range("A6:H10").Merge
     With ws.Range("A6:H10")
-        .Value = "1  Review PPT_Audit before using any output." & vbLf & _
-                 "2  Open each PPT_S# sheet and copy the native Excel chart(s)." & vbLf & _
-                 "3  Copy the adjacent committee message and conclusion." & vbLf & _
-                 "4  Keep the support tables from row 40 onward for traceability." & vbLf & _
+        .Value = "1  Review PPT_Audit and PPT_Object_Map before using any output." & vbLf & _
+                 "2  Filter PPT_Object_Map by slide to trace each object to its range and formula." & vbLf & _
+                 "3  Open each PPT_S# sheet and copy the native Excel chart(s) and comments." & vbLf & _
+                 "4  Keep support tables from row 40 onward for traceability." & vbLf & _
                  "5  PowerPoint is intentionally not created or edited by this module."
         USD_BodyBox .Cells, USD_LightBlue(), USD_Navy()
     End With
+
+    ws.Range("A11:H11").Merge
+    ws.Hyperlinks.Add Anchor:=ws.Range("A11"), Address:="", _
+                      SubAddress:="'" & S_OBJECTS & "'!A1", _
+                      TextToDisplay:="OPEN OBJECT SOURCE & LOGIC REGISTER"
+    USD_InstructionLine ws.Range("A11:H11")
 
     ws.Range("J5:T5").Merge
     USD_SectionHeader ws.Range("J5:T5"), "REFERENCE ALLOCATION | FIVE-SCENARIO MODEL"
@@ -283,15 +293,261 @@ Private Sub USD_BuildIndex()
     USD_SetPrint ws, "$A$1:$T$33"
 End Sub
 
+Private Sub USD_BuildObjectMap()
+
+    Dim ws As Worksheet
+    Dim r As Long
+    Dim dailyEnd As Long
+    Dim curveEnd As Long
+    Dim monthlyEnd As Long
+    Dim gridEnd As Long
+
+    Set ws = USD_GetOrCreateSheet(S_OBJECTS)
+    USD_ResetOutputSheet ws
+    USD_SetCanvas ws, 13
+    USD_Title ws, "OBJECT SOURCE & LOGIC REGISTER", _
+        "One auditable row for every slide chart, metric, table, input block and committee conclusion"
+
+    ws.Range("A3:M4").Merge
+    With ws.Range("A3:M4")
+        .Value = "READING RULE  |  Inputs are typed values from Curve, macro context or blue assumption cells. Derived outputs use the formula shown below or the equivalent ACT/360 roll engine. Filter by Slide or Object type before copying content to PowerPoint."
+        USD_BodyBox .Cells, USD_LightBlue(), USD_Navy()
+    End With
+
+    USD_WriteHeaders ws.Range("A6:M6"), _
+        Array("Slide", "Object ID", "Object type", "Object / purpose", "Excel sheet", _
+              "Output range / name", "Primary data source", "Supporting source", _
+              "Logic", "Simple Excel formula / pattern", "Unit", "Refresh / owner", "Control / decision use")
+
+    r = 7
+    curveEnd = SUPPORT_ROW + mCurveN
+    dailyEnd = SUPPORT_ROW + mDailyN
+    monthlyEnd = SUPPORT_ROW + mMonthlyN
+    gridEnd = 88 + mPortfolioCount
+
+    'Slide 1 | historical curve and holding-period examples.
+    USD_AddObject ws, r, 1, "S1-01", "Chart", "Historical SOFR curve with event markers", S1, "chtPPTS1Curve", _
+        "'Curve'!A:E", "'" & S1 & "'!H40:N45", "Plot Date on X and ON/1M/3M/6M on Y; event dates are vertical markers.", _
+        "Chart series = '" & S1 & "'!A41:E" & curveEnd, "Rate", "Curve refresh / Treasury", "Shows that macro repricing changed the path."
+    USD_AddObject ws, r, 1, "S1-02", "Table", "Latest curve", S1, "P5:Q10", _
+        "Latest nonblank row of 'Curve'!A:E", "'" & S1 & "'!A40:E" & curveEnd, "Return the last observed rate for each tenor.", _
+        "=INDEX('Curve'!B:B,COUNTA('Curve'!$A:$A))", "Rate", "Curve refresh / Treasury", "Starting point for forward scenarios and execution comparison."
+    USD_AddObject ws, r, 1, "S1-03", "Context table", "Selected CPI, payroll, unemployment and Fed events", S1, "P12:U17", _
+        "Committee-approved event annotations", "'" & S1 & "'!H40:N45", "Place selected events beside the curve; context does not enter return formulas.", _
+        "No calculation; typed context with event date and source label", "Macro data", "Risk / Treasury review", "Do not present annotations as causal proof."
+    USD_AddObject ws, r, 1, "S1-04", "Evidence table", "Jan-22 and Jul-24 six-month examples", S1, "P19:V22", _
+        "'" & S2 & "'!A41:J" & dailyEnd, "Curve and ACT/360 return engine", "Compare locked 6M return with ON compounded to the same maturity.", _
+        "Excess bp =(Locked 6M-Rolled ON)*10000", "bp / holding return", "Curve refresh / model", "Illustrates why the inception premium can have the opposite realized sign."
+    USD_AddObject ws, r, 1, "S1-05", "Comment", "Committee readout", S1, "P24:V29", _
+        "S1-04 holding examples", "S1-01 curve path", "Translate the two examples into the risk distinction between carry and rate path.", _
+        "Judgment based on S1-01 and S1-04; no standalone formula", "Narrative", "Risk", "Premium is compensation, not a guaranteed outcome."
+    USD_AddObject ws, r, 1, "S1-06", "Conclusion", "Slide 1 key message", S1, "A31:V34", _
+        "S1-01 to S1-05", "PPT_Audit", "State the risk conclusion supported by the curve and holding evidence.", _
+        "No calculation; conclusion must remain consistent with audited evidence", "Narrative", "Risk / Committee", "Term premium does not guarantee superior realized return."
+
+    'Slide 2 | priced premium versus realized outcome.
+    USD_AddObject ws, r, 2, "S2-01", "Evidence table", "Daily six-month decisions", S2, "A40:J" & dailyEnd, _
+        "'Curve'!A:E", "ACT/360 roll engine", "Keep only starts with a complete six-month horizon; calculate spread, returns, excess and winner.", _
+        "Spread bp=(6M-ON)*10000; Excess bp=(Locked6M-RolledON)*10000", "bp / return", "Curve refresh / model", "Base table for every slide 2 object."
+    USD_AddObject ws, r, 2, "S2-02", "Chart", "Premium priced versus realized outcome through time", S2, "chtPPTS2Time", _
+        "'" & S2 & "'!A41:A" & dailyEnd & ",E41:E" & dailyEnd & ",H41:H" & dailyEnd, "Zero line", "Plot spread and excess on the same decision-date axis.", _
+        "X=Decision date; Y1=Spread bp; Y2=Excess bp", "bp", "Automatic / model", "Shows path dependence through time."
+    USD_AddObject ws, r, 2, "S2-03", "Chart", "Spread versus realized excess scatter", S2, "chtPPTS2Scatter", _
+        "'" & S2 & "'!E41:E" & dailyEnd & ",H41:H" & dailyEnd, "Linear fit L40:M42", "Plot each daily start and a simple least-squares line.", _
+        "Fitted y=INTERCEPT(y,x)+SLOPE(y,x)*x", "bp", "Automatic / model", "Tests whether premium is a usable timing signal."
+    USD_AddObject ws, r, 2, "S2-04", "Metric", "Correlation", S2, "A25:C27", _
+        "'" & S2 & "'!E41:E" & dailyEnd & ",H41:H" & dailyEnd, "S2-01", "Measure linear association between inception spread and realized excess.", _
+        "=CORREL(E41:E" & dailyEnd & ",H41:H" & dailyEnd & ")", "Correlation", "Automatic / model", "Weak or unstable correlation argues against a single-signal decision."
+    USD_AddObject ws, r, 2, "S2-05", "Metric", "R-squared", S2, "D25:F27", _
+        "'" & S2 & "'!E41:E" & dailyEnd & ",H41:H" & dailyEnd, "S2-04", "Measure the share of realized-excess variation explained by a linear spread model.", _
+        "=RSQ(H41:H" & dailyEnd & ",E41:E" & dailyEnd & ")", "%", "Automatic / model", "Low explanatory power limits forecast use."
+    USD_AddObject ws, r, 2, "S2-06", "Metric", "6M win rate", S2, "G25:I27", _
+        "'" & S2 & "'!H41:H" & dailyEnd, "S2-01", "Count decisions where 6M excess is positive.", _
+        "=COUNTIF(H41:H" & dailyEnd & ","">0"")/COUNT(H41:H" & dailyEnd & ")", "%", "Automatic / model", "Frequency measure, not probability forecast."
+    USD_AddObject ws, r, 2, "S2-07", "Metric", "Top-spread quartile mean excess", S2, "J25:L27", _
+        "'" & S2 & "'!E41:E" & dailyEnd & ",H41:H" & dailyEnd, "75th percentile of spread", "Average excess only for observations in the highest spread quartile.", _
+        "=AVERAGEIFS(H41:H" & dailyEnd & ",E41:E" & dailyEnd & ","">=""&QUARTILE.INC(E41:E" & dailyEnd & ",3))", "bp", "Automatic / model", "Tests whether the largest quoted premiums delivered value."
+    USD_AddObject ws, r, 2, "S2-08", "Metric", "Top-spread quartile hit rate", S2, "M25:O27", _
+        "Same filtered sample as S2-07", "S2-01", "Count positive excess observations inside the highest spread quartile.", _
+        "=COUNTIFS(E:E,"">=""&QUARTILE.INC(E:E,3),H:H,"">0"")/COUNTIF(E:E,"">=""&QUARTILE.INC(E:E,3))", "%", "Automatic / model", "Confirms whether high premium improved decision reliability."
+    USD_AddObject ws, r, 2, "S2-09", "Metric", "Eligible decision count", S2, "P25:R27", _
+        "'" & S2 & "'!A41:A" & dailyEnd, "Six-month horizon filter", "Count decision dates with a complete maturity inside the source curve.", _
+        "=COUNT(A41:A" & dailyEnd & ")", "Count", "Automatic / model", "Documents sample size and overlap."
+    USD_AddObject ws, r, 2, "S2-10", "Conclusion", "Slide 2 risk message", S2, "A29:V38", _
+        "S2-02 to S2-09", "PPT_Audit", "Translate weak signal diagnostics into a maturity-allocation constraint.", _
+        "No calculation; conclusion must reflect correlation, R-squared, hit rate and quartile evidence", "Narrative", "Risk / Committee", "Do not convert one spread into a concentrated maturity bet."
+
+    'Slide 3 | inverted path and reinvestment risk.
+    USD_AddObject ws, r, 3, "S3-01", "Evidence table", "Comparable realized and inverted paths", S3, "A40:I" & curveEnd, _
+        "'Curve'!A:E", "Common 5.50% ON anchor", "Add observed tenor moves for the rising path and reverse them for the falling path.", _
+        "Rise=5.50%+Rate(t)-ON(first); Fall=5.50%+2*Rate(first)-ON(first)-Rate(t)", "Rate", "Curve refresh / model", "All paths remain on comparable positive levels."
+    USD_AddObject ws, r, 3, "S3-02", "Chart", "Realized and inverted ON/6M paths", S3, "chtPPTS3Paths", _
+        "'" & S3 & "'!A41:I" & curveEnd, "S3-01", "Plot ON and 6M under both directional states on the same scale.", _
+        "Chart series reference S3-01 columns A,B,E,F,I", "Rate", "Automatic / model", "Makes lock-in risk and reinvestment risk comparable."
+    USD_AddObject ws, r, 3, "S3-03", "Evidence table", "Daily falling-path 6M outcomes", S3, "AE40:AH" & dailyEnd, _
+        "S3-01 falling path", "Daily eligible starts from S2-01", "For every complete daily start, compare locked falling-path 6M with rolled falling-path ON.", _
+        "Excess bp=(Locked falling 6M-Rolled falling ON)*10000; Positive=Excess>0", "bp", "Automatic / model", "Full daily stress evidence."
+    USD_AddObject ws, r, 3, "S3-04", "Chart", "Premium versus stressed excess through time", S3, "chtPPTS3Daily", _
+        "'" & S3 & "'!AE41:AG" & dailyEnd, "S3-03", "Plot actual inception spread beside falling-path stressed excess.", _
+        "X=Date; Y1=Premium bp; Y2=Stressed excess bp", "bp", "Automatic / model", "Shows why falling ON resets make term carry valuable."
+    USD_AddObject ws, r, 3, "S3-05", "Chart", "Spread versus falling-path outcome scatter", S3, "chtPPTS3Scatter", _
+        "'" & S3 & "'!AF41:AG" & dailyEnd, "Linear trendline", "Plot spread against stressed excess and fit a simple line.", _
+        "Trendline y=INTERCEPT(AG,AF)+SLOPE(AG,AF)*x", "bp", "Automatic / model", "Premium informs compensation but not perfect timing."
+    USD_AddObject ws, r, 3, "S3-06", "Chart", "Cross-tenor excess return ranking", S3, "chtPPTS3Return", _
+        "'" & S3 & "'!AJ40:AL43", "49 monthly starts K40:AC" & monthlyEnd, "Average each tenor's six-month excess versus ON under rising and falling paths.", _
+        "Average excess bp=AVERAGE(Tenor return-ON return)*10000", "bp", "Automatic / model", "Shows tenor ranking reverses with rate direction."
+    USD_AddObject ws, r, 3, "S3-07", "Metric", "Daily falling-path 6M excess", S3, "J23:M26", _
+        "'" & S3 & "'!AG41:AG" & dailyEnd, "S3-03", "Average daily stressed 6M excess.", _
+        "=AVERAGE(AG41:AG" & dailyEnd & ")", "bp", "Automatic / model", "Measures reinvestment-risk protection."
+    USD_AddObject ws, r, 3, "S3-08", "Metric", "Positive daily observations", S3, "N23:Q26", _
+        "'" & S3 & "'!AG41:AG" & dailyEnd, "S3-03", "Share of daily starts with positive stressed 6M excess.", _
+        "=COUNTIF(AG41:AG" & dailyEnd & ","">0"")/COUNT(AG41:AG" & dailyEnd & ")", "%", "Automatic / model", "Descriptive stress frequency, not probability."
+    USD_AddObject ws, r, 3, "S3-09", "Metric", "Monthly falling-path 6M excess", S3, "R23:U26", _
+        "'" & S3 & "'!Z41:Z" & monthlyEnd, "49 monthly starts", "Average 6M excess using one start per month.", _
+        "=AVERAGE(Z41:Z" & monthlyEnd & ")", "bp", "Automatic / model", "Reduces daily overlap for scenario comparison."
+    USD_AddObject ws, r, 3, "S3-10", "Metric", "Monthly rising-path 6M excess", S3, "J27:M30", _
+        "'" & S3 & "'!W41:W" & monthlyEnd, "49 monthly starts", "Average rising-path 6M excess versus ON.", _
+        "=AVERAGE(W41:W" & monthlyEnd & ")", "bp", "Automatic / model", "Measures lock-in disadvantage during tightening."
+    USD_AddObject ws, r, 3, "S3-11", "Metric", "Falling-path 6M wins", S3, "N27:Q30", _
+        "'" & S3 & "'!AB41:AB" & monthlyEnd, "Monthly best-tenor test", "Count monthly starts where 6M is the highest-return tenor.", _
+        "=COUNTIF(AB41:AB" & monthlyEnd & ",""6M"")", "Count", "Automatic / model", "Shows dominance under the falling-rate sensitivity."
+    USD_AddObject ws, r, 3, "S3-12", "Metric", "Spread/stressed-outcome correlation", S3, "R27:U30", _
+        "'" & S3 & "'!AF41:AG" & dailyEnd, "S3-03", "Measure association between actual spread and falling-path stressed excess.", _
+        "=CORREL(AF41:AF" & dailyEnd & ",AG41:AG" & dailyEnd & ")", "Correlation", "Automatic / model", "Not a timing rule; used as sensitivity context."
+    USD_AddObject ws, r, 3, "S3-13", "Conclusion", "Slide 3 key message", S3, "A32:V36", _
+        "S3-01 to S3-12", "PPT_Audit", "State how the risk changes when the direction reverses.", _
+        "No calculation; conclusion must reconcile rising and falling path results", "Narrative", "Risk / Committee", "6M becomes protection against falling-rate reinvestment risk."
+
+    'Slide 4 | five-state forward engine and allocation.
+    USD_AddObject ws, r, 4, "S4-01", "Input table", "Observed starting curve", S4, "A40:F41", _
+        "Latest row of 'Curve'!A:E", "S1-02", "Use one common observed curve for all forward scenarios.", _
+        "=INDEX('Curve'!A:E,COUNTA('Curve'!A:A),column)", "Date / rate", "Curve refresh / Treasury", "Prevents scenarios from starting at different levels."
+    USD_AddObject ws, r, 4, "S4-02", "Input table", "Editable ON scenario anchors", S4, "H40:N45", _
+        "Blue input cells I41:M45", "Scenario economic-state labels", "Interpolate ON monthly between five event anchors.", _
+        "Rate=PriorAnchor+(NextAnchor-PriorAnchor)*ElapsedMonths/SegmentMonths", "Rate", "Risk-approved input", "Decision states, not forecasts or probabilities."
+    USD_AddObject ws, r, 4, "S4-03", "Input table", "Editable tenor premiums and fade", S4, "P40:T45", _
+        "Blue input cells Q41:T45", "S4-01 starting curve", "Add explicit 1M/3M/6M scenario premium; fade initial-curve calibration over input months.", _
+        "Tenor rate=ON blend+Premium bp/10000+Start calibration*MAX(0,1-Month/Fade)", "bp / months", "Risk-approved input", "Makes term assumptions visible and editable."
+    USD_AddObject ws, r, 4, "S4-04", "Evidence table", "Monthly forward paths", S4, "A48:V85", _
+        "S4-01 to S4-03", "3M forward weight 35%; 6M weight 50%", "Build 37 monthly observations for five scenarios and four tenors.", _
+        "1M=ON+premium+fade; 3M=65% ON+35% forward ON avg+premium+fade; 6M=50% ON+50% forward ON avg+premium+fade", "Rate", "Automatic / model", "Exact source for forward charts and sleeve returns."
+    USD_AddObject ws, r, 4, "S4-05", "Chart", "Five ON paths", S4, "chtPPTS4Paths", _
+        "'" & S4 & "'!A48:V85", "S4-04 ON columns", "Plot all scenario ON paths from the common start.", _
+        "X=Month date; Y=Scenario ON rate", "Rate", "Automatic / model", "Shows the five materially different rate states."
+    USD_AddObject ws, r, 4, "S4-06", "Evidence table", "Three-year annualized return by tenor", S4, "A88:G93", _
+        "S4-04 monthly paths", "Roll rules: ON/1M monthly, 3M quarterly, 6M semiannually", "Compound each independent sleeve for 36 months and annualize.", _
+        "Annualized return=(Final wealth)^(1/3)-1", "% per year", "Automatic / model", "Identifies the best tenor in each state."
+    USD_AddObject ws, r, 4, "S4-07", "Chart", "Return matrix chart", S4, "chtPPTS4Returns", _
+        "'" & S4 & "'!A88:E93", "S4-06", "Compare annualized tenor returns inside each scenario.", _
+        "Chart series=ON,1M,3M,6M; categories=Five scenarios", "% per year", "Automatic / model", "Demonstrates that the winning tenor changes by state."
+    USD_AddObject ws, r, 4, "S4-08", "Evidence table", "286-mix allocation and regret grid", S4, "I88:AB" & gridEnd, _
+        "10% long-only weights", "S4-06 tenor returns", "Calculate portfolio return, scenario regret, worst regret, average regret and selected row.", _
+        "Portfolio=(1+SUMPRODUCT(weights,cumulative sleeve returns))^(1/3)-1; Regret=(Best-Portfolio)*10000", "% / bp", "Automatic / model", "Complete feasible set for minimax selection."
+    USD_AddObject ws, r, 4, "S4-09", "Chart", "Weighted tenor versus worst regret", S4, "chtPPTS4Regret", _
+        "'" & S4 & "'!N89:N" & gridEnd & ",'" & S4 & "'!Y89:Y" & gridEnd, "Selected mix marker", "Plot risk horizon against maximum scenario penalty.", _
+        "Weighted months=1M*w1+3M*w3+6M*w6; Y=MAX(scenario regrets)", "Months / bp per year", "Automatic / model", "Shows the trade-off and selected minimum."
+    USD_AddObject ws, r, 4, "S4-10", "Chart", "Reference maturity mix", S4, "chtPPTS4Mix", _
+        "Selected row of S4-08", "V41:Z41 chart helper", "Display the minimax-regret weights as one stacked bar.", _
+        "Selected=Y row equals MIN(Y89:Y" & gridEnd & ")", "% allocation", "Automatic / model", "Reference mix is a risk anchor, not a trade instruction."
+    USD_AddObject ws, r, 4, "S4-11", "Metric", "Reference allocation", S4, "J23:M26", _
+        "Selected row of S4-08", "S4-10", "Return ON/1M/3M/6M weights from the row with minimum worst regret.", _
+        "=INDEX(J:J,MATCH(MIN(Y:Y),Y:Y,0)) and repeat for K:M", "% allocation", "Automatic / model", "Starting point for committee governance."
+    USD_AddObject ws, r, 4, "S4-12", "Metric", "Worst-case regret", S4, "N23:Q26", _
+        "Selected row of S4-08", "Five scenario regrets", "Take the maximum regret for the selected allocation.", _
+        "=MIN(Y89:Y" & gridEnd & ")", "bp per year", "Automatic / model", "Core minimax risk measure."
+    USD_AddObject ws, r, 4, "S4-13", "Metric", "Average regret", S4, "R23:U26", _
+        "Selected row of S4-08", "S4-12 selected row", "Average the five scenario regrets for the selected allocation.", _
+        "=INDEX(Z89:Z" & gridEnd & ",MATCH(MIN(Y89:Y" & gridEnd & "),Y89:Y" & gridEnd & ",0))", "bp per year", "Automatic / model", "Secondary measure; does not replace the worst-case constraint."
+    USD_AddObject ws, r, 4, "S4-14", "Metric", "Weighted tenor", S4, "J27:M30", _
+        "Selected weights", "S4-08", "Calculate allocation-weighted reset horizon.", _
+        "=SUMPRODUCT(SelectedWeights,{0,1,3,6})", "Months", "Automatic / model", "Simple duration/reset-speed indicator."
+    USD_AddObject ws, r, 4, "S4-15", "Metric", "Reference return range", S4, "N27:Q30", _
+        "Selected row scenario returns O:S", "S4-08", "Take minimum and maximum annualized return across five states.", _
+        "=MIN(Selected O:S) and =MAX(Selected O:S)", "% per year", "Automatic / model", "Range is scenario sensitivity, not confidence interval."
+    USD_AddObject ws, r, 4, "S4-16", "Metric", "Feasible portfolio count", S4, "R27:U30", _
+        "S4-08 mix rows", "10% grid rule", "Count all nonnegative four-tenor mixes that sum to 100%.", _
+        "=COUNT(I89:I" & gridEnd & ")", "Count", "Automatic / model", "Control total must equal 286."
+    USD_AddObject ws, r, 4, "S4-17", "Conclusion", "Slide 4 committee message", S4, "A32:V36", _
+        "S4-05 to S4-16", "PPT_Audit", "Translate scenario and regret evidence into an allocation governance rule.", _
+        "No calculation; message must remain consistent with selected mix and regret budget", "Narrative", "Risk / Committee", "Limit the cost of forecast error and govern deviations."
+
+    'Slide 5 | decision controls and execution evidence.
+    USD_AddObject ws, r, 5, "S5-01", "Control table", "Committee risk controls", S5, "A5:V12", _
+        "Policy, cash forecast and S4 reference allocation", "User-entered limits and current values", "Compare current value with approved limit and assign owner/status/trigger.", _
+        "Headroom=Approved limit-Current value; Status=IF(Headroom>=0,""OK"",""ESCALATE"")", "Mixed", "Treasury / Risk", "No execution until required limits are complete."
+    USD_AddObject ws, r, 5, "S5-02", "Control", "Operating liquidity floor", S5, "A7:V7", _
+        "13-week cash forecast", "Approved liquidity policy", "Reserve immediately available cash before allocating term sleeves.", _
+        "Available ON cash-Approved operating floor", "USD / %", "Treasury", "Escalate forecast or buffer breach."
+    USD_AddObject ws, r, 5, "S5-03", "Control", "6M concentration cap", S5, "A8:V8", _
+        "S4-11 reference 6M weight", "Approved policy limit", "Compare proposed locked 6M weight with approved cap.", _
+        "=Approved 6M cap-Proposed 6M weight", "%", "Risk", "Reference allocation is not itself a policy limit."
+    USD_AddObject ws, r, 5, "S5-04", "Control", "Weighted tenor limit", S5, "A9:V9", _
+        "S4-14 weighted tenor", "Approved tenor budget", "Compare allocation-weighted tenor with committee limit.", _
+        "=Approved months-SUMPRODUCT(weights,{0,1,3,6})", "Months", "Risk", "Monitor after every rebalance."
+    USD_AddObject ws, r, 5, "S5-05", "Control", "Worst-regret tolerance", S5, "A10:V10", _
+        "S4-12 worst regret", "Approved risk budget", "Compare model worst regret with committee tolerance.", _
+        "=Approved regret tolerance-Model worst regret", "bp per year", "Risk", "Rerun after material curve or scenario change."
+    USD_AddObject ws, r, 5, "S5-06", "Control", "Counterparty exposure", S5, "A11:V11", _
+        "Counterparty limit report", "Proposed transaction size", "Aggregate current and proposed exposure by legal entity.", _
+        "=Approved limit-(Current exposure+Proposed trade)", "USD / %", "Treasury / Credit", "Include settlement and unsecured exposure."
+    USD_AddObject ws, r, 5, "S5-07", "Control", "Rebalance trigger", S5, "A12:V12", _
+        "Curve move and cash forecast change", "Approved trigger thresholds", "Flag a review when any approved trigger is met.", _
+        "=IF(OR(ABS(CurveMove)>=RateTrigger,ABS(CashChange)>=CashTrigger),""REVIEW"",""OK"")", "bp / USD", "Treasury", "Define who can act between committee meetings."
+    USD_AddObject ws, r, 5, "S5-08", "Input table", "Executable levels", S5, "A14:L19", _
+        "Timestamped executable counterparty quote", "Latest Curve indication", "Compare executable rate with indicative curve and capture size/settlement constraints.", _
+        "Variance bp=(Executable rate-Curve indication)*10000", "Rate / bp", "Treasury", "Indicative curve is not sufficient authority to trade."
+    USD_AddObject ws, r, 5, "S5-09", "Evidence register", "Provider due diligence", S5, "N14:V19", _
+        "Ratings, legal entity, execution and settlement documents", "Named owner and verifier", "Record document, timestamp, owner, verification and decision relevance.", _
+        "No return formula; Status=IF(required evidence verified,""READY"",""OPEN"")", "Status", "Credit / Treasury / Operations", "Do not hardcode provider claims."
+    USD_AddObject ws, r, 5, "S5-10", "Decision record", "Approved allocation and exceptions", S5, "A22:H26", _
+        "Committee decision", "S5-01 to S5-09", "Record approved mix, limits, exceptions, trigger and sign-offs.", _
+        "No model formula; controlled decision record", "Governance", "Committee secretary", "Required evidence for execution authority."
+    USD_AddObject ws, r, 5, "S5-11", "Comment", "Risk manager recommendation", S5, "J23:V28", _
+        "S5-01 to S5-10", "S4 reference allocation", "State prerequisites that must be complete before execution.", _
+        "No calculation; recommendation follows unresolved controls and evidence", "Narrative", "Risk", "Approve conditions, not only the tenor mix."
+    USD_AddObject ws, r, 5, "S5-12", "Conclusion", "Slide 5 committee message", S5, "A31:V35", _
+        "S4 and S5 evidence", "PPT_Audit", "Assign ownership for quotes, forecasts, limits, validation and exceptions.", _
+        "No calculation; conclusion must match the completed decision record", "Narrative", "Committee", "Execution requires clear authority and evidence."
+
+    mObjectCount = r - 7
+    USD_FormatTableBody ws.Range("A7:M" & r - 1)
+    ws.Range("A6:M" & r - 1).WrapText = True
+    ws.Rows("7:" & r - 1).RowHeight = 48
+    ws.Columns("A").ColumnWidth = 8
+    ws.Columns("B").ColumnWidth = 11
+    ws.Columns("C").ColumnWidth = 15
+    ws.Columns("D").ColumnWidth = 31
+    ws.Columns("E").ColumnWidth = 22
+    ws.Columns("F").ColumnWidth = 25
+    ws.Columns("G:H").ColumnWidth = 34
+    ws.Columns("I").ColumnWidth = 48
+    ws.Columns("J").ColumnWidth = 58
+    ws.Columns("K").ColumnWidth = 17
+    ws.Columns("L").ColumnWidth = 25
+    ws.Columns("M").ColumnWidth = 45
+    ws.Range("J7:J" & r - 1).NumberFormat = "@"
+    ws.Range("J7:J" & r - 1).Interior.Color = RGB(242, 246, 251)
+    USD_AddTable ws, ws.Range("A6:M" & r - 1), "tblPPTObjectMap"
+    ws.Range("A" & r + 1 & ":M" & r + 4).Merge
+    With ws.Range("A" & r + 1 & ":M" & r + 4)
+        .Value = "FORMULA CONVENTIONS" & vbLf & _
+                 "Returns use ACT/360 for the historical six-month analysis. Forward scenario returns use monthly periods over 36 months and annualize as (Final wealth)^(1/3)-1. Regret is annualized basis-point shortfall versus the best feasible candidate in the same scenario. Formula patterns are intentionally short; detailed row-level evidence remains on the referenced slide sheet."
+        USD_BodyBox .Cells, RGB(245, 247, 250), USD_Gray()
+    End With
+    USD_SetPrint ws, "$A$1:$M$" & CStr(r + 4)
+End Sub
+
 Private Sub USD_BuildSlide1Sheet()
 
     Dim ws As Worksheet
     Dim i As Long
+    Dim curveIdx As Long
     Dim idxJan As Long
     Dim idxJul As Long
     Dim dailyJan As Long
     Dim dailyJul As Long
     Dim events As Variant
+    Dim curveCols As Variant
     Dim ch As ChartObject
     Dim s As Series
 
@@ -304,9 +560,12 @@ Private Sub USD_BuildSlide1Sheet()
     ws.Range("P5:V5").Merge
     USD_SectionHeader ws.Range("P5:V5"), "LATEST CURVE | " & Format(CDate(mDate(mCurveN)), "dd-mmm-yyyy")
     USD_WriteHeaders ws.Range("P6:Q6"), Array("Tenor", "Rate")
+    curveCols = Array("B", "C", "D", "E")
     For i = 1 To 4
         ws.Cells(6 + i, 16).Value = USD_TenorName(i)
-        ws.Cells(6 + i, 17).Value = mRate(i, mCurveN)
+        ws.Cells(6 + i, 17).Formula = _
+            "=INDEX('Curve'!" & curveCols(i - 1) & ":" & curveCols(i - 1) & _
+            ",COUNTA('Curve'!$A:$A))"
     Next i
     USD_FormatTableBody ws.Range("P7:Q10")
     ws.Range("Q7:Q10").NumberFormat = "0.00%"
@@ -416,6 +675,7 @@ Private Sub USD_BuildSlide1Sheet()
     ws.Range("A36:V36").Merge
     ws.Range("A36").Value = "Manual transfer: copy chtPPTS1Curve plus the three right-hand evidence boxes; retain rows 40+ in Excel for audit."
     USD_InstructionLine ws.Range("A36:V36")
+    USD_AddObjectMapLink ws, 38, 1
     USD_SetPrint ws, "$A$1:$V$36"
 End Sub
 
@@ -436,8 +696,8 @@ Private Sub USD_WriteHoldingExample(ByVal ws As Worksheet, ByVal targetRow As Lo
     ws.Cells(targetRow, 17).Value = mDailySpread(dailyIndex)
     ws.Cells(targetRow, 18).Value = mDailyRolledON(dailyIndex)
     ws.Cells(targetRow, 19).Value = mDailyLocked6M(dailyIndex)
-    ws.Cells(targetRow, 20).Value = mDailyExcess(dailyIndex)
-    ws.Cells(targetRow, 21).Value = IIf(mDailyExcess(dailyIndex) > 0#, "6M", "ON")
+    ws.Cells(targetRow, 20).FormulaR1C1 = "=(RC[-1]-RC[-2])*10000"
+    ws.Cells(targetRow, 21).FormulaR1C1 = "=IF(RC[-1]>0,""6M"",""ON"")"
     ws.Cells(targetRow, 22).Value = noteText
 End Sub
 
@@ -452,6 +712,7 @@ Private Sub USD_BuildSlide2Sheet()
 
     Dim ws As Worksheet
     Dim i As Long
+    Dim curveIdx As Long
     Dim minX As Double
     Dim maxX As Double
     Dim chTime As ChartObject
@@ -465,58 +726,72 @@ Private Sub USD_BuildSlide2Sheet()
         "Premium priced at the decision date versus locked 6M return minus repeatedly rolled ON return"
 
     'Auditable daily decision table.
-    USD_WriteHeaders ws.Range("A" & SUPPORT_ROW & ":H" & SUPPORT_ROW), _
-        Array("Decision date", "Maturity date", "6M-ON spread bp", "Rolled ON return", "Locked 6M return", "6M excess bp", "Winner", "Method")
+    USD_WriteHeaders ws.Range("A" & SUPPORT_ROW & ":J" & SUPPORT_ROW), _
+        Array("Decision date", "Maturity date", "ON at decision", "6M at decision", _
+              "6M-ON spread bp", "Rolled ON return", "Locked 6M return", _
+              "6M excess bp", "Winner", "Method")
     minX = mDailySpread(1)
     maxX = mDailySpread(1)
     For i = 1 To mDailyN
+        curveIdx = USD_FindExactIndex(mDailyDate(i))
         ws.Cells(SUPPORT_ROW + i, 1).Value = mDailyDate(i)
         ws.Cells(SUPPORT_ROW + i, 2).Value = CDbl(DateAdd("m", 6, CDate(mDailyDate(i))))
-        ws.Cells(SUPPORT_ROW + i, 3).Value = mDailySpread(i)
-        ws.Cells(SUPPORT_ROW + i, 4).Value = mDailyRolledON(i)
-        ws.Cells(SUPPORT_ROW + i, 5).Value = mDailyLocked6M(i)
-        ws.Cells(SUPPORT_ROW + i, 6).Value = mDailyExcess(i)
-        ws.Cells(SUPPORT_ROW + i, 7).Value = IIf(mDailyExcess(i) > 0#, "6M", "ON")
-        ws.Cells(SUPPORT_ROW + i, 8).Value = "ACT/360; six calendar months"
+        ws.Cells(SUPPORT_ROW + i, 3).Value = mRate(1, curveIdx)
+        ws.Cells(SUPPORT_ROW + i, 4).Value = mRate(4, curveIdx)
+        ws.Cells(SUPPORT_ROW + i, 5).FormulaR1C1 = "=(RC[-1]-RC[-2])*10000"
+        ws.Cells(SUPPORT_ROW + i, 6).Value = mDailyRolledON(i)
+        ws.Cells(SUPPORT_ROW + i, 7).Value = mDailyLocked6M(i)
+        ws.Cells(SUPPORT_ROW + i, 8).FormulaR1C1 = "=(RC[-1]-RC[-2])*10000"
+        ws.Cells(SUPPORT_ROW + i, 9).FormulaR1C1 = "=IF(RC[-1]>0,""6M"",""ON"")"
+        ws.Cells(SUPPORT_ROW + i, 10).Value = "ACT/360; six calendar months"
         If mDailySpread(i) < minX Then minX = mDailySpread(i)
         If mDailySpread(i) > maxX Then maxX = mDailySpread(i)
     Next i
     ws.Range("A" & SUPPORT_ROW + 1 & ":B" & SUPPORT_ROW + mDailyN).NumberFormat = "dd-mmm-yyyy"
-    ws.Range("D" & SUPPORT_ROW + 1 & ":E" & SUPPORT_ROW + mDailyN).NumberFormat = "0.0000%"
-    ws.Range("C" & SUPPORT_ROW + 1 & ":C" & SUPPORT_ROW + mDailyN).NumberFormat = "+0.0;-0.0;0.0"
-    ws.Range("F" & SUPPORT_ROW + 1 & ":F" & SUPPORT_ROW + mDailyN).NumberFormat = "+0.0;-0.0;0.0"
-    USD_AddTable ws, ws.Range("A" & SUPPORT_ROW & ":H" & SUPPORT_ROW + mDailyN), "tblPPTS2Daily"
+    ws.Range("C" & SUPPORT_ROW + 1 & ":D" & SUPPORT_ROW + mDailyN).NumberFormat = "0.0000%"
+    ws.Range("F" & SUPPORT_ROW + 1 & ":G" & SUPPORT_ROW + mDailyN).NumberFormat = "0.0000%"
+    ws.Range("E" & SUPPORT_ROW + 1 & ":E" & SUPPORT_ROW + mDailyN).NumberFormat = "+0.0;-0.0;0.0"
+    ws.Range("H" & SUPPORT_ROW + 1 & ":H" & SUPPORT_ROW + mDailyN).NumberFormat = "+0.0;-0.0;0.0"
+    USD_AddTable ws, ws.Range("A" & SUPPORT_ROW & ":J" & SUPPORT_ROW + mDailyN), "tblPPTS2Daily"
 
-    USD_WriteHeaders ws.Range("J" & SUPPORT_ROW & ":K" & SUPPORT_ROW), Array("Regression X bp", "Fitted excess bp")
-    ws.Cells(SUPPORT_ROW + 1, 10).Value = minX
-    ws.Cells(SUPPORT_ROW + 1, 11).Value = mIntercept + mSlope * minX
-    ws.Cells(SUPPORT_ROW + 2, 10).Value = maxX
-    ws.Cells(SUPPORT_ROW + 2, 11).Value = mIntercept + mSlope * maxX
-    USD_WriteHeaders ws.Range("M" & SUPPORT_ROW & ":N" & SUPPORT_ROW), Array("Zero date", "Zero bp")
-    ws.Cells(SUPPORT_ROW + 1, 13).Value = mDailyDate(1)
-    ws.Cells(SUPPORT_ROW + 2, 13).Value = mDailyDate(mDailyN)
-    ws.Range("N" & SUPPORT_ROW + 1 & ":N" & SUPPORT_ROW + 2).Value = 0#
-    USD_WriteHeaders ws.Range("P" & SUPPORT_ROW & ":Q" & SUPPORT_ROW), Array("Zero spread bp", "Zero excess bp")
-    ws.Cells(SUPPORT_ROW + 1, 16).Value = minX
-    ws.Cells(SUPPORT_ROW + 2, 16).Value = maxX
-    ws.Range("Q" & SUPPORT_ROW + 1 & ":Q" & SUPPORT_ROW + 2).Value = 0#
+    USD_WriteHeaders ws.Range("L" & SUPPORT_ROW & ":M" & SUPPORT_ROW), Array("Regression X bp", "Fitted excess bp")
+    ws.Cells(SUPPORT_ROW + 1, 12).Value = minX
+    ws.Cells(SUPPORT_ROW + 1, 13).Formula = _
+        "=INTERCEPT($H$" & CStr(SUPPORT_ROW + 1) & ":$H$" & CStr(SUPPORT_ROW + mDailyN) & _
+        ",$E$" & CStr(SUPPORT_ROW + 1) & ":$E$" & CStr(SUPPORT_ROW + mDailyN) & ")+" & _
+        "SLOPE($H$" & CStr(SUPPORT_ROW + 1) & ":$H$" & CStr(SUPPORT_ROW + mDailyN) & _
+        ",$E$" & CStr(SUPPORT_ROW + 1) & ":$E$" & CStr(SUPPORT_ROW + mDailyN) & ")*L" & CStr(SUPPORT_ROW + 1)
+    ws.Cells(SUPPORT_ROW + 2, 12).Value = maxX
+    ws.Cells(SUPPORT_ROW + 2, 13).Formula = _
+        "=INTERCEPT($H$" & CStr(SUPPORT_ROW + 1) & ":$H$" & CStr(SUPPORT_ROW + mDailyN) & _
+        ",$E$" & CStr(SUPPORT_ROW + 1) & ":$E$" & CStr(SUPPORT_ROW + mDailyN) & ")+" & _
+        "SLOPE($H$" & CStr(SUPPORT_ROW + 1) & ":$H$" & CStr(SUPPORT_ROW + mDailyN) & _
+        ",$E$" & CStr(SUPPORT_ROW + 1) & ":$E$" & CStr(SUPPORT_ROW + mDailyN) & ")*L" & CStr(SUPPORT_ROW + 2)
+    USD_WriteHeaders ws.Range("O" & SUPPORT_ROW & ":P" & SUPPORT_ROW), Array("Zero date", "Zero bp")
+    ws.Cells(SUPPORT_ROW + 1, 15).Value = mDailyDate(1)
+    ws.Cells(SUPPORT_ROW + 2, 15).Value = mDailyDate(mDailyN)
+    ws.Range("P" & SUPPORT_ROW + 1 & ":P" & SUPPORT_ROW + 2).Value = 0#
+    USD_WriteHeaders ws.Range("R" & SUPPORT_ROW & ":S" & SUPPORT_ROW), Array("Zero spread bp", "Zero excess bp")
+    ws.Cells(SUPPORT_ROW + 1, 18).Value = minX
+    ws.Cells(SUPPORT_ROW + 2, 18).Value = maxX
+    ws.Range("S" & SUPPORT_ROW + 1 & ":S" & SUPPORT_ROW + 2).Value = 0#
 
     Set chTime = USD_NewChart(ws, "chtPPTS2Time", XL_XY_LINES, 18, 82, 565, 340)
     With chTime.Chart
         Set s = .SeriesCollection.NewSeries
         s.Name = "=""6M-ON spread at decision"""
         s.XValues = ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mDailyN)
-        s.Values = ws.Range("C" & SUPPORT_ROW + 1 & ":C" & SUPPORT_ROW + mDailyN)
+        s.Values = ws.Range("E" & SUPPORT_ROW + 1 & ":E" & SUPPORT_ROW + mDailyN)
         USD_FormatLineSeries s, USD_Amber(), 1.5, False
         Set s = .SeriesCollection.NewSeries
         s.Name = "=""Realized 6M excess return"""
         s.XValues = ws.Range("A" & SUPPORT_ROW + 1 & ":A" & SUPPORT_ROW + mDailyN)
-        s.Values = ws.Range("F" & SUPPORT_ROW + 1 & ":F" & SUPPORT_ROW + mDailyN)
+        s.Values = ws.Range("H" & SUPPORT_ROW + 1 & ":H" & SUPPORT_ROW + mDailyN)
         USD_FormatLineSeries s, USD_Blue(), 1.7, False
         Set s = .SeriesCollection.NewSeries
         s.Name = "=""Zero"""
-        s.XValues = ws.Range("M" & SUPPORT_ROW + 1 & ":M" & SUPPORT_ROW + 2)
-        s.Values = ws.Range("N" & SUPPORT_ROW + 1 & ":N" & SUPPORT_ROW + 2)
+        s.XValues = ws.Range("O" & SUPPORT_ROW + 1 & ":O" & SUPPORT_ROW + 2)
+        s.Values = ws.Range("P" & SUPPORT_ROW + 1 & ":P" & SUPPORT_ROW + 2)
         USD_FormatLineSeries s, USD_Gray(), 0.8, True
         USD_ChartTitle chTime, "PREMIUM PRICED VS REALIZED SIX-MONTH HOLDING RETURN", "Decision date", "Basis points"
         .HasLegend = True
@@ -531,8 +806,8 @@ Private Sub USD_BuildSlide2Sheet()
     With chScatter.Chart
         Set s = .SeriesCollection.NewSeries
         s.Name = "=""Daily decisions"""
-        s.XValues = ws.Range("C" & SUPPORT_ROW + 1 & ":C" & SUPPORT_ROW + mDailyN)
-        s.Values = ws.Range("F" & SUPPORT_ROW + 1 & ":F" & SUPPORT_ROW + mDailyN)
+        s.XValues = ws.Range("E" & SUPPORT_ROW + 1 & ":E" & SUPPORT_ROW + mDailyN)
+        s.Values = ws.Range("H" & SUPPORT_ROW + 1 & ":H" & SUPPORT_ROW + mDailyN)
         With s
             .ChartType = XL_XY_SCATTER
             .MarkerStyle = XL_MARKER_CIRCLE
@@ -543,13 +818,13 @@ Private Sub USD_BuildSlide2Sheet()
         End With
         Set s = .SeriesCollection.NewSeries
         s.Name = "=""Linear fit"""
-        s.XValues = ws.Range("J" & SUPPORT_ROW + 1 & ":J" & SUPPORT_ROW + 2)
-        s.Values = ws.Range("K" & SUPPORT_ROW + 1 & ":K" & SUPPORT_ROW + 2)
+        s.XValues = ws.Range("L" & SUPPORT_ROW + 1 & ":L" & SUPPORT_ROW + 2)
+        s.Values = ws.Range("M" & SUPPORT_ROW + 1 & ":M" & SUPPORT_ROW + 2)
         USD_FormatLineSeries s, USD_Navy(), 2.4, False
         Set s = .SeriesCollection.NewSeries
         s.Name = "=""Zero"""
-        s.XValues = ws.Range("P" & SUPPORT_ROW + 1 & ":P" & SUPPORT_ROW + 2)
-        s.Values = ws.Range("Q" & SUPPORT_ROW + 1 & ":Q" & SUPPORT_ROW + 2)
+        s.XValues = ws.Range("R" & SUPPORT_ROW + 1 & ":R" & SUPPORT_ROW + 2)
+        s.Values = ws.Range("S" & SUPPORT_ROW + 1 & ":S" & SUPPORT_ROW + 2)
         USD_FormatLineSeries s, USD_Gray(), 0.8, True
         USD_ChartTitle chScatter, "SPREAD AT DECISION VS REALIZED 6M EXCESS", "6M-ON spread at decision | bp", "Realized 6M excess return | bp"
         .HasLegend = False
@@ -583,6 +858,7 @@ Private Sub USD_BuildSlide2Sheet()
         .Value = "KEY MESSAGE  |  DO NOT TURN A SINGLE CURVE SPREAD INTO A CONCENTRATED MATURITY BET. PREMIUM MEASURES COMPENSATION; REALIZED RETURN IS PATH-DEPENDENT."
         USD_ConclusionBox .Cells
     End With
+    USD_AddObjectMapLink ws, 39, 2
     USD_SetPrint ws, "$A$1:$V$38"
 End Sub
 
@@ -635,8 +911,12 @@ Private Sub USD_BuildSlide3Sheet()
             ws.Cells(SUPPORT_ROW + i, 16 + t).Value = mDownReturn(i, t)
         Next t
         For t = 2 To 4
-            ws.Cells(SUPPORT_ROW + i, 19 + t).Value = (mUpReturn(i, t) - mUpReturn(i, 1)) * 10000#
-            ws.Cells(SUPPORT_ROW + i, 22 + t).Value = (mDownReturn(i, t) - mDownReturn(i, 1)) * 10000#
+            ws.Cells(SUPPORT_ROW + i, 19 + t).Formula = _
+                "=(" & ws.Cells(SUPPORT_ROW + i, 12 + t).Address(False, False) & _
+                "-" & ws.Cells(SUPPORT_ROW + i, 13).Address(False, False) & ")*10000"
+            ws.Cells(SUPPORT_ROW + i, 22 + t).Formula = _
+                "=(" & ws.Cells(SUPPORT_ROW + i, 16 + t).Address(False, False) & _
+                "-" & ws.Cells(SUPPORT_ROW + i, 17).Address(False, False) & ")*10000"
         Next t
         ws.Cells(SUPPORT_ROW + i, 27).Value = USD_TenorName(USD_BestTenor(mUpReturn, i))
         ws.Cells(SUPPORT_ROW + i, 28).Value = USD_TenorName(USD_BestTenor(mDownReturn, i))
@@ -653,7 +933,7 @@ Private Sub USD_BuildSlide3Sheet()
         ws.Cells(SUPPORT_ROW + i, 31).Value = mDailyDate(i)
         ws.Cells(SUPPORT_ROW + i, 32).Value = mDailySpread(i)
         ws.Cells(SUPPORT_ROW + i, 33).Value = mStressDailyExcess(i)
-        ws.Cells(SUPPORT_ROW + i, 34).Value = (mStressDailyExcess(i) > 0#)
+        ws.Cells(SUPPORT_ROW + i, 34).FormulaR1C1 = "=RC[-1]>0"
     Next i
     ws.Range("AE" & SUPPORT_ROW + 1 & ":AE" & SUPPORT_ROW + mDailyN).NumberFormat = "dd-mmm-yyyy"
     ws.Range("AF" & SUPPORT_ROW + 1 & ":AG" & SUPPORT_ROW + mDailyN).NumberFormat = "+0.0;-0.0;0.0"
@@ -662,8 +942,12 @@ Private Sub USD_BuildSlide3Sheet()
     USD_WriteHeaders ws.Range("AJ" & SUPPORT_ROW & ":AL" & SUPPORT_ROW), Array("Tenor", "Rates rise: avg excess bp", "Rates fall: avg excess bp")
     For t = 2 To 4
         ws.Cells(SUPPORT_ROW + t - 1, 36).Value = USD_TenorName(t)
-        ws.Cells(SUPPORT_ROW + t - 1, 37).Value = mUpExcess(t)
-        ws.Cells(SUPPORT_ROW + t - 1, 38).Value = mDownExcess(t)
+        ws.Cells(SUPPORT_ROW + t - 1, 37).Formula = _
+            "=AVERAGE(" & ws.Cells(SUPPORT_ROW + 1, 19 + t).Address(False, False) & _
+            ":" & ws.Cells(SUPPORT_ROW + mMonthlyN, 19 + t).Address(False, False) & ")"
+        ws.Cells(SUPPORT_ROW + t - 1, 38).Formula = _
+            "=AVERAGE(" & ws.Cells(SUPPORT_ROW + 1, 22 + t).Address(False, False) & _
+            ":" & ws.Cells(SUPPORT_ROW + mMonthlyN, 22 + t).Address(False, False) & ")"
     Next t
     USD_AddTable ws, ws.Range("AJ" & SUPPORT_ROW & ":AL" & SUPPORT_ROW + 3), "tblPPTS3Summary"
 
@@ -777,6 +1061,7 @@ Private Sub USD_BuildSlide3Sheet()
         .Value = "KEY MESSAGE  |  THE HISTORICAL TIGHTENING CYCLE REWARDED RAPID RESET. THE MIRRORED FALLING PATH REVERSES THAT RESULT: LOCKED 6M PROTECTS CARRY AS ON RESETS LOWER. DIRECTION, NOT THE QUOTED PREMIUM ALONE, DETERMINES THE WINNER."
         USD_ConclusionBox .Cells
     End With
+    USD_AddObjectMapLink ws, 38, 3
     USD_SetPrint ws, "$A$1:$V$36"
 End Sub
 
@@ -797,6 +1082,7 @@ Private Sub USD_BuildSlide4Sheet()
     Dim chMix As ChartObject
     Dim chRegret As ChartObject
     Dim s As Series
+    Dim curveCols As Variant
 
     Set ws = USD_GetOrCreateSheet(S4)
     USD_ResetOutputSheet ws
@@ -807,9 +1093,12 @@ Private Sub USD_BuildSlide4Sheet()
     'Visible and editable model assumptions.
     USD_WriteHeaders ws.Range("A" & SUPPORT_ROW & ":F" & SUPPORT_ROW), _
         Array("As of", "ON", "1M", "3M", "6M", "Source")
-    ws.Cells(SUPPORT_ROW + 1, 1).Value = mForwardStartDate
+    ws.Cells(SUPPORT_ROW + 1, 1).Formula = "=INDEX('Curve'!A:A,COUNTA('Curve'!$A:$A))"
+    curveCols = Array("B", "C", "D", "E")
     For t = 1 To 4
-        ws.Cells(SUPPORT_ROW + 1, 1 + t).Value = mRate(t, mCurveN)
+        ws.Cells(SUPPORT_ROW + 1, 1 + t).Formula = _
+            "=INDEX('Curve'!" & curveCols(t - 1) & ":" & curveCols(t - 1) & _
+            ",COUNTA('Curve'!$A:$A))"
     Next t
     ws.Cells(SUPPORT_ROW + 1, 6).Value = "Latest row of Curve"
     ws.Cells(SUPPORT_ROW + 1, 1).NumberFormat = "dd-mmm-yyyy"
@@ -909,15 +1198,27 @@ Private Sub USD_BuildSlide4Sheet()
         For t = 1 To 4
             ws.Cells(gridRow + mixNo, 9 + t).Value = mPortfolioWeight(mixNo, t)
         Next t
-        ws.Cells(gridRow + mixNo, 14).Value = mPortfolioWeight(mixNo, 2) + 3# * mPortfolioWeight(mixNo, 3) + 6# * mPortfolioWeight(mixNo, 4)
+        ws.Cells(gridRow + mixNo, 14).Formula = _
+            "=K" & CStr(gridRow + mixNo) & "+3*L" & CStr(gridRow + mixNo) & _
+            "+6*M" & CStr(gridRow + mixNo)
         For scenario = 1 To 5
-            ws.Cells(gridRow + mixNo, 14 + scenario).Value = mPortfolioReturn(mixNo, scenario)
-            ws.Cells(gridRow + mixNo, 19 + scenario).Value = mPortfolioRegret(mixNo, scenario)
+            ws.Cells(gridRow + mixNo, 14 + scenario).Formula = _
+                "=(1+SUMPRODUCT($J" & CStr(gridRow + mixNo) & ":$M" & CStr(gridRow + mixNo) & _
+                ",(1+$B$" & CStr(pathRow + scenario) & ":$E$" & CStr(pathRow + scenario) & _
+                ")^3-1))^(1/3)-1"
+            ws.Cells(gridRow + mixNo, 19 + scenario).Formula = _
+                "=($G$" & CStr(pathRow + scenario) & "-" & _
+                ws.Cells(gridRow + mixNo, 14 + scenario).Address(False, False) & ")*10000"
         Next scenario
-        ws.Cells(gridRow + mixNo, 25).Value = mPortfolioWorst(mixNo)
-        ws.Cells(gridRow + mixNo, 26).Value = mPortfolioAverage(mixNo)
-        ws.Cells(gridRow + mixNo, 27).Value = mPortfolioLowest(mixNo)
-        ws.Cells(gridRow + mixNo, 28).Value = (mixNo = mRobustRow)
+        ws.Cells(gridRow + mixNo, 25).Formula = _
+            "=MAX(T" & CStr(gridRow + mixNo) & ":X" & CStr(gridRow + mixNo) & ")"
+        ws.Cells(gridRow + mixNo, 26).Formula = _
+            "=AVERAGE(T" & CStr(gridRow + mixNo) & ":X" & CStr(gridRow + mixNo) & ")"
+        ws.Cells(gridRow + mixNo, 27).Formula = _
+            "=MIN(O" & CStr(gridRow + mixNo) & ":S" & CStr(gridRow + mixNo) & ")"
+        ws.Cells(gridRow + mixNo, 28).Formula = _
+            "=Y" & CStr(gridRow + mixNo) & "=MIN($Y$" & CStr(gridRow + 1) & _
+            ":$Y$" & CStr(gridRow + mPortfolioCount) & ")"
     Next mixNo
     ws.Range("J" & gridRow + 1 & ":M" & gridRow + mPortfolioCount).NumberFormat = "0%"
     ws.Range("O" & gridRow + 1 & ":S" & gridRow + mPortfolioCount).NumberFormat = "0.0000%"
@@ -1044,6 +1345,7 @@ Private Sub USD_BuildSlide4Sheet()
         .Value = "COMMITTEE MESSAGE  |  NO SINGLE TENOR WINS ACROSS PLAUSIBLE RATE PATHS. USE THE REFERENCE MIX TO LIMIT THE PENALTY OF FORECAST ERROR; REQUIRE ANY TACTICAL DEVIATION TO STATE ITS LIQUIDITY IMPACT, REGRET LIMIT AND EXIT TRIGGER."
         USD_ConclusionBox .Cells
     End With
+    USD_AddObjectMapLink ws, 38, 4
     USD_SetPrint ws, "$A$1:$V$36"
 End Sub
 
@@ -1077,6 +1379,23 @@ Private Sub USD_BuildSlide5Sheet()
         USD_WriteArrayRow ws.Cells(7 + i, 1), controls(i)
         ws.Range("N" & 7 + i & ":V" & 7 + i).Merge
     Next i
+    ws.Range("E8").Value = mMix(4)
+    ws.Range("E8").NumberFormat = "0%"
+    ws.Range("E9").Value = mWeightedMonths
+    ws.Range("E9").NumberFormat = "0.0"
+    ws.Range("E10").Value = mMixWorstRegret
+    ws.Range("E10").NumberFormat = "0.0"
+    ws.Range("F7").Formula = "=IF(AND(ISNUMBER(D7),ISNUMBER(E7)),E7-D7,"""")"
+    For i = 8 To 11
+        ws.Cells(i, 6).Formula = _
+            "=IF(AND(ISNUMBER(D" & CStr(i) & "),ISNUMBER(E" & CStr(i) & _
+            ")),D" & CStr(i) & "-E" & CStr(i) & ","""")"
+        ws.Cells(i, 10).Formula = _
+            "=IF(AND(ISNUMBER(D" & CStr(i) & "),ISNUMBER(E" & CStr(i) & _
+            ")),IF(F" & CStr(i) & ">=0,""OK"",""ESCALATE""),""OPEN"")"
+    Next i
+    ws.Range("J7").Formula = _
+        "=IF(AND(ISNUMBER(D7),ISNUMBER(E7)),IF(F7>=0,""OK"",""ESCALATE""),""OPEN"")"
     USD_FormatTableBody ws.Range("A7:V12")
     ws.Range("A6:V12").WrapText = True
     ws.Rows("7:12").RowHeight = 42
@@ -1089,8 +1408,10 @@ Private Sub USD_BuildSlide5Sheet()
         Array("Tenor", "Curve indication", "Executable rate", "Variance bp", "Counterparty", "Product", "Minimum size", "Settlement", "Quote timestamp", "Source", "Status", "Notes")
     For t = 1 To 4
         ws.Cells(15 + t, 1).Value = USD_TenorName(t)
-        ws.Cells(15 + t, 2).Value = mRate(t, mCurveN)
-        ws.Cells(15 + t, 3).Value = "USER INPUT"
+        ws.Cells(15 + t, 2).Formula = _
+            "=INDEX('Curve'!" & Choose(t, "B", "C", "D", "E") & ":" & _
+            Choose(t, "B", "C", "D", "E") & ",COUNTA('Curve'!$A:$A))"
+        ws.Cells(15 + t, 3).ClearContents
         ws.Cells(15 + t, 4).Formula = "=IF(ISNUMBER(C" & CStr(15 + t) & "),(C" & CStr(15 + t) & "-B" & CStr(15 + t) & ")*10000,"""")"
         ws.Cells(15 + t, 5).Value = "USER INPUT"
         ws.Cells(15 + t, 6).Value = "Deposit / approved instrument"
@@ -1151,6 +1472,7 @@ Private Sub USD_BuildSlide5Sheet()
     ws.Columns("B:B").ColumnWidth = 24
     ws.Columns("N:N").ColumnWidth = 18
     ws.Columns("O:O").ColumnWidth = 30
+    USD_AddObjectMapLink ws, 37, 5
     USD_SetPrint ws, "$A$1:$V$35"
 End Sub
 
@@ -1219,6 +1541,8 @@ Private Sub USD_Title(ByVal ws As Worksheet, ByVal titleText As String, ByVal su
     Dim endColumn As String
     If ws.Name = S_AUDIT Then
         endColumn = "G"
+    ElseIf ws.Name = S_OBJECTS Then
+        endColumn = "M"
     ElseIf ws.Name = S_INDEX Then
         endColumn = "T"
     Else
@@ -1321,6 +1645,42 @@ Private Sub USD_WriteArrayRow(ByVal firstCell As Range, ByVal values As Variant)
     For i = LBound(values) To UBound(values)
         firstCell.Offset(0, i - LBound(values)).Value = values(i)
     Next i
+End Sub
+
+Private Sub USD_AddObjectMapLink(ByVal ws As Worksheet, ByVal targetRow As Long, _
+                                 ByVal slideNo As Long)
+    ws.Range("A" & targetRow & ":V" & targetRow).Merge
+    ws.Hyperlinks.Add Anchor:=ws.Range("A" & targetRow), Address:="", _
+                      SubAddress:="'" & S_OBJECTS & "'!A6", _
+                      TextToDisplay:="SOURCE & LOGIC  |  Open " & S_OBJECTS & _
+                                    " and filter Slide = " & CStr(slideNo) & _
+                                    ". Support data begins at row 40."
+    USD_InstructionLine ws.Range("A" & targetRow & ":V" & targetRow)
+End Sub
+
+Private Sub USD_AddObject(ByVal ws As Worksheet, ByRef targetRow As Long, _
+                          ByVal slideNo As Long, ByVal objectId As String, _
+                          ByVal objectType As String, ByVal objectPurpose As String, _
+                          ByVal sheetName As String, ByVal outputLocation As String, _
+                          ByVal primarySource As String, ByVal supportingSource As String, _
+                          ByVal logicText As String, ByVal formulaText As String, _
+                          ByVal unitText As String, ByVal refreshOwner As String, _
+                          ByVal controlUse As String)
+    ws.Cells(targetRow, 1).Value = slideNo
+    ws.Cells(targetRow, 2).Value = objectId
+    ws.Cells(targetRow, 3).Value = objectType
+    ws.Cells(targetRow, 4).Value = objectPurpose
+    ws.Cells(targetRow, 5).Value = sheetName
+    ws.Cells(targetRow, 6).Value = outputLocation
+    ws.Cells(targetRow, 7).Value = primarySource
+    ws.Cells(targetRow, 8).Value = supportingSource
+    ws.Cells(targetRow, 9).Value = logicText
+    ws.Cells(targetRow, 10).NumberFormat = "@"
+    ws.Cells(targetRow, 10).Value = formulaText
+    ws.Cells(targetRow, 11).Value = unitText
+    ws.Cells(targetRow, 12).Value = refreshOwner
+    ws.Cells(targetRow, 13).Value = controlUse
+    targetRow = targetRow + 1
 End Sub
 
 Private Sub USD_FormatTableBody(ByVal rng As Range)
@@ -1524,6 +1884,8 @@ Private Sub USD_BuildAuditSheet()
     dailyJul = USD_DailyIndex(CDbl(DateSerial(2024, 7, 1)))
 
     USD_AddAudit ws, auditRow, "Required sheet: Curve", USD_SheetExists("Curve"), True, 0#, "Workbook structure", "All analyses are rebuilt from Curve.", allPass
+    USD_AddAudit ws, auditRow, "Required sheet: object register", USD_SheetExists(S_OBJECTS), True, 0#, "Workbook structure", "Every slide object must remain traceable.", allPass
+    USD_AddAudit ws, auditRow, "Object register rows", mObjectCount, 58, 0#, S_OBJECTS & "!A7:M64", "One source-and-logic row for every chart, metric, table, input, comment and conclusion.", allPass
     USD_AddAudit ws, auditRow, "Curve observations", mCurveN, 1127, 0#, "Curve!A:E", "Reference workbook row count.", allPass
     USD_AddAudit ws, auditRow, "Curve start date", mDate(1), expectedStart, 0#, "Curve!A2", "Dates must remain aligned with reference analysis.", allPass, "dd-mmm-yyyy"
     USD_AddAudit ws, auditRow, "Curve end date", mDate(mCurveN), expectedEnd, 0#, "Curve final row", "Latest observation used by reference analysis.", allPass, "dd-mmm-yyyy"
@@ -1556,6 +1918,9 @@ Private Sub USD_BuildAuditSheet()
     USD_AddAudit ws, auditRow, "Reference average regret bp", mMixAverageRegret, 7.7915391, 0.0001, "Five-scenario grid", "Average annualized shortfall.", allPass, "0.0000"
     USD_AddAudit ws, auditRow, "Reference lowest return", mMixLowestReturn, 0.0222332752, 0.0000001, "Five-scenario grid", "Rapid-cut state.", allPass, "0.0000%"
     USD_AddAudit ws, auditRow, "Reference highest return", mMixHighestReturn, 0.0418980564, 0.0000001, "Five-scenario grid", "Renewed-inflation state.", allPass, "0.0000%"
+    USD_AddAudit ws, auditRow, "Slide 2 excess is formula-driven", ThisWorkbook.Worksheets(S2).Range("H41").HasFormula, True, 0#, S2 & "!H41", "Locked-versus-rolled excess remains visible and reproducible.", allPass
+    USD_AddAudit ws, auditRow, "Slide 4 worst regret is formula-driven", ThisWorkbook.Worksheets(S4).Range("Y89").HasFormula, True, 0#, S4 & "!Y89", "Allocation selection can be inspected row by row.", allPass
+    USD_AddAudit ws, auditRow, "Slide 5 quote variance is formula-driven", ThisWorkbook.Worksheets(S5).Range("D16").HasFormula, True, 0#, S5 & "!D16", "Executable quote control is ready for user input.", allPass
     USD_AddAudit ws, auditRow, "Slide 1 chart count", ThisWorkbook.Worksheets(S1).ChartObjects.Count, 1, 0#, S1, "Native Excel charts generated.", allPass
     USD_AddAudit ws, auditRow, "Slide 2 chart count", ThisWorkbook.Worksheets(S2).ChartObjects.Count, 2, 0#, S2, "Native Excel charts generated.", allPass
     USD_AddAudit ws, auditRow, "Slide 3 chart count", ThisWorkbook.Worksheets(S3).ChartObjects.Count, 4, 0#, S3, "Native Excel charts generated.", allPass
@@ -1650,6 +2015,7 @@ Private Sub USD_ResetState()
     mMixHighestReturn = 0#
     mPortfolioCount = 0
     mRobustRow = 0
+    mObjectCount = 0
     For i = 1 To 4
         mUpExcess(i) = 0#
         mDownExcess(i) = 0#
