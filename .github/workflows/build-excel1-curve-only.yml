@@ -1,5 +1,6 @@
 name: Build Curve-only excel1 VBA
 
+# One-time repository build helper. It removes itself after success.
 on:
   push:
     branches: [main]
@@ -26,9 +27,6 @@ jobs:
           target = Path('vba/excel1.txt')
           text = source.read_text(encoding='utf-8')
 
-          # -----------------------------------------------------------------
-          # 1) Header: Curve is the only worksheet source; PPT_* are outputs.
-          # -----------------------------------------------------------------
           old_header = """' SOURCE WORKBOOK
           '   Designed for a workbook containing one required source sheet:
           '     Curve          Date | ON | 1M | 3M | 6M
@@ -72,9 +70,6 @@ jobs:
               raise SystemExit('Expected USE block was not found')
           text = text.replace(old_use, new_use, 1)
 
-          # -----------------------------------------------------------------
-          # 2) Main routine: validate Curve, remove old outputs, then calculate.
-          # -----------------------------------------------------------------
           old_sequence = """    USD_ResetState
               USD_ValidateSourceWorkbook
               USD_LoadCurve
@@ -95,9 +90,6 @@ jobs:
               raise SystemExit('Expected main calculation sequence was not found')
           text = text.replace(old_sequence, new_sequence, 1)
 
-          # -----------------------------------------------------------------
-          # 3) Replace source validation and add generated-sheet cleanup.
-          # -----------------------------------------------------------------
           validate_pattern = re.compile(
               r"Private Sub USD_ValidateSourceWorkbook\(\)\n.*?End Sub\n\nPrivate Sub USD_LoadCurve\(\)",
               re.S,
@@ -166,9 +158,6 @@ jobs:
           if n != 1:
               raise SystemExit(f'Validation replacement count was {n}, expected 1')
 
-          # -----------------------------------------------------------------
-          # 4) Forward assumptions: VBA defaults only. Never read PPT_S4.
-          # -----------------------------------------------------------------
           assumptions_pattern = re.compile(
               r"Private Sub USD_LoadForwardAssumptions\(\)\n.*?End Sub\n\nPrivate Function USD_SheetExists",
               re.S,
@@ -218,9 +207,6 @@ jobs:
           if n != 1:
               raise SystemExit(f'Forward-assumption replacement count was {n}, expected 1')
 
-          # -----------------------------------------------------------------
-          # 5) Governance language: generated scenario cells are display/output.
-          # -----------------------------------------------------------------
           text = text.replace(
               '"Forward convention: 36 monthly periods; five editable decision states; ON/1M roll monthly, 3M quarterly and 6M semiannually; 286 mixes in 10% increments."',
               '"Forward convention: 36 monthly periods; five VBA-defined decision states; ON/1M roll monthly, 3M quarterly and 6M semiannually; 286 mixes in 10% increments."',
@@ -229,30 +215,17 @@ jobs:
               '"Control: any change in source dates, rows or results is surfaced on PPT_Audit."',
               '"Control: Curve is the sole worksheet source; PPT_* sheets are rebuilt from scratch and never read as inputs."',
           )
-          text = text.replace(
-              '"Blue input cells I41:M45"',
-              '"VBA scenario anchors displayed in I41:M45"',
-          )
-          text = text.replace(
-              '"Blue input cells Q41:T45"',
-              '"VBA tenor premiums and fade displayed in Q41:T45"',
-          )
-          text = text.replace(
-              '"Risk-approved input"',
-              '"VBA assumption / Risk review"',
-          )
+          text = text.replace('"Blue input cells I41:M45"', '"VBA scenario anchors displayed in I41:M45"')
+          text = text.replace('"Blue input cells Q41:T45"', '"VBA tenor premiums and fade displayed in Q41:T45"')
+          text = text.replace('"Risk-approved input"', '"VBA assumption / Risk review"')
           text = text.replace(
               '"ON paths interpolate between visible event anchors. Tenor rates combine the ON path, explicit scenario premium and calibration fade. Blue support-table cells are editable and retained on rerun."',
               '"ON paths interpolate between visible event anchors. Tenor rates combine the ON path, explicit scenario premium and calibration fade. Scenario values are displayed for transparency and reset from VBA on rerun."',
           )
 
-          # -----------------------------------------------------------------
-          # 6) Safety assertions before writing target.
-          # -----------------------------------------------------------------
           required = [
               'Private Sub USD_DeleteGeneratedSheets()',
               'Forward states are governed VBA assumptions, never worksheet inputs.',
-              'USD_DeleteGeneratedSheets',
               'Private Sub USD_BuildSlide5Sheet()',
               'Private Sub USD_BuildAuditSheet()',
               'Private Function USD_PathReturn(',
