@@ -1,7 +1,7 @@
 Option Explicit
 
 '====================================================================================
-' USD CASH ALLOCATION | CFO EXCEL PRESENTATION | CURVE-ONLY | ROBUST VERSION
+' USD CASH ALLOCATION | CFO EXCEL PRESENTATION | CURVE-ONLY | ROBUST DATE VERSION
 '
 ' RUN
 '   Build_CFO_Cash_Allocation
@@ -19,10 +19,8 @@ Option Explicit
 '   CFO_Data_Hist   (hidden)
 '   CFO_Data_Scen   (hidden)
 '
-' IMPORTANT
-'   This version does NOT depend on any PPT_* sheets.
-'   It deliberately avoids passing multidimensional arrays between VBA procedures,
-'   which can cause Run-time error 13 / Type mismatch on some Excel installations.
+' No PPT_* dependency. Date parsing accepts native Excel dates,
+' Excel serial numbers and date text. Blank/non-date rows are skipped safely.
 '====================================================================================
 
 Private Const NAVY As Long = 5067283
@@ -50,7 +48,6 @@ Public Sub Build_CFO_Cash_Allocation()
     If Not ValidateCurve(wb.Worksheets("curve")) Then Exit Sub
 
     On Error GoTo Fail
-
     Application.ScreenUpdating = False
     Application.DisplayAlerts = False
     Application.EnableEvents = False
@@ -68,16 +65,12 @@ Public Sub Build_CFO_Cash_Allocation()
 
     gStage = "Build page 1"
     Page1 wb
-
     gStage = "Build page 2"
     Page2 wb
-
     gStage = "Build page 3"
     Page3 wb
-
     gStage = "Build page 4"
     Page4 wb
-
     gStage = "Build page 5"
     Page5 wb
 
@@ -110,12 +103,25 @@ End Sub
 '====================================================================================
 Private Sub BuildHistoricalData(ByVal wb As Workbook)
     Dim src As Worksheet, out As Worksheet
-    Dim lastRow As Long, i As Long, j As Long, k As Long, outRow As Long
+    Dim lastRow As Long, lastDateRow As Long
+    Dim i As Long, j As Long, k As Long, outRow As Long
     Dim d0 As Date, targetDate As Date, dm As Date
-    Dim rON As Double, r6 As Double, rolled As Double, locked As Double
+    Dim dk As Date, dk1 As Date, lastDate As Date
+    Dim rON As Double, r6 As Double, rkON As Double, rMatON As Double
+    Dim rolled As Double, locked As Double
     Dim dtDays As Long, daysHeld As Long
 
     Set src = wb.Worksheets("curve")
+    lastRow = src.Cells(src.Rows.Count, 1).End(xlUp).Row
+    lastDateRow = LastValidDateRow(src, lastRow)
+
+    If lastDateRow < 2 Then
+        Err.Raise vbObjectError + 101, , "No valid dates found in curve column A."
+    End If
+    If Not TryGetExcelDate(src.Cells(lastDateRow, 1).Value2, lastDate) Then
+        Err.Raise vbObjectError + 102, , "Could not read the final valid curve date."
+    End If
+
     Set out = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
     out.Name = "CFO_Data_Hist"
 
@@ -123,84 +129,135 @@ Private Sub BuildHistoricalData(ByVal wb As Workbook)
         "6M-ON spread bp", "Rolled ON return", "Locked 6M return", _
         "6M excess bp", "Winner", "ON at maturity", "ON change bp")
 
-    lastRow = src.Cells(src.Rows.Count, 1).End(xlUp).Row
     outRow = 2
 
-    For i = 2 To lastRow
-        If CellHasDate(src.Cells(i, 1)) Then
-            d0 = CDate(src.Cells(i, 1).Value)
-            targetDate = DateAdd("m", 6, d0)
+    For i = 2 To lastDateRow
+        If TryGetExcelDate(src.Cells(i, 1).Value2, d0) Then
+            If TryGetRate(src.Cells(i, 2).Value2, rON) And _
+               TryGetRate(src.Cells(i, 5).Value2, r6) Then
 
-            If CellHasDate(src.Cells(lastRow, 1)) Then
-                If targetDate <= CDate(src.Cells(lastRow, 1).Value) Then
-                    j = FindFloorDateRow(src, targetDate, i, lastRow)
+                targetDate = DateAdd("m", 6, d0)
+                If targetDate <= lastDate Then
+                    j = FindFloorDateRowSafe(src, targetDate, i, lastDateRow)
                 Else
                     j = 0
                 End If
-            End If
 
-            If j > i Then
-                dm = CDate(src.Cells(j, 1).Value)
-                rON = SafeRate(src.Cells(i, 2).Value)
-                r6 = SafeRate(src.Cells(i, 5).Value)
-                rolled = 1#
+                If j > i Then
+                    If TryGetExcelDate(src.Cells(j, 1).Value2, dm) And _
+                       TryGetRate(src.Cells(j, 2).Value2, rMatON) Then
 
-                For k = i To j - 1
-                    If CellHasDate(src.Cells(k, 1)) And CellHasDate(src.Cells(k + 1, 1)) Then
-                        dtDays = DateDiff("d", CDate(src.Cells(k, 1).Value), CDate(src.Cells(k + 1, 1).Value))
-                        If dtDays > 0 Then
-                            rolled = rolled * (1# + SafeRate(src.Cells(k, 2).Value) * dtDays / 360#)
+                        rolled = 1#
+                        For k = i To j - 1
+                            If TryGetExcelDate(src.Cells(k, 1).Value2, dk) And _
+                               TryGetExcelDate(src.Cells(k + 1, 1).Value2, dk1) And _
+                               TryGetRate(src.Cells(k, 2).Value2, rkON) Then
+
+                                dtDays = DateDiff("d", dk, dk1)
+                                If dtDays > 0 Then
+                                    rolled = rolled * (1# + rkON * dtDays / 360#)
+                                End If
+                            End If
+                        Next k
+
+                        rolled = rolled - 1#
+                        daysHeld = DateDiff("d", d0, dm)
+                        locked = r6 * daysHeld / 360#
+
+                        out.Cells(outRow, 1).Value = d0
+                        out.Cells(outRow, 2).Value = dm
+                        out.Cells(outRow, 3).Value = rON
+                        out.Cells(outRow, 4).Value = r6
+                        out.Cells(outRow, 5).Value = (r6 - rON) * 10000#
+                        out.Cells(outRow, 6).Value = rolled
+                        out.Cells(outRow, 7).Value = locked
+                        out.Cells(outRow, 8).Value = (locked - rolled) * 10000#
+                        If locked > rolled Then
+                            out.Cells(outRow, 9).Value = "6M"
+                        Else
+                            out.Cells(outRow, 9).Value = "ON"
                         End If
+                        out.Cells(outRow, 10).Value = rMatON
+                        out.Cells(outRow, 11).Value = (rMatON - rON) * 10000#
+                        outRow = outRow + 1
                     End If
-                Next k
-
-                rolled = rolled - 1#
-                daysHeld = DateDiff("d", d0, dm)
-                locked = r6 * daysHeld / 360#
-
-                out.Cells(outRow, 1).Value = d0
-                out.Cells(outRow, 2).Value = dm
-                out.Cells(outRow, 3).Value = rON
-                out.Cells(outRow, 4).Value = r6
-                out.Cells(outRow, 5).Value = (r6 - rON) * 10000#
-                out.Cells(outRow, 6).Value = rolled
-                out.Cells(outRow, 7).Value = locked
-                out.Cells(outRow, 8).Value = (locked - rolled) * 10000#
-                If locked > rolled Then out.Cells(outRow, 9).Value = "6M" Else out.Cells(outRow, 9).Value = "ON"
-                out.Cells(outRow, 10).Value = SafeRate(src.Cells(j, 2).Value)
-                out.Cells(outRow, 11).Value = (SafeRate(src.Cells(j, 2).Value) - rON) * 10000#
-                outRow = outRow + 1
+                End If
             End If
         End If
     Next i
 
-    If outRow <= 2 Then Err.Raise vbObjectError + 101, , "No complete six-month historical decisions could be built."
+    If outRow <= 2 Then
+        Err.Raise vbObjectError + 103, , _
+            "No complete six-month historical decisions could be built. Check curve dates and rates."
+    End If
 
     out.Columns("A:B").NumberFormat = "dd-mmm-yyyy"
     out.Columns("C:D,F:G,J").NumberFormat = "0.000%"
     out.Columns("E,H,K").NumberFormat = "0.0"
 End Sub
 
+Private Function LastValidDateRow(ByVal ws As Worksheet, ByVal lastRow As Long) As Long
+    Dim r As Long
+    Dim d As Date
+    For r = lastRow To 2 Step -1
+        If TryGetExcelDate(ws.Cells(r, 1).Value2, d) Then
+            LastValidDateRow = r
+            Exit Function
+        End If
+    Next r
+    LastValidDateRow = 0
+End Function
+
+Private Function FindFloorDateRowSafe(ByVal ws As Worksheet, ByVal targetDate As Date, _
+                                      ByVal startRow As Long, ByVal lastRow As Long) As Long
+    Dim r As Long, ans As Long
+    Dim d As Date
+    ans = 0
+    For r = startRow To lastRow
+        If TryGetExcelDate(ws.Cells(r, 1).Value2, d) Then
+            If d <= targetDate Then
+                ans = r
+            Else
+                Exit For
+            End If
+        End If
+    Next r
+    FindFloorDateRowSafe = ans
+End Function
+
 '====================================================================================
-' SCENARIO ENGINE - WORKSHEET BACKED; NO MULTIDIMENSIONAL ARRAY PASSING
+' SCENARIO ENGINE - WORKSHEET BACKED
 '====================================================================================
 Private Sub BuildScenarioData(ByVal wb As Workbook)
     Dim ws As Worksheet, src As Worksheet
-    Dim lr As Long, s As Long, m As Long, r As Long
-    Dim baseON As Double, p1 As Double, p3 As Double, p6 As Double
+    Dim lr As Long, lastDateRow As Long
+    Dim s As Long, m As Long, r As Long
+    Dim baseON As Double, rate1 As Double, rate3 As Double, rate6 As Double
+    Dim p1 As Double, p3 As Double, p6 As Double
     Dim scenName As Variant, terminal As Variant, hump As Variant
-    Dim rowOut As Long, wON As Long, w1 As Long, w3 As Long, w6 As Long
+    Dim rowOut As Long
+    Dim wON As Long, w1 As Long, w3 As Long, w6 As Long
     Dim ret As Double, bestRet As Double, regret As Double
     Dim worstReg As Double, avgReg As Double
     Dim endGrid As Long, bestRow As Long
 
     Set src = wb.Worksheets("curve")
     lr = src.Cells(src.Rows.Count, 1).End(xlUp).Row
+    lastDateRow = LastValidDateRow(src, lr)
+    If lastDateRow < 2 Then Err.Raise vbObjectError + 120, , "No valid final curve row found."
 
-    baseON = SafeRate(src.Cells(lr, 2).Value)
-    p1 = SafeRate(src.Cells(lr, 3).Value) - baseON
-    p3 = SafeRate(src.Cells(lr, 4).Value) - baseON
-    p6 = SafeRate(src.Cells(lr, 5).Value) - baseON
+    If Not TryGetRate(src.Cells(lastDateRow, 2).Value2, baseON) Then _
+        Err.Raise vbObjectError + 121, , "Invalid ON rate on final curve row."
+    If Not TryGetRate(src.Cells(lastDateRow, 3).Value2, rate1) Then _
+        Err.Raise vbObjectError + 122, , "Invalid 1M rate on final curve row."
+    If Not TryGetRate(src.Cells(lastDateRow, 4).Value2, rate3) Then _
+        Err.Raise vbObjectError + 123, , "Invalid 3M rate on final curve row."
+    If Not TryGetRate(src.Cells(lastDateRow, 5).Value2, rate6) Then _
+        Err.Raise vbObjectError + 124, , "Invalid 6M rate on final curve row."
+
+    p1 = rate1 - baseON
+    p3 = rate3 - baseON
+    p6 = rate6 - baseON
 
     Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
     ws.Name = "CFO_Data_Scen"
@@ -210,7 +267,6 @@ Private Sub BuildScenarioData(ByVal wb As Workbook)
     terminal = Array(0.0315, 0.0375, 0.034, 0.029, 0.025)
     hump = Array(0.002, 0.007, 0.012, -0.005, -0.02)
 
-    ' Scenario monthly paths in A:AL
     ws.Cells(1, 1).Value = "Scenario"
     For m = 1 To 36
         ws.Cells(1, m + 1).Value = "M" & m
@@ -220,15 +276,14 @@ Private Sub BuildScenarioData(ByVal wb As Workbook)
     For s = 1 To 5
         ws.Cells(s + 1, 1).Value = CStr(scenName(s - 1))
         For m = 1 To 36
-            ws.Cells(s + 1, m + 1).Value = ScenarioRate(baseON, CDbl(terminal(s - 1)), CDbl(hump(s - 1)), s, m)
+            ws.Cells(s + 1, m + 1).Value = _
+                ScenarioRate(baseON, CDbl(terminal(s - 1)), CDbl(hump(s - 1)), s, m)
         Next m
         ws.Cells(s + 1, 38).Value = ScenarioDescription(s)
     Next s
     ws.Range("B2:AK6").NumberFormat = "0.00%"
 
-    ' Sleeve returns at A9:G14
     PutRow ws.Range("A9"), Array("Scenario", "ON", "1M", "3M", "6M", "Best tenor", "Best return")
-
     For s = 1 To 5
         ws.Cells(s + 9, 1).Value = CStr(scenName(s - 1))
         ws.Cells(s + 9, 2).Value = SleeveReturnFromSheet(ws, s + 1, 0#, 1)
@@ -236,16 +291,14 @@ Private Sub BuildScenarioData(ByVal wb As Workbook)
         ws.Cells(s + 9, 4).Value = SleeveReturnFromSheet(ws, s + 1, p3, 3)
         ws.Cells(s + 9, 5).Value = SleeveReturnFromSheet(ws, s + 1, p6, 6)
         ws.Cells(s + 9, 6).Value = BestTenorFromCells(ws, s + 9)
-        ws.Cells(s + 9, 7).Value = Max4( _
-            CDbl(ws.Cells(s + 9, 2).Value), _
-            CDbl(ws.Cells(s + 9, 3).Value), _
-            CDbl(ws.Cells(s + 9, 4).Value), _
-            CDbl(ws.Cells(s + 9, 5).Value))
+        ws.Cells(s + 9, 7).Value = Max4(CDbl(ws.Cells(s + 9, 2).Value2), _
+            CDbl(ws.Cells(s + 9, 3).Value2), CDbl(ws.Cells(s + 9, 4).Value2), _
+            CDbl(ws.Cells(s + 9, 5).Value2))
     Next s
     ws.Range("B10:E14,G10:G14").NumberFormat = "0.00%"
 
-    ' Allocation grid at J:P
-    PutRow ws.Range("J1"), Array("ON", "1M", "3M", "6M", "Weighted months", "Worst regret bp", "Average regret bp")
+    PutRow ws.Range("J1"), Array("ON", "1M", "3M", "6M", "Weighted months", _
+        "Worst regret bp", "Average regret bp")
     rowOut = 2
 
     For wON = 0 To 10
@@ -256,12 +309,11 @@ Private Sub BuildScenarioData(ByVal wb As Workbook)
                 avgReg = 0#
 
                 For s = 1 To 5
-                    ret = (wON * CDbl(ws.Cells(s + 9, 2).Value) + _
-                           w1 * CDbl(ws.Cells(s + 9, 3).Value) + _
-                           w3 * CDbl(ws.Cells(s + 9, 4).Value) + _
-                           w6 * CDbl(ws.Cells(s + 9, 5).Value)) / 10#
-
-                    bestRet = CDbl(ws.Cells(s + 9, 7).Value)
+                    ret = (wON * CDbl(ws.Cells(s + 9, 2).Value2) + _
+                           w1 * CDbl(ws.Cells(s + 9, 3).Value2) + _
+                           w3 * CDbl(ws.Cells(s + 9, 4).Value2) + _
+                           w6 * CDbl(ws.Cells(s + 9, 5).Value2)) / 10#
+                    bestRet = CDbl(ws.Cells(s + 9, 7).Value2)
                     regret = (bestRet - ret) * 10000#
                     If regret > worstReg Then worstReg = regret
                     avgReg = avgReg + regret / 5#
@@ -282,10 +334,11 @@ Private Sub BuildScenarioData(ByVal wb As Workbook)
     endGrid = rowOut - 1
     bestRow = 2
     For r = 3 To endGrid
-        If CDbl(ws.Cells(r, 15).Value) < CDbl(ws.Cells(bestRow, 15).Value) Then bestRow = r
+        If CDbl(ws.Cells(r, 15).Value2) < CDbl(ws.Cells(bestRow, 15).Value2) Then bestRow = r
     Next r
 
-    PutRow ws.Range("J" & endGrid + 3), Array("REFERENCE", "ON", "1M", "3M", "6M", "Weighted months", "Worst regret bp", "Average regret bp")
+    PutRow ws.Range("J" & endGrid + 3), Array("REFERENCE", "ON", "1M", "3M", "6M", _
+        "Weighted months", "Worst regret bp", "Average regret bp")
     ws.Cells(endGrid + 4, 10).Value = "Selected"
     ws.Cells(endGrid + 4, 11).Value = ws.Cells(bestRow, 10).Value
     ws.Cells(endGrid + 4, 12).Value = ws.Cells(bestRow, 11).Value
@@ -294,43 +347,35 @@ Private Sub BuildScenarioData(ByVal wb As Workbook)
     ws.Cells(endGrid + 4, 15).Value = ws.Cells(bestRow, 14).Value
     ws.Cells(endGrid + 4, 16).Value = ws.Cells(bestRow, 15).Value
     ws.Cells(endGrid + 4, 17).Value = ws.Cells(bestRow, 16).Value
-
     ws.Range("J2:M" & endGrid).NumberFormat = "0%"
 End Sub
 
 Private Function SleeveReturnFromSheet(ByVal ws As Worksheet, ByVal pathRow As Long, _
                                        ByVal premium As Double, ByVal resetEvery As Long) As Double
-    Dim wealth As Double, rr As Double
-    Dim m As Long
-
+    Dim wealth As Double, rr As Double, m As Long
     wealth = 1#
     rr = 0#
-
     For m = 1 To 36
         If m = 1 Or ((m - 1) Mod resetEvery = 0) Then
-            rr = CDbl(ws.Cells(pathRow, m + 1).Value) + premium
+            rr = CDbl(ws.Cells(pathRow, m + 1).Value2) + premium
         End If
         wealth = wealth * (1# + rr / 12#)
     Next m
-
     SleeveReturnFromSheet = wealth ^ (1# / 3#) - 1#
 End Function
 
 Private Function BestTenorFromCells(ByVal ws As Worksheet, ByVal rowNum As Long) As String
     Dim bestCol As Long, c As Long
     Dim bestVal As Double, x As Double
-
     bestCol = 2
-    bestVal = CDbl(ws.Cells(rowNum, 2).Value)
-
+    bestVal = CDbl(ws.Cells(rowNum, 2).Value2)
     For c = 3 To 5
-        x = CDbl(ws.Cells(rowNum, c).Value)
+        x = CDbl(ws.Cells(rowNum, c).Value2)
         If x > bestVal Then
             bestVal = x
             bestCol = c
         End If
     Next c
-
     Select Case bestCol
         Case 2: BestTenorFromCells = "ON"
         Case 3: BestTenorFromCells = "1M"
@@ -352,10 +397,9 @@ Private Function ScenarioRate(ByVal startRate As Double, ByVal endRate As Double
                               ByVal hump As Double, ByVal scen As Long, ByVal m As Long) As Double
     Dim t As Double, x As Double
     t = (m - 1) / 35#
-
     Select Case scen
         Case 1, 3
-            x = startRate + hump * Sin(3.14159265358979# * t) + (endRate - startRate) * t
+            x = startRate + hump * Sin(3.14159265358979 * t) + (endRate - startRate) * t
         Case 2
             If t < 0.6 Then
                 x = startRate + hump * (t / 0.6)
@@ -367,7 +411,6 @@ Private Function ScenarioRate(ByVal startRate As Double, ByVal endRate As Double
         Case 5
             x = startRate + hump * (1# - Exp(-8# * t)) + (endRate - startRate - hump) * t
     End Select
-
     If x < 0.0001 Then x = 0.0001
     ScenarioRate = x
 End Function
@@ -386,40 +429,39 @@ End Function
 ' PAGE 1
 '====================================================================================
 Private Sub Page1(ByVal wb As Workbook)
-    Dim ws As Worksheet, src As Worksheet, co As ChartObject
-    Dim lr As Long, d As Date
+    Dim ws As Worksheet, c As Worksheet, co As ChartObject
+    Dim lr As Long, lastDateRow As Long
+    Dim d As Date
     Dim r0 As Double, r1 As Double, r3 As Double, r6 As Double
 
     Set ws = NewPage(wb, "CFO_1_Decision")
-    Set src = wb.Worksheets("curve")
-    lr = src.Cells(src.Rows.Count, 1).End(xlUp).Row
+    Set c = wb.Worksheets("curve")
+    lr = c.Cells(c.Rows.Count, 1).End(xlUp).Row
+    lastDateRow = LastValidDateRow(c, lr)
 
-    d = CDate(src.Cells(lr, 1).Value)
-    r0 = SafeRate(src.Cells(lr, 2).Value)
-    r1 = SafeRate(src.Cells(lr, 3).Value)
-    r3 = SafeRate(src.Cells(lr, 4).Value)
-    r6 = SafeRate(src.Cells(lr, 5).Value)
+    If Not TryGetExcelDate(c.Cells(lastDateRow, 1).Value2, d) Then _
+        Err.Raise vbObjectError + 140, , "Could not read latest curve date."
+    If Not TryGetRate(c.Cells(lastDateRow, 2).Value2, r0) Then _
+        Err.Raise vbObjectError + 141, , "Could not read latest ON rate."
+    If Not TryGetRate(c.Cells(lastDateRow, 3).Value2, r1) Then _
+        Err.Raise vbObjectError + 142, , "Could not read latest 1M rate."
+    If Not TryGetRate(c.Cells(lastDateRow, 4).Value2, r3) Then _
+        Err.Raise vbObjectError + 143, , "Could not read latest 3M rate."
+    If Not TryGetRate(c.Cells(lastDateRow, 5).Value2, r6) Then _
+        Err.Raise vbObjectError + 144, , "Could not read latest 6M rate."
 
     Head ws, "Cash allocation is a choice between flexibility today and rate certainty over the next six months", _
         "The question is not simply which deposit rate is highest, but how much of the future rate path Treasury wants to leave open."
 
-    Box ws, "B6:F12", "STAY SHORT", _
-        "More flexibility" & vbLf & vbLf & _
-        "Benefits if rates remain high or rise" & vbLf & _
-        "Income resets lower if rates fall", RGB(234, 241, 246)
+    Box ws, "B6:F12", "STAY SHORT", "More flexibility" & vbLf & vbLf & _
+        "Benefits if rates remain high or rise" & vbLf & "Income resets lower if rates fall", RGB(234, 241, 246)
+    Box ws, "H6:L12", "EXTEND", "More rate certainty" & vbLf & vbLf & _
+        "Protects income if rates fall" & vbLf & "Gives up repricing if rates rise", RGB(234, 243, 243)
 
-    Box ws, "H6:L12", "EXTEND", _
-        "More rate certainty" & vbLf & vbLf & _
-        "Protects income if rates fall" & vbLf & _
-        "Gives up repricing if rates rise", RGB(234, 243, 243)
-
-    TextBox ws, "B15:L16", "ON     ->     1M     ->     3M     ->     6M", 18, True, NAVY, WHITE, xlCenter
-
-    TextBox ws, "B18:L21", _
-        "Observed " & Format(d, "dd-mmm-yyyy") & ": 6M paid " & _
-        FormatSignedBp((r6 - r0) * 10000#) & " versus ON. " & _
-        "The premium is compensation for giving up future resets; whether it is enough depends on what rates do next.", _
-        11, False, TXT, LIGHT, xlLeft
+    TextBlock ws, "B15:L16", "ON     ->     1M     ->     3M     ->     6M", 18, True, NAVY, WHITE, xlCenter
+    TextBlock ws, "B18:L21", "Observed " & Format(d, "dd-mmm-yyyy") & ": 6M paid " & _
+        Bp((r6 - r0) * 10000#) & " versus ON. The premium is compensation for giving up future resets; " & _
+        "whether it is enough depends on what rates do next.", 11, False, TXT, LIGHT, xlLeft
 
     PutRow ws.Range("N6"), Array("Tenor", "Rate")
     PutRow ws.Range("N7"), Array("ON", r0)
@@ -438,7 +480,7 @@ Private Sub Page1(ByVal wb As Workbook)
         .HasLegend = False
         .Axes(xlValue).TickLabels.NumberFormat = "0.00%"
         .SeriesCollection(1).Format.Fill.ForeColor.RGB = BLUE
-        .ChartArea.Format.Line.Visible = msoFalse
+        .ChartArea.Format.Line.Visible = 0
     End With
 
     Bottom ws, "We are choosing an exposure profile - not making a binary call that rates must rise or fall.", _
@@ -450,11 +492,12 @@ End Sub
 '====================================================================================
 Private Sub Page2(ByVal wb As Workbook)
     Dim ws As Worksheet, src As Worksheet, co As ChartObject
-    Dim lr As Long
+    Dim lr As Long, lastDateRow As Long
 
     Set ws = NewPage(wb, "CFO_2_Context")
     Set src = wb.Worksheets("curve")
     lr = src.Cells(src.Rows.Count, 1).End(xlUp).Row
+    lastDateRow = LastValidDateRow(src, lr)
 
     Head ws, "The last cycle rewarded fast resets because policy kept repricing higher", _
         "Historical tenor performance needs to be read together with the economic regime that produced it."
@@ -464,12 +507,12 @@ Private Sub Page2(ByVal wb As Workbook)
         .ChartType = xlLine
         .SeriesCollection.NewSeries
         .SeriesCollection(1).Name = "ON"
-        .SeriesCollection(1).XValues = src.Range("A2:A" & lr)
-        .SeriesCollection(1).Values = src.Range("B2:B" & lr)
+        .SeriesCollection(1).XValues = src.Range("A2:A" & lastDateRow)
+        .SeriesCollection(1).Values = src.Range("B2:B" & lastDateRow)
         .SeriesCollection.NewSeries
         .SeriesCollection(2).Name = "6M"
-        .SeriesCollection(2).XValues = src.Range("A2:A" & lr)
-        .SeriesCollection(2).Values = src.Range("E2:E" & lr)
+        .SeriesCollection(2).XValues = src.Range("A2:A" & lastDateRow)
+        .SeriesCollection(2).Values = src.Range("E2:E" & lastDateRow)
         .HasTitle = True
         .ChartTitle.Text = "SOFR front end | ON versus 6M"
         .HasLegend = True
@@ -477,20 +520,18 @@ Private Sub Page2(ByVal wb As Workbook)
         .Axes(xlValue).TickLabels.NumberFormat = "0.0%"
         .SeriesCollection(1).Format.Line.ForeColor.RGB = NAVY
         .SeriesCollection(2).Format.Line.ForeColor.RGB = RGB(228, 155, 49)
-        .ChartArea.Format.Line.Visible = msoFalse
+        .ChartArea.Format.Line.Visible = 0
     End With
 
-    Box ws, "L6:R10", "RAPID TIGHTENING", _
-        "Short cash repeatedly reset into higher policy rates. The opportunity value of flexibility was unusually high.", RGB(234, 241, 246)
+    Box ws, "L6:R10", "RAPID TIGHTENING", "Short cash repeatedly reset into higher policy rates. " & _
+        "The opportunity value of flexibility was unusually high.", RGB(234, 241, 246)
+    Box ws, "L11:R15", "PEAK / HOLD", "As the cycle matured, the relative advantage of rapid repricing narrowed " & _
+        "and outcomes became more balanced.", LIGHT
+    Box ws, "L16:R20", "EASING TRANSITION", "Reinvestment risk became more relevant, but the curve could already price " & _
+        "part of expected easing.", RGB(234, 243, 243)
 
-    Box ws, "L11:R15", "PEAK / HOLD", _
-        "As the cycle matured, the relative advantage of rapid repricing narrowed and outcomes became more balanced.", LIGHT
-
-    Box ws, "L16:R20", "EASING TRANSITION", _
-        "Reinvestment risk became more relevant, but the curve could already price part of expected easing.", RGB(234, 243, 243)
-
-    TextBox ws, "B22:R24", _
-        "The historical result should not be read as a permanent ranking of tenors. It is one realized path through a rapid tightening cycle, a restrictive plateau and an easing transition.", _
+    TextBlock ws, "B22:R24", "The historical result should not be read as a permanent ranking of tenors. " & _
+        "It is one realized path through a rapid tightening cycle, a restrictive plateau and an easing transition.", _
         10.5, False, TXT, LIGHT, xlLeft
 
     Bottom ws, "The historical lesson is path-dependence - not 'short is always better'.", _
@@ -512,8 +553,8 @@ Private Sub Page3(ByVal wb As Workbook)
 
     corr = SafeCorrel(h.Range("E2:E" & lr), h.Range("H2:H" & lr))
     r2 = corr * corr
-    win = Application.WorksheetFunction.CountIf(h.Range("I2:I" & lr), "6M") / CDbl(lr - 1)
-    q = Percentile75(h.Range("E2:E" & lr))
+    win = Application.WorksheetFunction.CountIf(h.Range("I2:I" & lr), "6M") / (lr - 1)
+    q = Application.WorksheetFunction.Quartile_Inc(h.Range("E2:E" & lr), 3)
     topMean = AverageIfGE(h.Range("E2:E" & lr), h.Range("H2:H" & lr), q)
     topHit = PositiveHitIfGE(h.Range("E2:E" & lr), h.Range("H2:H" & lr), q)
 
@@ -522,7 +563,7 @@ Private Sub Page3(ByVal wb As Workbook)
 
     Kpi ws, "B6:D9", "Starting spread R2", Format(r2, "0.0%"), "Standalone explanatory power."
     Kpi ws, "E6:G9", "6M win rate", Format(win, "0.0%"), Format(lr - 1, "#,##0") & " decisions."
-    Kpi ws, "H6:J9", "Top-spread quartile", FormatSignedBp(topMean), "Average realized excess."
+    Kpi ws, "H6:J9", "Top-spread quartile", Bp(topMean), "Average realized excess."
     Kpi ws, "K6:M9", "Top-q positive hit", Format(topHit, "0.0%"), "Positive excess frequency."
 
     Set co = ws.ChartObjects.Add(ws.Range("B11").Left, ws.Range("B11").Top, 455, 280)
@@ -540,7 +581,7 @@ Private Sub Page3(ByVal wb As Workbook)
         .Axes(xlCategory).AxisTitle.Text = "6M-ON at inception (bp)"
         .Axes(xlValue).AxisTitle.Text = "6M realized excess (bp)"
         .HasLegend = False
-        .ChartArea.Format.Line.Visible = msoFalse
+        .ChartArea.Format.Line.Visible = 0
     End With
 
     Set co = ws.ChartObjects.Add(ws.Range("J11").Left, ws.Range("J11").Top, 455, 280)
@@ -558,12 +599,11 @@ Private Sub Page3(ByVal wb As Workbook)
         .Axes(xlCategory).AxisTitle.Text = "ON change over 6M (bp)"
         .Axes(xlValue).AxisTitle.Text = "6M realized excess (bp)"
         .HasLegend = False
-        .ChartArea.Format.Line.Visible = msoFalse
+        .ChartArea.Format.Line.Visible = 0
     End With
 
-    TextBox ws, "B22:R24", _
-        "A positive 6M spread is compensation for taking reset risk. It is not a guarantee that extending will outperform. The realized result depends on the future reset path relative to what was already priced.", _
-        10.5, False, TXT, LIGHT, xlLeft
+    TextBlock ws, "B22:R24", "A positive 6M spread is compensation for taking reset risk. It is not a guarantee that extending will outperform. " & _
+        "The realized result depends on the future reset path relative to what was already priced.", 10.5, False, TXT, LIGHT, xlLeft
 
     Bottom ws, "The question is not only 'what does 6M pay?' - it is 'is that premium enough for the uncertainty we give up?'", _
         "Source: curve tab. Historical six-month decisions rebuilt directly by this macro."
@@ -574,60 +614,43 @@ End Sub
 '====================================================================================
 Private Sub Page4(ByVal wb As Workbook)
     Dim ws As Worksheet, sc As Worksheet, co As ChartObject
-    Dim lastJ As Long, refRow As Long, gridEnd As Long, r As Long
+    Dim refRow As Long, gridEnd As Long, r As Long
     Dim wON As Double, w1 As Double, w3 As Double, w6 As Double
     Dim wt As Double, wr As Double
-    Dim minWorst As Double, nearN As Long, minTen As Double, maxTen As Double
+    Dim minWorst As Double, nearN As Long
+    Dim minTen As Double, maxTen As Double
 
     Set ws = NewPage(wb, "CFO_4_Portfolio")
     Set sc = wb.Worksheets("CFO_Data_Scen")
-
-    lastJ = sc.Cells(sc.Rows.Count, 10).End(xlUp).Row
-    refRow = 0
-
-    For r = lastJ To 2 Step -1
-        If CStr(sc.Cells(r, 10).Value) = "Selected" Then
-            refRow = r
-            Exit For
-        End If
-    Next r
-
-    If refRow = 0 Then Err.Raise vbObjectError + 201, , "Reference allocation row not found."
+    refRow = FindSelectedRow(sc)
+    If refRow = 0 Then Err.Raise vbObjectError + 160, , "Reference allocation row not found."
     gridEnd = refRow - 4
 
-    wON = CDbl(sc.Cells(refRow, 11).Value)
-    w1 = CDbl(sc.Cells(refRow, 12).Value)
-    w3 = CDbl(sc.Cells(refRow, 13).Value)
-    w6 = CDbl(sc.Cells(refRow, 14).Value)
-    wt = CDbl(sc.Cells(refRow, 15).Value)
-    wr = CDbl(sc.Cells(refRow, 16).Value)
+    wON = CDbl(sc.Cells(refRow, 11).Value2)
+    w1 = CDbl(sc.Cells(refRow, 12).Value2)
+    w3 = CDbl(sc.Cells(refRow, 13).Value2)
+    w6 = CDbl(sc.Cells(refRow, 14).Value2)
+    wt = CDbl(sc.Cells(refRow, 15).Value2)
+    wr = CDbl(sc.Cells(refRow, 16).Value2)
 
-    minWorst = CDbl(sc.Cells(2, 15).Value)
-    For r = 3 To gridEnd
-        If CDbl(sc.Cells(r, 15).Value) < minWorst Then minWorst = CDbl(sc.Cells(r, 15).Value)
-    Next r
-
+    minWorst = Application.WorksheetFunction.Min(sc.Range("O2:O" & gridEnd))
     minTen = 1E+99
     maxTen = -1E+99
-    nearN = 0
 
     For r = 2 To gridEnd
-        If CDbl(sc.Cells(r, 15).Value) <= minWorst + 0.25 Then
+        If CDbl(sc.Cells(r, 15).Value2) <= minWorst + 0.25 Then
             nearN = nearN + 1
-            If CDbl(sc.Cells(r, 14).Value) < minTen Then minTen = CDbl(sc.Cells(r, 14).Value)
-            If CDbl(sc.Cells(r, 14).Value) > maxTen Then maxTen = CDbl(sc.Cells(r, 14).Value)
+            If CDbl(sc.Cells(r, 14).Value2) < minTen Then minTen = CDbl(sc.Cells(r, 14).Value2)
+            If CDbl(sc.Cells(r, 14).Value2) > maxTen Then maxTen = CDbl(sc.Cells(r, 14).Value2)
         End If
     Next r
 
     Head ws, "When direction is uncertain, focus on the cost of being wrong - not on one forecast", _
         "Alternative rate paths expose the trade-off and help identify a robust allocation region rather than a single 'correct' tenor."
 
-    Box ws, "B6:F10", "IF RATES RISE", _
-        "Shorter resets retain more ability to participate in higher market rates." & vbLf & vbLf & _
+    Box ws, "B6:F10", "IF RATES RISE", "Shorter resets retain more ability to participate in higher market rates." & vbLf & vbLf & _
         "Economic risk: lock-in opportunity cost.", RGB(245, 241, 231)
-
-    Box ws, "B11:F15", "IF RATES FALL", _
-        "Longer locking protects against reinvestment at lower rates." & vbLf & vbLf & _
+    Box ws, "B11:F15", "IF RATES FALL", "Longer locking protects against reinvestment at lower rates." & vbLf & vbLf & _
         "Economic risk: reinvestment opportunity cost.", RGB(234, 243, 243)
 
     ws.Range("B17:H22").Value = sc.Range("A9:G14").Value
@@ -650,22 +673,32 @@ Private Sub Page4(ByVal wb As Workbook)
         .Axes(xlCategory).AxisTitle.Text = "Weighted tenor (months)"
         .Axes(xlValue).AxisTitle.Text = "Worst regret (bp/year)"
         .HasLegend = False
-        .ChartArea.Format.Line.Visible = msoFalse
+        .ChartArea.Format.Line.Visible = 0
     End With
 
     Kpi ws, "J17:L20", "Reference mix", MixLabel(wON, w1, w3, w6), "Illustrative minimax-regret anchor."
     Kpi ws, "M17:O20", "Weighted tenor", Format(wt, "0.0") & " months", "Position on the curve."
-    Kpi ws, "P17:R20", "Worst regret", Format(wr, "0.0") & " bp/yr", "Maximum model-state shortfall."
+    Kpi ws, "P17:R20", "Worst regret", Bp(wr) & "/yr", "Maximum model-state shortfall."
 
-    TextBox ws, "J22:R24", _
-        "The model identifies a risk-balanced region rather than one precise answer. " & nearN & _
-        " portfolios sit within 0.25 bp/year of the minimum, spanning approximately " & _
-        Format(minTen, "0.0") & " to " & Format(maxTen, "0.0") & " months weighted tenor.", _
-        10, False, TXT, LIGHT, xlLeft
+    TextBlock ws, "J22:R24", "The model identifies a risk-balanced region rather than one precise answer. " & nearN & _
+        " portfolios sit within 0.25 bp/year of the minimum, spanning approximately " & Format(minTen, "0.0") & _
+        " to " & Format(maxTen, "0.0") & " months weighted tenor.", 10, False, TXT, LIGHT, xlLeft
 
     Bottom ws, "The objective is to reduce dependence on one rate view while preserving flexibility to adapt as conditions change.", _
         "Source: curve tab. Forward paths are transparent sensitivities, not forecasts or return guarantees."
 End Sub
+
+Private Function FindSelectedRow(ByVal ws As Worksheet) As Long
+    Dim r As Long, lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 10).End(xlUp).Row
+    For r = lastRow To 1 Step -1
+        If CStr(ws.Cells(r, 10).Value2) = "Selected" Then
+            FindSelectedRow = r
+            Exit Function
+        End If
+    Next r
+    FindSelectedRow = 0
+End Function
 
 '====================================================================================
 ' PAGE 5
@@ -677,40 +710,28 @@ Private Sub Page5(ByVal wb As Workbook)
     Head ws, "How I can help: turn the framework into executable liquidity alternatives", _
         "Connect market pricing, Treasury constraints and execution - then revisit the allocation as conditions change."
 
-    Box ws, "B6:F14", "01 | READ THE MARKET", _
-        "- Track where the curve pays for extension" & vbLf & _
-        "- Separate carry from the path already priced" & vbLf & _
-        "- Frame alternatives without forcing one forecast", LIGHT
+    Box ws, "B6:F14", "01 | READ THE MARKET", "- Track where the curve pays for extension" & vbLf & _
+        "- Separate carry from the path already priced" & vbLf & "- Frame alternatives without forcing one forecast", LIGHT
+    Box ws, "H6:L14", "02 | WORK WITH TREASURY ON THE RISK", "- Start from liquidity needs and operating cash" & vbLf & _
+        "- Translate tenor into reinvestment / lock-in exposure" & vbLf & "- Use scenarios to make trade-offs explicit", RGB(234, 241, 246)
+    Box ws, "N6:R14", "03 | TRANSLATE INTO EXECUTION", "- Provide executable levels across tenors" & vbLf & _
+        "- Coordinate capacity, counterparty and operational fit" & vbLf & "- Review as curve and cash needs change", LIGHT
 
-    Box ws, "H6:L14", "02 | WORK WITH TREASURY ON THE RISK", _
-        "- Start from liquidity needs and operating cash" & vbLf & _
-        "- Translate tenor into reinvestment / lock-in exposure" & vbLf & _
-        "- Use scenarios to make trade-offs explicit", RGB(234, 241, 246)
+    TextBlock ws, "B17:R21", "MY ROLE" & vbLf & vbLf & _
+        "Connect the market view, quantitative analysis and the client's Treasury objectives - and work with the broader platform " & _
+        "to turn that discussion into executable choices.", 14, True, TXT, WHITE, xlCenter
 
-    Box ws, "N6:R14", "03 | TRANSLATE INTO EXECUTION", _
-        "- Provide executable levels across tenors" & vbLf & _
-        "- Coordinate capacity, counterparty and operational fit" & vbLf & _
-        "- Review as curve and cash needs change", LIGHT
-
-    TextBox ws, "B17:R21", _
-        "MY ROLE" & vbLf & vbLf & _
-        "Connect the market view, quantitative analysis and the client's Treasury objectives - and work with the broader platform to turn that discussion into executable choices.", _
-        14, True, TXT, WHITE, xlCenter
-
-    TextBox ws, "B23:R25", _
-        "Objective: a consistent liquidity partnership - not a one-day rate call, and not a portfolio dependent on one Fed view.", _
+    TextBlock ws, "B23:R25", "Objective: a consistent liquidity partnership - not a one-day rate call, and not a portfolio dependent on one Fed view.", _
         13, True, WHITE, NAVY, xlCenter
 
-    Bottom ws, "", _
-        "Any allocation remains subject to Treasury liquidity needs, approved counterparties, internal policy and executable levels."
+    Bottom ws, "", "Any allocation remains subject to Treasury liquidity needs, approved counterparties, internal policy and executable levels."
 End Sub
 
 '====================================================================================
-' PRESENTATION FORMATTING
+' FORMATTING
 '====================================================================================
 Private Function NewPage(ByVal wb As Workbook, ByVal nm As String) As Worksheet
     Dim ws As Worksheet
-
     Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
     ws.Name = nm
 
@@ -722,11 +743,9 @@ Private Function NewPage(ByVal wb As Workbook, ByVal nm As String) As Worksheet
         .Range("A1:R28").Font.Name = "Arial"
         .Range("A1:R28").Font.Size = 10
         .Range("A1:R28").Interior.Color = WHITE
-
         .Activate
         ActiveWindow.DisplayGridlines = False
         ActiveWindow.Zoom = 85
-
         With .PageSetup
             .Orientation = xlLandscape
             .Zoom = False
@@ -735,14 +754,13 @@ Private Function NewPage(ByVal wb As Workbook, ByVal nm As String) As Worksheet
             .PrintArea = "$A$1:$R$27"
         End With
     End With
-
     Set NewPage = ws
 End Function
 
-Private Sub Head(ByVal ws As Worksheet, ByVal ttl As String, ByVal subttl As String)
-    TextBox ws, "B2:R2", "USD SHORT-TERM CASH ALLOCATION | CFO DISCUSSION", 8, True, BLUE, WHITE, xlLeft
-    TextBox ws, "B3:R3", ttl, 22, True, TXT, WHITE, xlLeft
-    TextBox ws, "B4:R4", subttl, 11, False, MUTED, WHITE, xlLeft
+Private Sub Head(ByVal ws As Worksheet, ByVal t As String, ByVal st As String)
+    TextBlock ws, "B2:R2", "USD SHORT-TERM CASH ALLOCATION | CFO DISCUSSION", 8, True, BLUE, WHITE, xlLeft
+    TextBlock ws, "B3:R3", t, 22, True, TXT, WHITE, xlLeft
+    TextBlock ws, "B4:R4", st, 11, False, MUTED, WHITE, xlLeft
 End Sub
 
 Private Sub Box(ByVal ws As Worksheet, ByVal adr As String, ByVal ttl As String, ByVal body As String, ByVal fill As Long)
@@ -763,6 +781,8 @@ Private Sub Box(ByVal ws As Worksheet, ByVal adr As String, ByVal ttl As String,
 End Sub
 
 Private Sub Kpi(ByVal ws As Worksheet, ByVal adr As String, ByVal lbl As String, ByVal val As String, ByVal note As String)
+    Dim valueStart As Long
+    valueStart = Len(UCase$(lbl)) + 2
     With ws.Range(adr)
         .Merge
         .Value = UCase$(lbl) & vbLf & val & vbLf & note
@@ -775,22 +795,21 @@ Private Sub Kpi(ByVal ws As Worksheet, ByVal adr As String, ByVal lbl As String,
         .Font.Color = MUTED
         .Characters(1, Len(lbl)).Font.Bold = True
         .Characters(1, Len(lbl)).Font.Color = BLUE
-        .Characters(Len(lbl) + 2, Len(val)).Font.Bold = True
-        .Characters(Len(lbl) + 2, Len(val)).Font.Size = 17
-        .Characters(Len(lbl) + 2, Len(val)).Font.Color = NAVY
+        .Characters(valueStart, Len(val)).Font.Bold = True
+        .Characters(valueStart, Len(val)).Font.Size = 17
+        .Characters(valueStart, Len(val)).Font.Color = NAVY
     End With
 End Sub
 
-Private Sub TextBox(ByVal ws As Worksheet, ByVal adr As String, ByVal s As String, _
-                    ByVal fs As Double, ByVal isBold As Boolean, ByVal fc As Long, _
-                    ByVal fill As Long, ByVal ha As XlHAlign)
+Private Sub TextBlock(ByVal ws As Worksheet, ByVal adr As String, ByVal s As String, ByVal fs As Double, _
+                      ByVal b As Boolean, ByVal fc As Long, ByVal fill As Long, ByVal ha As XlHAlign)
     With ws.Range(adr)
         .Merge
         .Value = s
         .WrapText = True
         .Font.Name = "Arial"
         .Font.Size = fs
-        .Font.Bold = isBold
+        .Font.Bold = b
         .Font.Color = fc
         .Interior.Color = fill
         .HorizontalAlignment = ha
@@ -799,8 +818,8 @@ Private Sub TextBox(ByVal ws As Worksheet, ByVal adr As String, ByVal s As Strin
 End Sub
 
 Private Sub Bottom(ByVal ws As Worksheet, ByVal take As String, ByVal src As String)
-    If Len(take) > 0 Then TextBox ws, "B26:R26", take, 11.5, True, WHITE, NAVY, xlCenter
-    TextBox ws, "B27:R27", src, 7, False, MUTED, WHITE, xlLeft
+    If Len(take) > 0 Then TextBlock ws, "B26:R26", take, 11.5, True, WHITE, NAVY, xlCenter
+    TextBlock ws, "B27:R27", src, 7, False, MUTED, WHITE, xlLeft
 End Sub
 
 Private Sub Tbl(ByVal r As Range)
@@ -810,7 +829,6 @@ Private Sub Tbl(ByVal r As Range)
         .Font.Size = 9
         .VerticalAlignment = xlCenter
     End With
-
     With r.Rows(1)
         .Interior.Color = NAVY
         .Font.Bold = True
@@ -819,77 +837,90 @@ Private Sub Tbl(ByVal r As Range)
     End With
 End Sub
 
-'====================================================================================
-' SAFE HELPERS
-'====================================================================================
-Private Sub PutRow(ByVal firstCell As Range, ByVal values As Variant)
+Private Sub PutRow(ByVal c As Range, ByVal v As Variant)
     Dim i As Long
-    For i = LBound(values) To UBound(values)
-        firstCell.Offset(0, i - LBound(values)).Value = values(i)
+    For i = LBound(v) To UBound(v)
+        c.Offset(0, i - LBound(v)).Value = v(i)
     Next i
 End Sub
 
-Private Function SafeRate(ByVal x As Variant) As Double
-    If IsError(x) Or IsEmpty(x) Or Len(Trim$(CStr(x))) = 0 Then
-        SafeRate = 0#
-    ElseIf IsNumeric(x) Then
-        SafeRate = CDbl(x)
-        If Abs(SafeRate) > 1# Then SafeRate = SafeRate / 100#
-    Else
-        Err.Raise vbObjectError + 301, , "Non-numeric rate value encountered: " & CStr(x)
-    End If
-End Function
-
-Private Function CellHasDate(ByVal c As Range) As Boolean
+'====================================================================================
+' SAFE DATA HELPERS
+'====================================================================================
+Private Function TryGetExcelDate(ByVal v As Variant, ByRef d As Date) As Boolean
     On Error GoTo Nope
-    If IsError(c.Value) Or IsEmpty(c.Value) Then GoTo Nope
-    CellHasDate = IsDate(c.Value)
-    Exit Function
+
+    If IsError(v) Or IsEmpty(v) Then GoTo Nope
+
+    If VarType(v) = vbDate Then
+        d = CDate(v)
+        TryGetExcelDate = True
+        Exit Function
+    End If
+
+    If IsNumeric(v) Then
+        If CDbl(v) <= 0# Or CDbl(v) > 2958465# Then GoTo Nope
+        d = DateSerial(1899, 12, 30) + CDbl(v)
+        TryGetExcelDate = True
+        Exit Function
+    End If
+
+    If IsDate(CStr(v)) Then
+        d = DateValue(CStr(v))
+        TryGetExcelDate = True
+        Exit Function
+    End If
+
 Nope:
-    CellHasDate = False
+    TryGetExcelDate = False
 End Function
 
-Private Function FormatSignedBp(ByVal x As Double) As String
-    If x > 0 Then
-        FormatSignedBp = "+" & Format(x, "0.0") & " bp"
+Private Function TryGetRate(ByVal v As Variant, ByRef r As Double) As Boolean
+    Dim s As String
+    On Error GoTo Nope
+
+    If IsError(v) Or IsEmpty(v) Then GoTo Nope
+
+    If IsNumeric(v) Then
+        r = CDbl(v)
     Else
-        FormatSignedBp = Format(x, "0.0") & " bp"
+        s = Trim$(CStr(v))
+        If Len(s) = 0 Then GoTo Nope
+        If Right$(s, 1) = "%" Then
+            s = Left$(s, Len(s) - 1)
+            If Not IsNumeric(s) Then GoTo Nope
+            r = CDbl(s) / 100#
+        Else
+            If Not IsNumeric(s) Then GoTo Nope
+            r = CDbl(s)
+        End If
+    End If
+
+    If Abs(r) > 1# Then r = r / 100#
+    TryGetRate = True
+    Exit Function
+
+Nope:
+    r = 0#
+    TryGetRate = False
+End Function
+
+Private Function Bp(ByVal x As Double) As String
+    If x > 0 Then
+        Bp = "+" & Format(x, "0.0") & " bp"
+    Else
+        Bp = Format(x, "0.0") & " bp"
     End If
 End Function
 
 Private Function MixLabel(ByVal wON As Double, ByVal w1 As Double, ByVal w3 As Double, ByVal w6 As Double) As String
     Dim s As String
-    s = ""
     If wON > 0 Then s = s & Format(wON, "0%") & " ON / "
     If w1 > 0 Then s = s & Format(w1, "0%") & " 1M / "
     If w3 > 0 Then s = s & Format(w3, "0%") & " 3M / "
     If w6 > 0 Then s = s & Format(w6, "0%") & " 6M / "
-    If Len(s) >= 3 Then If Right$(s, 3) = " / " Then s = Left$(s, Len(s) - 3)
+    If Right$(s, 3) = " / " Then s = Left$(s, Len(s) - 3)
     MixLabel = s
-End Function
-
-Private Function FindFloorDateRow(ByVal ws As Worksheet, ByVal targetDate As Date, _
-                                  ByVal startRow As Long, ByVal lastRow As Long) As Long
-    Dim lo As Long, hi As Long, mid As Long, ans As Long
-    lo = startRow
-    hi = lastRow
-    ans = 0
-
-    Do While lo <= hi
-        mid = (lo + hi) \ 2
-        If Not CellHasDate(ws.Cells(mid, 1)) Then
-            Err.Raise vbObjectError + 302, , "Invalid date in curve row " & mid
-        End If
-
-        If CDate(ws.Cells(mid, 1).Value) <= targetDate Then
-            ans = mid
-            lo = mid + 1
-        Else
-            hi = mid - 1
-        End If
-    Loop
-
-    FindFloorDateRow = ans
 End Function
 
 Private Function SafeCorrel(ByVal x As Range, ByVal y As Range) As Double
@@ -900,46 +931,36 @@ Nope:
     SafeCorrel = 0#
 End Function
 
-Private Function Percentile75(ByVal r As Range) As Double
-    On Error GoTo Legacy
-    Percentile75 = Application.WorksheetFunction.Percentile_Inc(r, 0.75)
-    Exit Function
-Legacy:
-    Err.Clear
-    Percentile75 = Application.WorksheetFunction.Percentile(r, 0.75)
-End Function
-
 Private Function AverageIfGE(ByVal criteriaRng As Range, ByVal avgRng As Range, ByVal threshold As Double) As Double
     Dim i As Long, n As Long
-    Dim total As Double
-
+    Dim s As Double
     For i = 1 To criteriaRng.Rows.Count
-        If IsNumeric(criteriaRng.Cells(i, 1).Value) And IsNumeric(avgRng.Cells(i, 1).Value) Then
-            If CDbl(criteriaRng.Cells(i, 1).Value) >= threshold Then
-                total = total + CDbl(avgRng.Cells(i, 1).Value)
+        If IsNumeric(criteriaRng.Cells(i, 1).Value2) And IsNumeric(avgRng.Cells(i, 1).Value2) Then
+            If CDbl(criteriaRng.Cells(i, 1).Value2) >= threshold Then
+                s = s + CDbl(avgRng.Cells(i, 1).Value2)
                 n = n + 1
             End If
         End If
     Next i
-
-    If n > 0 Then AverageIfGE = total / n Else AverageIfGE = 0#
+    If n > 0 Then AverageIfGE = s / n
 End Function
 
 Private Function PositiveHitIfGE(ByVal criteriaRng As Range, ByVal valueRng As Range, ByVal threshold As Double) As Double
-    Dim i As Long, n As Long, positive As Long
-
+    Dim i As Long, n As Long, p As Long
     For i = 1 To criteriaRng.Rows.Count
-        If IsNumeric(criteriaRng.Cells(i, 1).Value) And IsNumeric(valueRng.Cells(i, 1).Value) Then
-            If CDbl(criteriaRng.Cells(i, 1).Value) >= threshold Then
+        If IsNumeric(criteriaRng.Cells(i, 1).Value2) And IsNumeric(valueRng.Cells(i, 1).Value2) Then
+            If CDbl(criteriaRng.Cells(i, 1).Value2) >= threshold Then
                 n = n + 1
-                If CDbl(valueRng.Cells(i, 1).Value) > 0 Then positive = positive + 1
+                If CDbl(valueRng.Cells(i, 1).Value2) > 0 Then p = p + 1
             End If
         End If
     Next i
-
-    If n > 0 Then PositiveHitIfGE = positive / n Else PositiveHitIfGE = 0#
+    If n > 0 Then PositiveHitIfGE = p / n
 End Function
 
+'====================================================================================
+' VALIDATION / CLEANUP
+'====================================================================================
 Private Function HasSheet(ByVal wb As Workbook, ByVal nm As String) As Boolean
     Dim ws As Worksheet
     For Each ws In wb.Worksheets
@@ -948,12 +969,11 @@ Private Function HasSheet(ByVal wb As Workbook, ByVal nm As String) As Boolean
             Exit Function
         End If
     Next ws
-    HasSheet = False
 End Function
 
 Private Function ValidateCurve(ByVal ws As Worksheet) As Boolean
-    Dim lr As Long, i As Long
-    Dim prevDate As Date, thisDate As Date
+    Dim lr As Long, r As Long, goodRows As Long
+    Dim d As Date, x As Double
 
     lr = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
     If lr < 10 Then
@@ -961,32 +981,19 @@ Private Function ValidateCurve(ByVal ws As Worksheet) As Boolean
         Exit Function
     End If
 
-    If Not CellHasDate(ws.Cells(2, 1)) Then
-        MsgBox "curve!A2 must contain a valid date.", vbCritical
+    For r = 2 To lr
+        If TryGetExcelDate(ws.Cells(r, 1).Value2, d) And _
+           TryGetRate(ws.Cells(r, 2).Value2, x) And _
+           TryGetRate(ws.Cells(r, 5).Value2, x) Then
+            goodRows = goodRows + 1
+        End If
+    Next r
+
+    If goodRows < 10 Then
+        MsgBox "The curve sheet does not contain enough usable rows." & vbCrLf & _
+               "Expected A:E = Date | ON | 1M | 3M | 6M", vbCritical
         Exit Function
     End If
-
-    For i = 2 To 5
-        If Not IsNumeric(ws.Cells(2, i).Value) Then
-            MsgBox "Expected numeric rates in curve columns B:E." & vbCrLf & _
-                   "Layout must be Date | ON | 1M | 3M | 6M", vbCritical
-            Exit Function
-        End If
-    Next i
-
-    prevDate = CDate(ws.Cells(2, 1).Value)
-    For i = 3 To lr
-        If Not CellHasDate(ws.Cells(i, 1)) Then
-            MsgBox "Invalid date in curve row " & i & ".", vbCritical
-            Exit Function
-        End If
-        thisDate = CDate(ws.Cells(i, 1).Value)
-        If thisDate < prevDate Then
-            MsgBox "The curve dates must be sorted ascending. Problem at row " & i & ".", vbCritical
-            Exit Function
-        End If
-        prevDate = thisDate
-    Next i
 
     ValidateCurve = True
 End Function
@@ -994,8 +1001,7 @@ End Function
 Private Sub DeleteOutputs(ByVal wb As Workbook)
     Dim n As Variant
     For Each n In Array("CFO_1_Decision", "CFO_2_Context", "CFO_3_Evidence", _
-                        "CFO_4_Portfolio", "CFO_5_Partnership", _
-                        "CFO_Data_Hist", "CFO_Data_Scen")
+        "CFO_4_Portfolio", "CFO_5_Partnership", "CFO_Data_Hist", "CFO_Data_Scen")
         On Error Resume Next
         wb.Worksheets(CStr(n)).Delete
         On Error GoTo 0
