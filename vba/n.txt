@@ -1,0 +1,230 @@
+Option Explicit
+
+' CFO CASH ALLOCATION | 5-PAGE EXCEL PRESENTATION
+' Run: Build_CFO_Cash_Allocation
+' Source sheets: curve, PPT_S1_Curve, PPT_S2_Signal, PPT_S3_Stress,
+'                PPT_S4_Allocation, PPT_Audit
+' Output sheets: CFO_1_Decision ... CFO_5_Partnership
+
+Private Const NAVY As Long = 5067283
+Private Const BLUE As Long = 10185519
+Private Const TEAL As Long = 8682558
+Private Const TXT As Long = 4006438
+Private Const MUTED As Long = 8817775
+Private Const LIGHT As Long = 16316664
+Private Const BORDER As Long = 15191257
+Private Const WHITE As Long = 16777215
+
+Public Sub Build_CFO_Cash_Allocation()
+    Dim wb As Workbook: Set wb = ThisWorkbook
+    Dim nm As Variant
+    Dim oldCalc As XlCalculation
+
+    If Not HasSheet(wb, "curve") Then MsgBox "Missing curve sheet.", vbCritical: Exit Sub
+    For Each nm In Array("PPT_S1_Curve", "PPT_S2_Signal", "PPT_S3_Stress", "PPT_S4_Allocation", "PPT_Audit")
+        If Not HasSheet(wb, CStr(nm)) Then MsgBox "Missing source sheet: " & nm, vbCritical: Exit Sub
+    Next nm
+
+    On Error GoTo Fail
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    oldCalc = Application.Calculation
+    Application.Calculation = xlCalculationManual
+
+    DeletePages wb
+    Page1 wb
+    Page2 wb
+    Page3 wb
+    Page4 wb
+    Page5 wb
+
+    wb.Worksheets("CFO_1_Decision").Activate
+    ActiveWindow.DisplayGridlines = False
+    ActiveWindow.Zoom = 85
+
+Done:
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    Exit Sub
+Fail:
+    MsgBox "Build failed: " & Err.Description, vbCritical
+    Resume Done
+End Sub
+
+Private Sub Page1(ByVal wb As Workbook)
+    Dim ws As Worksheet, c As Worksheet, co As ChartObject
+    Dim lr As Long, d As Date, r0 As Double, r1 As Double, r3 As Double, r6 As Double
+    Set ws = NewPage(wb, "CFO_1_Decision")
+    Set c = wb.Worksheets("curve")
+    lr = c.Cells(c.Rows.Count, 1).End(xlUp).Row
+    d = c.Cells(lr, 1).Value
+    r0 = Rate(c.Cells(lr, 2).Value): r1 = Rate(c.Cells(lr, 3).Value)
+    r3 = Rate(c.Cells(lr, 4).Value): r6 = Rate(c.Cells(lr, 5).Value)
+
+    Head ws, "Cash allocation is a choice between flexibility today and rate certainty over the next six months", _
+        "The question is not simply which deposit rate is highest, but how much of the future rate path Treasury wants to leave open."
+    Box ws, "B6:F12", "STAY SHORT", "More flexibility" & vbLf & vbLf & "Benefits if rates remain high or rise" & vbLf & "Income resets lower if rates fall", RGB(234, 241, 246)
+    Box ws, "H6:L12", "EXTEND", "More rate certainty" & vbLf & vbLf & "Protects income if rates fall" & vbLf & "Gives up repricing if rates rise", RGB(234, 243, 243)
+    TextBox ws, "B15:L16", "ON     ->     1M     ->     3M     ->     6M", 18, True, NAVY, WHITE, xlCenter
+    TextBox ws, "B18:L21", "Observed " & Format(d, "dd-mmm-yyyy") & ": 6M paid +" & Format((r6-r0)*10000, "0") & " bp versus ON. The premium is compensation for giving up future resets; whether it is enough depends on what rates do next.", 11, False, TXT, LIGHT, xlLeft
+
+    PutRow ws.Range("N6"), Array("Tenor", "Rate")
+    PutRow ws.Range("N7"), Array("ON", r0): PutRow ws.Range("N8"), Array("1M", r1)
+    PutRow ws.Range("N9"), Array("3M", r3): PutRow ws.Range("N10"), Array("6M", r6)
+    Tbl ws.Range("N6:O10"): ws.Range("O7:O10").NumberFormat = "0.00%"
+    Set co = ws.ChartObjects.Add(ws.Range("N12").Left, ws.Range("N12").Top, 300, 225)
+    With co.Chart
+        .ChartType = xlColumnClustered: .SetSourceData ws.Range("N6:O10")
+        .HasTitle = True: .ChartTitle.Text = "Observed SOFR curve | " & Format(d, "dd-mmm-yyyy")
+        .HasLegend = False: .Axes(xlValue).TickLabels.NumberFormat = "0.00%"
+        .SeriesCollection(1).Format.Fill.ForeColor.RGB = BLUE
+        .ChartArea.Format.Line.Visible = msoFalse
+    End With
+    Bottom ws, "We are choosing an exposure profile - not making a binary call that rates must rise or fall.", "Source: curve tab."
+End Sub
+
+Private Sub Page2(ByVal wb As Workbook)
+    Dim ws As Worksheet: Set ws = NewPage(wb, "CFO_2_Context")
+    Head ws, "The last cycle rewarded fast resets because policy kept repricing higher", _
+        "Historical tenor performance needs to be read together with the economic regime that produced it."
+    CopyChart wb.Worksheets("PPT_S1_Curve"), 1, ws, ws.Range("B6"), 620, 335
+    Box ws, "L6:R10", "RAPID TIGHTENING", "Short cash repeatedly reset into higher policy rates. The opportunity value of flexibility was unusually high.", RGB(234, 241, 246)
+    Box ws, "L11:R15", "PEAK / HOLD", "As the cycle matured, the relative advantage of rapid repricing narrowed and outcomes became more balanced.", LIGHT
+    Box ws, "L16:R20", "EASING TRANSITION", "Reinvestment risk became more relevant, but the curve had already priced a meaningful part of expected easing.", RGB(234, 243, 243)
+    TextBox ws, "B22:R24", "Historical examples: Jan-22 6M excess = " & Bp(Metric(wb,"Jan-22 6M excess bp")) & "; Jul-24 6M excess = " & Bp(Metric(wb,"Jul-24 6M excess bp")) & ". The same tenor produced opposite outcomes as the rate path changed.", 10.5, False, TXT, LIGHT, xlLeft
+    Bottom ws, "The historical lesson is path-dependence - not 'short is always better'.", "Source: PPT_S1_Curve and PPT_Audit."
+End Sub
+
+Private Sub Page3(ByVal wb As Workbook)
+    Dim ws As Worksheet: Set ws = NewPage(wb, "CFO_3_Evidence")
+    Head ws, "The initial term premium was a weak guide; the rate path that followed mattered more", _
+        "The curve tells us the compensation available today. Realized performance depends on what short rates do during the holding period."
+    Kpi ws,"B6:D9","Starting spread R2",Format(Metric(wb,"Regression R-squared"),"0.0%"),"Standalone explanatory power."
+    Kpi ws,"E6:G9","6M win rate",Format(Metric(wb,"6M win rate"),"0.0%"),Format(Metric(wb,"Eligible daily decisions"),"#,##0") & " decisions."
+    Kpi ws,"H6:J9","Top-spread quartile",Bp(Metric(wb,"Top-spread quartile mean bp")),"Average realized excess."
+    Kpi ws,"K6:M9","Top-q positive hit",Format(Metric(wb,"Top-spread quartile hit"),"0.0%"),"Positive excess frequency."
+    CopyChart wb.Worksheets("PPT_S2_Signal"),1,ws,ws.Range("B11"),455,280
+    CopyChart wb.Worksheets("PPT_S2_Signal"),2,ws,ws.Range("J11"),455,280
+    TextBox ws,"B22:R24","A positive 6M spread is compensation for taking reset risk. It is not a guarantee that extending will outperform. The realized result depends on the future reset path relative to what was already priced.",10.5,False,TXT,LIGHT,xlLeft
+    Bottom ws,"The question is not only 'what does 6M pay?' - it is 'is that premium enough for the uncertainty we give up?'","Source: PPT_S2_Signal and PPT_Audit."
+End Sub
+
+Private Sub Page4(ByVal wb As Workbook)
+    Dim ws As Worksheet, a As Worksheet
+    Set ws = NewPage(wb,"CFO_4_Portfolio"): Set a = wb.Worksheets("PPT_S4_Allocation")
+    Head ws,"When direction is uncertain, focus on the cost of being wrong - not on one forecast", _
+        "Alternative rate paths expose the trade-off and help identify a robust allocation region rather than a single 'correct' tenor."
+    Box ws,"B6:F10","IF RATES RISE","6M directional stress: " & Bp(Metric(wb,"Rates-rise 6M excess bp")) & vbLf & "Shorter resets retain more ability to participate in higher market rates.",RGB(245,241,231)
+    Box ws,"B11:F15","IF RATES FALL","6M directional stress: " & Bp(Metric(wb,"Rates-fall 6M excess bp")) & vbLf & "Longer locking protects against reinvestment at lower rates.",RGB(234,243,243)
+    ws.Range("B17:H22").Value = a.Range("A88:G93").Value: Tbl ws.Range("B17:H22"): ws.Range("C18:F22").NumberFormat="0.00%"
+    CopyChart a,4,ws,ws.Range("J6"),455,275
+    Kpi ws,"J17:L20","Reference mix",Format(Metric(wb,"Reference 1M weight"),"0%") & " 1M / " & Format(Metric(wb,"Reference 6M weight"),"0%") & " 6M","Illustrative minimax-regret anchor."
+    Kpi ws,"M17:O20","Weighted tenor",Format(Metric(wb,"Reference weighted tenor"),"0.0") & " months","Position on the curve."
+    Kpi ws,"P17:R20","Worst regret",Bp(Metric(wb,"Reference worst regret bp")) & "/yr","Maximum model-state shortfall."
+    TextBox ws,"J22:R24","The allocation is best viewed as a robust region. Treasury can adjust implementation for liquidity, concentration and executable pricing without pretending there is one precise answer.",10,False,TXT,LIGHT,xlLeft
+    Bottom ws,"The objective is to reduce dependence on one rate view while preserving flexibility to adapt as conditions change.","Source: PPT_S3_Stress, PPT_S4_Allocation and PPT_Audit. Scenarios are sensitivities, not forecasts."
+End Sub
+
+Private Sub Page5(ByVal wb As Workbook)
+    Dim ws As Worksheet: Set ws = NewPage(wb,"CFO_5_Partnership")
+    Head ws,"How I can help: turn the framework into executable liquidity alternatives", _
+        "Connect market pricing, Treasury constraints and execution - then revisit the allocation as conditions change."
+    Box ws,"B6:F14","01 | READ THE MARKET","- Track where the curve pays for extension" & vbLf & "- Separate carry from the path already priced" & vbLf & "- Frame alternatives without forcing one forecast",LIGHT
+    Box ws,"H6:L14","02 | WORK WITH TREASURY ON THE RISK","- Start from liquidity needs and operating cash" & vbLf & "- Translate tenor into reinvestment / lock-in exposure" & vbLf & "- Use scenarios to make trade-offs explicit",RGB(234,241,246)
+    Box ws,"N6:R14","03 | TRANSLATE INTO EXECUTION","- Provide executable levels across tenors" & vbLf & "- Coordinate capacity, counterparty and operational fit" & vbLf & "- Review as curve and cash needs change",LIGHT
+    TextBox ws,"B17:R21","MY ROLE" & vbLf & vbLf & "Connect the market view, quantitative analysis and the client's Treasury objectives - and work with the broader platform to turn that discussion into executable choices.",14,True,TXT,WHITE,xlCenter
+    TextBox ws,"B23:R25","Objective: a consistent liquidity partnership - not a one-day rate call, and not a portfolio dependent on one Fed view.",13,True,WHITE,NAVY,xlCenter
+    Bottom ws,"","Any allocation remains subject to Treasury liquidity needs, approved counterparties, internal policy and executable levels."
+End Sub
+
+'------------------------------ Helpers ----------------------------------------------
+Private Function NewPage(ByVal wb As Workbook, ByVal nm As String) As Worksheet
+    Dim ws As Worksheet: Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count)): ws.Name=nm
+    With ws
+        .Columns("A:R").ColumnWidth=7.2: .Rows("1:28").RowHeight=20: .Rows(3).RowHeight=32: .Rows(4).RowHeight=26
+        .Range("A1:R28").Font.Name="Arial": .Range("A1:R28").Font.Size=10: .Range("A1:R28").Interior.Color=WHITE
+        .Activate: ActiveWindow.DisplayGridlines=False: ActiveWindow.Zoom=85
+        With .PageSetup
+            .Orientation=xlLandscape: .Zoom=False: .FitToPagesWide=1: .FitToPagesTall=1: .PrintArea="$A$1:$R$27"
+        End With
+    End With
+    Set NewPage=ws
+End Function
+
+Private Sub Head(ByVal ws As Worksheet, ByVal t As String, ByVal st As String)
+    TextBox ws,"B2:R2","USD SHORT-TERM CASH ALLOCATION | CFO DISCUSSION",8,True,BLUE,WHITE,xlLeft
+    TextBox ws,"B3:R3",t,22,True,TXT,WHITE,xlLeft
+    TextBox ws,"B4:R4",st,11,False,MUTED,WHITE,xlLeft
+End Sub
+
+Private Sub Box(ByVal ws As Worksheet, ByVal adr As String, ByVal ttl As String, ByVal body As String, ByVal fill As Long)
+    With ws.Range(adr)
+        .Merge: .Value=ttl & vbLf & vbLf & body: .WrapText=True: .VerticalAlignment=xlTop: .Interior.Color=fill: .Borders.Color=BORDER
+        .Font.Name="Arial": .Font.Size=10.5: .Font.Color=TXT
+        .Characters(1,Len(ttl)).Font.Bold=True: .Characters(1,Len(ttl)).Font.Size=12: .Characters(1,Len(ttl)).Font.Color=NAVY
+    End With
+End Sub
+
+Private Sub Kpi(ByVal ws As Worksheet, ByVal adr As String, ByVal lbl As String, ByVal val As String, ByVal note As String)
+    With ws.Range(adr)
+        .Merge: .Value=UCase$(lbl) & vbLf & val & vbLf & note: .WrapText=True: .VerticalAlignment=xlCenter: .Interior.Color=LIGHT: .Borders.Color=BORDER
+        .Font.Name="Arial": .Font.Size=8.5: .Font.Color=MUTED
+        .Characters(1,Len(lbl)).Font.Bold=True: .Characters(1,Len(lbl)).Font.Color=BLUE
+        .Characters(Len(lbl)+2,Len(val)).Font.Bold=True: .Characters(Len(lbl)+2,Len(val)).Font.Size=17: .Characters(Len(lbl)+2,Len(val)).Font.Color=NAVY
+    End With
+End Sub
+
+Private Sub TextBox(ByVal ws As Worksheet, ByVal adr As String, ByVal s As String, ByVal fs As Double, ByVal b As Boolean, ByVal fc As Long, ByVal fill As Long, ByVal ha As XlHAlign)
+    With ws.Range(adr)
+        .Merge: .Value=s: .WrapText=True: .Font.Name="Arial": .Font.Size=fs: .Font.Bold=b: .Font.Color=fc
+        .Interior.Color=fill: .HorizontalAlignment=ha: .VerticalAlignment=xlCenter
+    End With
+End Sub
+
+Private Sub Bottom(ByVal ws As Worksheet, ByVal take As String, ByVal src As String)
+    If Len(take)>0 Then TextBox ws,"B26:R26",take,11.5,True,WHITE,NAVY,xlCenter
+    TextBox ws,"B27:R27",src,7,False,MUTED,WHITE,xlLeft
+End Sub
+
+Private Sub Tbl(ByVal r As Range)
+    With r: .Borders.Color=BORDER: .Font.Name="Arial": .Font.Size=9: .VerticalAlignment=xlCenter: End With
+    With r.Rows(1): .Interior.Color=NAVY: .Font.Bold=True: .Font.Color=WHITE: .HorizontalAlignment=xlCenter: End With
+End Sub
+
+Private Sub PutRow(ByVal c As Range, ByVal v As Variant)
+    Dim i As Long: For i=LBound(v) To UBound(v): c.Offset(0,i-LBound(v)).Value=v(i): Next i
+End Sub
+
+Private Sub CopyChart(ByVal src As Worksheet, ByVal idx As Long, ByVal dst As Worksheet, ByVal a As Range, ByVal w As Double, ByVal h As Double)
+    Dim p As ChartObject
+    If src.ChartObjects.Count=0 Then Exit Sub
+    If idx>src.ChartObjects.Count Then idx=src.ChartObjects.Count
+    src.ChartObjects(idx).Copy: dst.Paste: Set p=dst.ChartObjects(dst.ChartObjects.Count)
+    p.Left=a.Left: p.Top=a.Top: p.Width=w: p.Height=h
+End Sub
+
+Private Function Metric(ByVal wb As Workbook, ByVal key As String) As Double
+    Dim f As Range: Set f=wb.Worksheets("PPT_Audit").Columns(1).Find(key,LookAt:=xlWhole,LookIn:=xlValues)
+    If Not f Is Nothing Then If IsNumeric(f.Offset(0,1).Value) Then Metric=CDbl(f.Offset(0,1).Value)
+End Function
+
+Private Function Bp(ByVal x As Double) As String
+    If x>0 Then Bp="+" & Format(x,"0.0") & " bp" Else Bp=Format(x,"0.0") & " bp"
+End Function
+
+Private Function Rate(ByVal x As Variant) As Double
+    If IsNumeric(x) Then Rate=CDbl(x): If Abs(Rate)>1 Then Rate=Rate/100#
+End Function
+
+Private Function HasSheet(ByVal wb As Workbook, ByVal nm As String) As Boolean
+    Dim ws As Worksheet: For Each ws In wb.Worksheets: If LCase$(ws.Name)=LCase$(nm) Then HasSheet=True: Exit Function
+    Next ws
+End Function
+
+Private Sub DeletePages(ByVal wb As Workbook)
+    Dim n As Variant: For Each n In Array("CFO_1_Decision","CFO_2_Context","CFO_3_Evidence","CFO_4_Portfolio","CFO_5_Partnership")
+        On Error Resume Next: wb.Worksheets(CStr(n)).Delete: On Error GoTo 0
+    Next n
+End Sub
