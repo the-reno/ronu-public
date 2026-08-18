@@ -1,0 +1,441 @@
+Option Explicit
+
+'====================================================================================
+' USD CASH ALLOCATION | EXCEL-ONLY SLIDE PACK | CURVE-ONLY SOURCE
+'
+' PURPOSE
+'   Creates the complete slide-ready data, charts, committee comments and audit trail
+'   for slides 1-5 inside Excel. It does NOT open or automate PowerPoint.
+'
+' SOURCE WORKBOOK
+'   Curve is the ONLY required workbook sheet and the ONLY worksheet used as a
+'   source by the model:
+'
+'       Curve          Date | ON | 1M | 3M | 6M
+'
+'   Historical evidence, inverted-path stress and the forward allocation engine are
+'   rebuilt from Curve. Forward economic scenarios are explicit VBA assumptions.
+'   Existing PPT_* sheets are outputs only: they are deleted and rebuilt on each run
+'   and are never read back as model inputs.
+'
+' OUTPUT SHEETS
+'   PPT_Index          manual PowerPoint workflow and source map
+'   PPT_Object_Map     object-level source, range, formula and decision logic
+'   PPT_S1_Curve       historical curve, macro events and realized examples
+'   PPT_S2_Signal      priced premium versus realized return and regression
+'   PPT_S3_Stress      normalized realized/inverted paths and return effect
+'   PPT_S4_Allocation  five forward scenarios and minimax-regret allocation
+'   PPT_S5_Decision    risk controls, execution inputs and evidence ownership
+'   PPT_Audit          model checks and reference-value reconciliation
+'
+' USE
+'   1. Start from a workbook containing the Curve tab shown above.
+'   2. Save it as an Excel Macro-Enabled Workbook (*.xlsm).
+'   3. Press Alt+F11 and insert a standard Module.
+'   4. Paste this entire TXT file into the Module.
+'   5. Run USD_CreateCashAllocationExcelPack.
+'   6. Copy the Excel charts and nearby comments into PowerPoint manually.
+'
+' IMPORTANT
+'   - Curve is never deleted or modified by this module.
+'   - All PPT_* sheets are disposable generated outputs.
+'   - Forward assumptions are reset from this VBA file on every run.
+'====================================================================================
+
+Private Const S_INDEX As String = "PPT_Index"
+Private Const S_OBJECTS As String = "PPT_Object_Map"
+Private Const S1 As String = "PPT_S1_Curve"
+Private Const S2 As String = "PPT_S2_Signal"
+Private Const S3 As String = "PPT_S3_Stress"
+Private Const S4 As String = "PPT_S4_Allocation"
+Private Const S5 As String = "PPT_S5_Decision"
+Private Const S_AUDIT As String = "PPT_Audit"
+
+Private Const XL_XY_SCATTER As Long = -4169
+Private Const XL_XY_LINES As Long = 75
+Private Const XL_COLUMN_CLUSTERED As Long = 51
+Private Const XL_BAR_CLUSTERED As Long = 57
+Private Const XL_BAR_STACKED As Long = 58
+Private Const XL_MARKER_NONE As Long = -4142
+Private Const XL_MARKER_CIRCLE As Long = 8
+Private Const XL_LEGEND_TOP As Long = -4160
+Private Const XL_LABEL_OUTSIDE_END As Long = 2
+Private Const XL_CATEGORY As Long = 1
+Private Const XL_VALUE As Long = 2
+Private Const XL_PRIMARY As Long = 1
+Private Const MSO_FALSE As Long = 0
+Private Const MSO_TRUE As Long = -1
+Private Const MSO_LINE_DASH As Long = 4
+
+Private Const STRESS_ON As Double = 0.055
+Private Const SUPPORT_ROW As Long = 40
+Private Const FONT_NAME As String = "Calibri"
+
+Private mDate() As Double
+Private mRate() As Double
+Private mCurveN As Long
+
+Private mDailyDate() As Double
+Private mDailySpread() As Double
+Private mDailyExcess() As Double
+Private mDailyRolledON() As Double
+Private mDailyLocked6M() As Double
+Private mStressDailyExcess() As Double
+Private mDailyN As Long
+Private mCorr As Double
+Private mSlope As Double
+Private mIntercept As Double
+Private mR2 As Double
+Private mHitRate As Double
+Private mQ4Mean As Double
+Private mQ4Hit As Double
+Private mStressDailyMean As Double
+Private mStressDailyHit As Double
+Private mStressCorr As Double
+Private mStressSlope As Double
+
+Private mMonthlyStart() As Long
+Private mMonthlyN As Long
+Private mUpReturn() As Double
+Private mDownReturn() As Double
+Private mUpExcess(1 To 4) As Double
+Private mDownExcess(1 To 4) As Double
+Private mUpWins(1 To 4) As Long
+Private mDownWins(1 To 4) As Long
+
+Private mMix(1 To 4) As Double
+Private mWeightedMonths As Double
+Private mMixWorstRegret As Double
+Private mMixAverageRegret As Double
+Private mMixLowestReturn As Double
+Private mMixHighestReturn As Double
+Private mPortfolioCount As Long
+Private mRobustRow As Long
+Private mForwardStartDate As Double
+Private mForwardAnchorInput(1 To 5, 1 To 5) As Double
+Private mForwardPremiumInput(1 To 5, 2 To 4) As Double
+Private mForwardFadeInput(1 To 5) As Double
+Private mForwardPath(1 To 5, 1 To 4, 0 To 36) As Double
+Private mForwardReturn(1 To 5, 1 To 4) As Double
+Private mForwardBest(1 To 5) As Double
+Private mPortfolioWeight() As Double
+Private mPortfolioReturn() As Double
+Private mPortfolioRegret() As Double
+Private mPortfolioWorst() As Double
+Private mPortfolioAverage() As Double
+Private mPortfolioLowest() As Double
+Private mObjectCount As Long
+
+Public Sub USD_CreateCashAllocationExcelPack()
+
+    Dim oldCalc As Long
+    Dim oldScreen As Boolean
+    Dim oldEvents As Boolean
+    Dim oldAlerts As Boolean
+    Dim errText As String
+
+    On Error GoTo fail
+
+    oldCalc = Application.Calculation
+    oldScreen = Application.ScreenUpdating
+    oldEvents = Application.EnableEvents
+    oldAlerts = Application.DisplayAlerts
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+
+    If ThisWorkbook.ProtectStructure Then _
+        Err.Raise vbObjectError + 3099, , "Workbook structure is protected. Unprotect it before running the module."
+
+    Application.StatusBar = "Building the USD cash-allocation Excel slide pack from Curve..."
+
+    USD_ResetState
+    USD_ValidateSourceWorkbook
+
+    'Curve is the only workbook input. All generated sheets are disposable outputs.
+    USD_DeleteGeneratedSheets
+
+    USD_LoadCurve
+    USD_LoadForwardAssumptions
+    USD_CalculateDailyEvidence
+    USD_CalculateDirectionalStress
+    USD_CalculateForwardAllocation
+
+    USD_BuildObjectMap
+    USD_BuildIndex
+    USD_BuildSlide1Sheet
+    USD_BuildSlide2Sheet
+    USD_BuildSlide3Sheet
+    USD_BuildSlide4Sheet
+    USD_BuildSlide5Sheet
+    USD_BuildAuditSheet
+
+    Application.CalculateFull
+    ThisWorkbook.Worksheets(S_INDEX).Activate
+    ThisWorkbook.Worksheets(S_INDEX).Range("A1").Select
+
+clean_exit:
+    Application.StatusBar = False
+    Application.DisplayAlerts = oldAlerts
+    Application.Calculation = oldCalc
+    Application.EnableEvents = oldEvents
+    Application.ScreenUpdating = oldScreen
+
+    If Len(errText) = 0 Then
+        MsgBox "Excel slide pack created from Curve." & vbCrLf & vbCrLf & _
+               "No PowerPoint file was created." & vbCrLf & _
+               "Use PPT_Index to copy charts and comments manually.", _
+               vbInformation, "USD cash allocation"
+    End If
+    Exit Sub
+
+fail:
+    errText = Err.Description
+    MsgBox "USD_CreateCashAllocationExcelPack stopped:" & vbCrLf & vbCrLf & errText, _
+           vbCritical, "USD cash allocation"
+    Resume clean_exit
+
+End Sub
+
+'====================================================================================
+' CURVE-ONLY SOURCE CONTROL
+'====================================================================================
+
+Private Sub USD_ValidateSourceWorkbook()
+
+    Dim ws As Worksheet
+    Dim lastRow As Long
+
+    If Not USD_SheetExists("Curve") Then _
+        Err.Raise vbObjectError + 3100, , "Required source sheet 'Curve' was not found."
+
+    Set ws = ThisWorkbook.Worksheets("Curve")
+
+    If UCase$(Trim$(CStr(ws.Cells(1, 1).Value))) <> "DATE" Then _
+        Err.Raise vbObjectError + 3101, , "Curve!A1 must contain Date."
+    If UCase$(Trim$(CStr(ws.Cells(1, 2).Value))) <> "ON" Then _
+        Err.Raise vbObjectError + 3102, , "Curve!B1 must contain ON."
+    If UCase$(Trim$(CStr(ws.Cells(1, 3).Value))) <> "1M" Then _
+        Err.Raise vbObjectError + 3103, , "Curve!C1 must contain 1M."
+    If UCase$(Trim$(CStr(ws.Cells(1, 4).Value))) <> "3M" Then _
+        Err.Raise vbObjectError + 3104, , "Curve!D1 must contain 3M."
+    If UCase$(Trim$(CStr(ws.Cells(1, 5).Value))) <> "6M" Then _
+        Err.Raise vbObjectError + 3105, , "Curve!E1 must contain 6M."
+
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 3 Then _
+        Err.Raise vbObjectError + 3106, , "Curve must contain at least two observations."
+
+End Sub
+
+Private Sub USD_DeleteGeneratedSheets()
+
+    Dim outputSheets As Variant
+    Dim i As Long
+    Dim sheetName As String
+
+    outputSheets = Array(S_INDEX, S_OBJECTS, S1, S2, S3, S4, S5, S_AUDIT)
+
+    'Keep Curve active so Excel always retains the source workbook sheet.
+    ThisWorkbook.Worksheets("Curve").Activate
+
+    For i = LBound(outputSheets) To UBound(outputSheets)
+        sheetName = CStr(outputSheets(i))
+        If USD_SheetExists(sheetName) Then
+            ThisWorkbook.Worksheets(sheetName).Delete
+        End If
+    Next i
+
+End Sub
+
+'====================================================================================
+' WORKSHEET BUILDERS
+'====================================================================================
+
+Private Sub USD_BuildIndex()
+
+    Dim ws As Worksheet
+    Dim flow As Variant
+    Dim i As Long
+
+    Set ws = USD_GetOrCreateSheet(S_INDEX)
+    USD_ResetOutputSheet ws
+    USD_SetCanvas ws, 20
+    USD_Title ws, "USD CASH ALLOCATION | EXCEL EVIDENCE PACK", _
+        "Five slide-ready analyses, governed in Excel and designed for manual transfer to PowerPoint."
+
+    ws.Range("A5:H5").Merge
+    USD_SectionHeader ws.Range("A5:H5"), "HOW TO USE THIS WORKBOOK"
+    ws.Range("A6:H10").Merge
+    With ws.Range("A6:H10")
+        .Value = "1  Curve is the only source sheet; all PPT_* tabs are generated outputs." & vbLf & _
+                 "2  Review PPT_Audit and PPT_Object_Map before using any output." & vbLf & _
+                 "3  Filter PPT_Object_Map by slide to trace each object to its range and formula." & vbLf & _
+                 "4  Open each PPT_S# sheet and copy the native Excel chart(s) and comments." & vbLf & _
+                 "5  Keep support tables from row 40 onward for traceability."
+        USD_BodyBox .Cells, USD_LightBlue(), USD_Navy()
+    End With
+
+    ws.Range("A11:H11").Merge
+    ws.Hyperlinks.Add Anchor:=ws.Range("A11"), Address:="", _
+                      SubAddress:="'" & S_OBJECTS & "'!A1", _
+                      TextToDisplay:="OPEN OBJECT SOURCE & LOGIC REGISTER"
+    USD_InstructionLine ws.Range("A11:H11")
+
+    ws.Range("J5:T5").Merge
+    USD_SectionHeader ws.Range("J5:T5"), "REFERENCE ALLOCATION | FIVE-SCENARIO MODEL"
+    ws.Range("J6:T10").Merge
+    With ws.Range("J6:T10")
+        .Value = "ON " & Format(mMix(1), "0%") & "  |  1M " & Format(mMix(2), "0%") & _
+                 "  |  3M " & Format(mMix(3), "0%") & "  |  6M " & Format(mMix(4), "0%") & vbLf & _
+                 "Weighted tenor: " & Format(mWeightedMonths, "0.0") & " months" & vbLf & _
+                 "Worst-case regret: " & Format(mMixWorstRegret, "0.0") & " bp/year" & vbLf & _
+                 "Governance: a scenario-robust reference mix, not a forecast or return guarantee."
+        USD_BodyBox .Cells, USD_LightAmber(), USD_Navy()
+        .Font.Size = 13
+    End With
+
+    ws.Range("A12:T12").Merge
+    USD_SectionHeader ws.Range("A12:T12"), "COMMITTEE NARRATIVE AND MANUAL COPY MAP"
+    USD_WriteHeaders ws.Range("A13:G13"), Array("Slide", "Excel sheet", "Committee question", "Evidence / chart", "Decision message", "Copy to PowerPoint", "Audit support")
+    ws.Range("A13:A13").ColumnWidth = 8
+    ws.Range("B13:C13").EntireColumn.ColumnWidth = 18
+
+    flow = Array( _
+        Array(1, S1, "What did the curve price, and what actually accrued?", _
+              "SOFR curve + policy/macro events; Jan-22 and Jul-24 holding examples", _
+              "Term premium is compensation for uncertainty, not a guaranteed outcome.", _
+              "Copy 1 chart + the event and realized-return boxes.", "Curve; daily six-month engine"), _
+        Array(2, S2, "Is the 6M-ON spread a reliable allocation signal?", _
+              "Premium vs realized outcome through time + cross-sectional scatter", _
+              "Weak fit and low hit rate argue against single-signal maturity calls.", _
+              "Copy both charts + key metrics + conclusion band.", "Complete six-month decisions"), _
+        Array(3, S3, "What if the next cycle moves in the opposite direction?", _
+              "Comparable positive-level paths + daily and monthly stressed returns", _
+              "A falling path turns 6M into protection against reinvestment risk.", _
+              "Copy four charts + scenario methodology + conclusion band.", "Daily and monthly complete starts"), _
+        Array(4, S4, "How should cash be allocated when direction is uncertain?", _
+              "Five forward paths + 3-year returns + minimax-regret grid", _
+              "No tenor wins in every state; use the mix that limits the cost of being wrong.", _
+              "Copy scenario, return and regret charts + decision rule.", "36 months; 5 scenarios; 286 mixes"), _
+        Array(5, S5, "What must be true before Treasury executes?", _
+              "Liquidity controls + live levels + evidence and ownership register", _
+              "Approve limits and triggers first; treat executable levels and provider claims as controlled inputs.", _
+              "Copy decision checklist and execution table.", "Owner, source, timestamp and status fields") _
+    )
+
+    For i = 0 To UBound(flow)
+        USD_WriteArrayRow ws.Cells(14 + i, 1), flow(i)
+        ws.Hyperlinks.Add Anchor:=ws.Cells(14 + i, 2), Address:="", _
+                          SubAddress:="'" & CStr(flow(i)(1)) & "'!A1", _
+                          TextToDisplay:=CStr(flow(i)(1))
+    Next i
+    USD_FormatTableBody ws.Range("A14:G18")
+    ws.Range("A14:G18").WrapText = True
+    ws.Rows("14:18").RowHeight = 53
+    ws.Columns("A").ColumnWidth = 8
+    ws.Columns("B").ColumnWidth = 23
+    ws.Columns("C").ColumnWidth = 34
+    ws.Columns("D").ColumnWidth = 43
+    ws.Columns("E").ColumnWidth = 46
+    ws.Columns("F").ColumnWidth = 38
+    ws.Columns("G").ColumnWidth = 30
+
+    ws.Range("A21:T21").Merge
+    USD_SectionHeader ws.Range("A21:T21"), "MODEL SCOPE, CONVENTIONS AND CONTROL"
+    ws.Range("A22:T28").Merge
+    With ws.Range("A22:T28")
+        .Value = "Required and only worksheet source: Curve!A:E (Date, ON, 1M, 3M, 6M)." & vbLf & _
+                 "Return convention: simple ACT/360 accrual; ON compounds across observed date intervals; term deposits reset at 1M/3M and 6M remains locked for the horizon." & vbLf & _
+                 "Maturity convention: six calendar months from the decision date, floored to the latest available curve observation." & vbLf & _
+                 "Stress convention: both paths start at 5.50%; the realized curve changes preserve observed tenor moves, while the inverted path reverses each tenor move around the same initial level." & vbLf & _
+                 "Forward convention: 36 monthly periods; five VBA-defined decision states; ON/1M roll monthly, 3M quarterly and 6M semiannually; 286 mixes in 10% increments." & vbLf & _
+                 "Macro events are contextual annotations in this module; market rates and historical return results are calculated from Curve." & vbLf & _
+                 "Control: generated PPT_* sheets are rebuilt from scratch on every run and never become model inputs."
+        USD_BodyBox .Cells, RGB(245, 247, 250), USD_Gray()
+    End With
+
+    ws.Range("A31:T33").Merge
+    With ws.Range("A31:T33")
+        .Value = "RISK MANAGER'S READOUT  |  The evidence supports a governed maturity ladder. It does not support betting the liquidity portfolio on a single point forecast."
+        USD_ConclusionBox .Cells
+    End With
+
+    USD_SetPrint ws, "$A$1:$T$33"
+End Sub
+
+'====================================================================================
+' NOTE
+' The remaining analytical, charting, stress, allocation and presentation procedures
+' are unchanged from the validated source module:
+'   ppt/12_Create_USD_Cash_Allocation_Excel_Pack.txt
+'
+' The functions below contain the complete Curve-only input architecture and may be
+' merged into that validated module. They intentionally remove any dependency on an
+' existing PPT_S4_Allocation sheet.
+'====================================================================================
+
+Private Sub USD_LoadForwardAssumptions()
+
+    Dim scenario As Long
+    Dim anchorNo As Long
+    Dim tenor As Long
+    Dim defaultAnchors As Variant
+    Dim defaultPremiums As Variant
+    Dim rowValues As Variant
+
+    'Forward states are governed VBA assumptions, never worksheet inputs.
+    defaultAnchors = Array( _
+        Array(0.0359, 0.0372, 0.0355, 0.0335, 0.0315), _
+        Array(0.0425, 0.0425, 0.0425, 0.04, 0.0375), _
+        Array(0.0425, 0.0475, 0.045, 0.0375, 0.034), _
+        Array(0.03, 0.0275, 0.029, 0.0275, 0.029), _
+        Array(0.015, 0.015, 0.02, 0.02, 0.025))
+
+    defaultPremiums = Array( _
+        Array(2#, 5#, 8#), _
+        Array(-3#, -5#, -10#), _
+        Array(-3#, -5#, -10#), _
+        Array(2#, 4#, 7#), _
+        Array(2#, 5#, 10#))
+
+    For scenario = 1 To 5
+        rowValues = defaultAnchors(scenario - 1)
+        For anchorNo = 1 To 5
+            mForwardAnchorInput(scenario, anchorNo) = CDbl(rowValues(anchorNo - 1))
+        Next anchorNo
+
+        rowValues = defaultPremiums(scenario - 1)
+        For tenor = 2 To 4
+            mForwardPremiumInput(scenario, tenor) = CDbl(rowValues(tenor - 2))
+        Next tenor
+
+        mForwardFadeInput(scenario) = 6#
+    Next scenario
+
+End Sub
+
+Private Function USD_SheetExists(ByVal sheetName As String) As Boolean
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    USD_SheetExists = Not ws Is Nothing
+    On Error GoTo 0
+End Function
+
+'====================================================================================
+' INTEGRATION REMINDER
+'
+' This Curve-only revision changes these parts of the validated base module:
+'   1. Header / source architecture.
+'   2. USD_CreateCashAllocationExcelPack.
+'   3. USD_ValidateSourceWorkbook.
+'   4. New USD_DeleteGeneratedSheets.
+'   5. USD_LoadForwardAssumptions.
+'   6. PPT_Index language describing source governance.
+'
+' All other procedures should remain byte-for-byte consistent with the validated
+' base module in ppt/12_Create_USD_Cash_Allocation_Excel_Pack.txt.
+'====================================================================================
