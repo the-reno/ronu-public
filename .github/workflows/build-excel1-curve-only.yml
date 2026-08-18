@@ -1,0 +1,285 @@
+name: Build Curve-only excel1 VBA
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-excel1-curve-only.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build revised full VBA module
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          source = Path('ppt/12_Create_USD_Cash_Allocation_Excel_Pack.txt')
+          target = Path('vba/excel1.txt')
+          text = source.read_text(encoding='utf-8')
+
+          # -----------------------------------------------------------------
+          # 1) Header: Curve is the only worksheet source; PPT_* are outputs.
+          # -----------------------------------------------------------------
+          old_header = """' SOURCE WORKBOOK
+          '   Designed for a workbook containing one required source sheet:
+          '     Curve          Date | ON | 1M | 3M | 6M
+          '   The historical evidence, inverted-path stress and forward allocation engine
+          '   are rebuilt from that curve. Forward scenario assumptions are explicit on
+          '   PPT_S4_Allocation; edits to the blue input cells are retained on rerun.
+          """
+          new_header = """' SOURCE WORKBOOK
+          '   Curve is the ONLY required workbook sheet and the ONLY worksheet used as a
+          '   source by the model:
+          '     Curve          Date | ON | 1M | 3M | 6M
+          '   Historical evidence, inverted-path stress and the forward allocation engine
+          '   are rebuilt from Curve. Forward scenarios are explicit VBA assumptions.
+          '   Existing PPT_* sheets are generated outputs only: they are deleted and
+          '   rebuilt on each run and are never read back as model inputs.
+          """
+          if old_header not in text:
+              raise SystemExit('Expected SOURCE WORKBOOK header was not found')
+          text = text.replace(old_header, new_header, 1)
+
+          old_use = """' USE
+          '   1. Save 13-aug.xlsx as an Excel Macro-Enabled Workbook (*.xlsm).
+          '   2. Press Alt+F11 and insert a standard Module.
+          '   3. Paste this entire TXT file into the Module.
+          '   4. Run USD_CreateCashAllocationExcelPack.
+          '   5. Copy the Excel charts and nearby comments into PowerPoint manually.
+          """
+          new_use = """' USE
+          '   1. Start from a workbook containing Curve: Date | ON | 1M | 3M | 6M.
+          '   2. Save it as an Excel Macro-Enabled Workbook (*.xlsm).
+          '   3. Press Alt+F11 and insert a standard Module.
+          '   4. Paste this entire TXT file into the Module.
+          '   5. Run USD_CreateCashAllocationExcelPack.
+          '   6. Copy the Excel charts and nearby comments into PowerPoint manually.
+          '
+          ' CONTROL
+          '   Curve is never deleted or modified. PPT_* sheets are disposable outputs.
+          '   Forward scenario assumptions reset from this VBA module on each run.
+          """
+          if old_use not in text:
+              raise SystemExit('Expected USE block was not found')
+          text = text.replace(old_use, new_use, 1)
+
+          # -----------------------------------------------------------------
+          # 2) Main routine: validate Curve, remove old outputs, then calculate.
+          # -----------------------------------------------------------------
+          old_sequence = """    USD_ResetState
+              USD_ValidateSourceWorkbook
+              USD_LoadCurve
+              USD_LoadForwardAssumptions
+              USD_CalculateDailyEvidence
+          """
+          new_sequence = """    USD_ResetState
+              USD_ValidateSourceWorkbook
+
+              'Curve is the only workbook input. Rebuild all generated output sheets.
+              USD_DeleteGeneratedSheets
+
+              USD_LoadCurve
+              USD_LoadForwardAssumptions
+              USD_CalculateDailyEvidence
+          """
+          if old_sequence not in text:
+              raise SystemExit('Expected main calculation sequence was not found')
+          text = text.replace(old_sequence, new_sequence, 1)
+
+          # -----------------------------------------------------------------
+          # 3) Replace source validation and add generated-sheet cleanup.
+          # -----------------------------------------------------------------
+          validate_pattern = re.compile(
+              r"Private Sub USD_ValidateSourceWorkbook\(\)\n.*?End Sub\n\nPrivate Sub USD_LoadCurve\(\)",
+              re.S,
+          )
+          validate_replacement = """Private Sub USD_ValidateSourceWorkbook()
+
+              Dim ws As Worksheet
+              Dim lastRow As Long
+
+              If Not USD_SheetExists("Curve") Then _
+                  Err.Raise vbObjectError + 3100, , "Required source sheet 'Curve' was not found."
+
+              Set ws = ThisWorkbook.Worksheets("Curve")
+
+              If UCase$(Trim$(CStr(ws.Cells(1, 1).Value))) <> "DATE" Then _
+                  Err.Raise vbObjectError + 3101, , "Curve!A1 must contain Date."
+              If UCase$(Trim$(CStr(ws.Cells(1, 2).Value))) <> "ON" Then _
+                  Err.Raise vbObjectError + 3102, , "Curve!B1 must contain ON."
+              If UCase$(Trim$(CStr(ws.Cells(1, 3).Value))) <> "1M" Then _
+                  Err.Raise vbObjectError + 3103, , "Curve!C1 must contain 1M."
+              If UCase$(Trim$(CStr(ws.Cells(1, 4).Value))) <> "3M" Then _
+                  Err.Raise vbObjectError + 3104, , "Curve!D1 must contain 3M."
+              If UCase$(Trim$(CStr(ws.Cells(1, 5).Value))) <> "6M" Then _
+                  Err.Raise vbObjectError + 3105, , "Curve!E1 must contain 6M."
+
+              lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+              If lastRow < 3 Then _
+                  Err.Raise vbObjectError + 3106, , "Curve must contain at least two observations."
+
+          End Sub
+
+          Private Sub USD_DeleteGeneratedSheets()
+
+              Dim outputSheets As Variant
+              Dim i As Long
+              Dim sheetName As String
+              Dim oldAlerts As Boolean
+
+              outputSheets = Array(S_INDEX, S_OBJECTS, S1, S2, S3, S4, S5, S_AUDIT)
+              oldAlerts = Application.DisplayAlerts
+
+              On Error GoTo clean_fail
+
+              ThisWorkbook.Worksheets("Curve").Activate
+              Application.DisplayAlerts = False
+
+              For i = LBound(outputSheets) To UBound(outputSheets)
+                  sheetName = CStr(outputSheets(i))
+                  If USD_SheetExists(sheetName) Then
+                      ThisWorkbook.Worksheets(sheetName).Delete
+                  End If
+              Next i
+
+          clean_exit:
+              Application.DisplayAlerts = oldAlerts
+              Exit Sub
+
+          clean_fail:
+              Application.DisplayAlerts = oldAlerts
+              Err.Raise Err.Number, Err.Source, Err.Description
+
+          End Sub
+
+          Private Sub USD_LoadCurve()"""
+          text, n = validate_pattern.subn(validate_replacement, text, count=1)
+          if n != 1:
+              raise SystemExit(f'Validation replacement count was {n}, expected 1')
+
+          # -----------------------------------------------------------------
+          # 4) Forward assumptions: VBA defaults only. Never read PPT_S4.
+          # -----------------------------------------------------------------
+          assumptions_pattern = re.compile(
+              r"Private Sub USD_LoadForwardAssumptions\(\)\n.*?End Sub\n\nPrivate Function USD_SheetExists",
+              re.S,
+          )
+          assumptions_replacement = """Private Sub USD_LoadForwardAssumptions()
+
+              Dim scenario As Long
+              Dim anchorNo As Long
+              Dim tenor As Long
+              Dim defaultAnchors As Variant
+              Dim defaultPremiums As Variant
+              Dim rowValues As Variant
+
+              'Forward states are governed VBA assumptions, never worksheet inputs.
+              defaultAnchors = Array( _
+                  Array(0.0359, 0.0372, 0.0355, 0.0335, 0.0315), _
+                  Array(0.0425, 0.0425, 0.0425, 0.04, 0.0375), _
+                  Array(0.0425, 0.0475, 0.045, 0.0375, 0.034), _
+                  Array(0.03, 0.0275, 0.029, 0.0275, 0.029), _
+                  Array(0.015, 0.015, 0.02, 0.02, 0.025))
+
+              defaultPremiums = Array( _
+                  Array(2#, 5#, 8#), _
+                  Array(-3#, -5#, -10#), _
+                  Array(-3#, -5#, -10#), _
+                  Array(2#, 4#, 7#), _
+                  Array(2#, 5#, 10#))
+
+              For scenario = 1 To 5
+                  rowValues = defaultAnchors(scenario - 1)
+                  For anchorNo = 1 To 5
+                      mForwardAnchorInput(scenario, anchorNo) = CDbl(rowValues(anchorNo - 1))
+                  Next anchorNo
+
+                  rowValues = defaultPremiums(scenario - 1)
+                  For tenor = 2 To 4
+                      mForwardPremiumInput(scenario, tenor) = CDbl(rowValues(tenor - 2))
+                  Next tenor
+
+                  mForwardFadeInput(scenario) = 6#
+              Next scenario
+
+          End Sub
+
+          Private Function USD_SheetExists"""
+          text, n = assumptions_pattern.subn(assumptions_replacement, text, count=1)
+          if n != 1:
+              raise SystemExit(f'Forward-assumption replacement count was {n}, expected 1')
+
+          # -----------------------------------------------------------------
+          # 5) Governance language: generated scenario cells are display/output.
+          # -----------------------------------------------------------------
+          text = text.replace(
+              '"Forward convention: 36 monthly periods; five editable decision states; ON/1M roll monthly, 3M quarterly and 6M semiannually; 286 mixes in 10% increments."',
+              '"Forward convention: 36 monthly periods; five VBA-defined decision states; ON/1M roll monthly, 3M quarterly and 6M semiannually; 286 mixes in 10% increments."',
+          )
+          text = text.replace(
+              '"Control: any change in source dates, rows or results is surfaced on PPT_Audit."',
+              '"Control: Curve is the sole worksheet source; PPT_* sheets are rebuilt from scratch and never read as inputs."',
+          )
+          text = text.replace(
+              '"Blue input cells I41:M45"',
+              '"VBA scenario anchors displayed in I41:M45"',
+          )
+          text = text.replace(
+              '"Blue input cells Q41:T45"',
+              '"VBA tenor premiums and fade displayed in Q41:T45"',
+          )
+          text = text.replace(
+              '"Risk-approved input"',
+              '"VBA assumption / Risk review"',
+          )
+          text = text.replace(
+              '"ON paths interpolate between visible event anchors. Tenor rates combine the ON path, explicit scenario premium and calibration fade. Blue support-table cells are editable and retained on rerun."',
+              '"ON paths interpolate between visible event anchors. Tenor rates combine the ON path, explicit scenario premium and calibration fade. Scenario values are displayed for transparency and reset from VBA on rerun."',
+          )
+
+          # -----------------------------------------------------------------
+          # 6) Safety assertions before writing target.
+          # -----------------------------------------------------------------
+          required = [
+              'Private Sub USD_DeleteGeneratedSheets()',
+              'Forward states are governed VBA assumptions, never worksheet inputs.',
+              'USD_DeleteGeneratedSheets',
+              'Private Sub USD_BuildSlide5Sheet()',
+              'Private Sub USD_BuildAuditSheet()',
+              'Private Function USD_PathReturn(',
+          ]
+          for marker in required:
+              if marker not in text:
+                  raise SystemExit(f'Missing expected marker after build: {marker}')
+
+          forbidden = [
+              'If Not USD_SheetExists(S4) Then Exit Sub',
+              'retain changes made to the documented blue input cells',
+          ]
+          for marker in forbidden:
+              if marker in text:
+                  raise SystemExit(f'Old worksheet-input behavior remains: {marker}')
+
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_text(text, encoding='utf-8', newline='\n')
+          print(f'Wrote {target}: {len(text.splitlines())} lines, {len(text)} characters')
+
+      - name: Commit generated file and remove one-time workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm .github/workflows/build-excel1-curve-only.yml
+          git add vba/excel1.txt .github/workflows/build-excel1-curve-only.yml
+          git commit -m "Finalize full Curve-only excel1 VBA"
+          git push
