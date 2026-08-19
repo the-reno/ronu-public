@@ -61,7 +61,9 @@ Private mMonAvg() As Double
 Private mMon6() As Double
 Private mHas6M As Boolean
 Private mMonN As Long
-Private mCPI As Object
+Private mCpiKey() As Long
+Private mCpiVal() As Double
+Private mCpiN As Long
 Private fBase As Double, fPeak As Double, fCur As Double
 Private fLiftIdx As Long, fPlatA As Long, fPlatB As Long, fCutIdx As Long
 Private fPlatMonths As Long, fHikeBp As Long, fHikeMonths As Long
@@ -245,6 +247,7 @@ End Function
 '====================================================================================
 Private Sub LoadCurve(ByVal wb As Workbook)
     Dim ws As Worksheet, lastRow As Long, v As Variant, i As Long, j As Long, k As Long
+    Dim colMax(1 To 4) As Double, colScale(1 To 4) As Double, rawVal As Double
     Set ws = wb.Worksheets(SH_CURVE)
     lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
     If lastRow < 30 Then Err.Raise vbObjectError + 5001, , "Curve needs at least ~30 daily rows."
@@ -252,6 +255,33 @@ Private Sub LoadCurve(ByVal wb As Workbook)
 
     ReDim mDate(1 To UBound(v, 1))
     ReDim mRate(1 To 4, 1 To UBound(v, 1))
+
+    ' Pass 1: find the largest magnitude in each column across the WHOLE curve.
+    ' Scale is decided once per column (not per cell) so a near-zero-rate era
+    ' (e.g. ON printed as 0.0100 meaning 0.01%) is never mistaken for a value
+    ' already in decimal form - the column's own peak (e.g. 5.34 at the hiking
+    ' cycle high) is what proves the column is in percent units.
+    For j = 1 To 4: colMax(j) = 0#: Next j
+    k = 0
+    For i = 1 To UBound(v, 1)
+        If IsNumeric(v(i, 1)) And IsNumeric(v(i, 2)) Then
+            If CDbl(v(i, 1)) > 0 Then
+                k = k + 1
+                For j = 1 To 4
+                    If IsNumeric(v(i, j + 1)) And Len(CStr(v(i, j + 1))) > 0 Then
+                        rawVal = Abs(CDbl(v(i, j + 1)))
+                        If rawVal > colMax(j) Then colMax(j) = rawVal
+                    End If
+                Next j
+            End If
+        End If
+    Next i
+    If k = 0 Then Err.Raise vbObjectError + 5003, , "No valid Date/ON rows found in Curve."
+    For j = 1 To 4
+        If colMax(j) > 0.5 Then colScale(j) = 100# Else colScale(j) = 1#
+    Next j
+
+    ' Pass 2: load using the per-column scale decided above.
     k = 0
     For i = 1 To UBound(v, 1)
         If IsNumeric(v(i, 1)) And IsNumeric(v(i, 2)) Then
@@ -260,8 +290,7 @@ Private Sub LoadCurve(ByVal wb As Workbook)
                 mDate(k) = CDbl(v(i, 1))
                 For j = 1 To 4
                     If IsNumeric(v(i, j + 1)) And Len(CStr(v(i, j + 1))) > 0 Then
-                        mRate(j, k) = CDbl(v(i, j + 1))
-                        If mRate(j, k) > 0.5 Then mRate(j, k) = mRate(j, k) / 100#
+                        mRate(j, k) = CDbl(v(i, j + 1)) / colScale(j)
                         If j = 4 Then mHas6M = True
                     Else
                         mRate(j, k) = -1#
@@ -274,10 +303,8 @@ Private Sub LoadCurve(ByVal wb As Workbook)
             End If
         End If
     Next i
-    If k = 0 Then Err.Raise vbObjectError + 5003, , "No valid Date/ON rows found in Curve."
     mCurveN = k
     ReDim Preserve mDate(1 To mCurveN)
-    ' mRate is 2D; rebuild trimmed copy
     Dim tmp() As Double
     ReDim tmp(1 To 4, 1 To mCurveN)
     For i = 1 To mCurveN
@@ -344,20 +371,43 @@ Private Sub BuildMonthly()
 End Sub
 
 Private Sub LoadCPI(ByVal wb As Workbook)
-    Dim ws As Worksheet, r As Long, sv As String, key As Long
-    Set mCPI = CreateObject("Scripting.Dictionary")
+    Dim ws As Worksheet, r As Long, sv As String, key As Long, n As Long, lastRow As Long
     Set ws = wb.Worksheets(SH_CFG)
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    ReDim mCpiKey(1 To lastRow)
+    ReDim mCpiVal(1 To lastRow)
+    n = 0
     r = 4
     Do While Len(ws.Cells(r, 1).Value) > 0
         sv = CStr(ws.Cells(r, 1).Value)
         If Len(sv) >= 7 And IsNumeric(ws.Cells(r, 2).Value) Then
             key = CLng(Left$(sv, 4)) * 100 + CLng(Mid$(sv, 6, 2))
-            mCPI(key) = CDbl(ws.Cells(r, 2).Value)
+            n = n + 1
+            mCpiKey(n) = key
+            mCpiVal(n) = CDbl(ws.Cells(r, 2).Value)
         End If
         r = r + 1
     Loop
-    If mCPI.Count = 0 Then Err.Raise vbObjectError + 5004, , "Deck_Config CPI table is empty."
+    mCpiN = n
+    If mCpiN = 0 Then Err.Raise vbObjectError + 5004, , "Deck_Config CPI table is empty."
 End Sub
+
+' Linear lookup helpers replacing Scripting.Dictionary (not available on Mac Excel).
+Private Function CpiExists(ByVal key As Long) As Boolean
+    Dim i As Long
+    For i = 1 To mCpiN
+        If mCpiKey(i) = key Then CpiExists = True: Exit Function
+    Next i
+    CpiExists = False
+End Function
+
+Private Function CpiValue(ByVal key As Long) As Double
+    Dim i As Long
+    For i = 1 To mCpiN
+        If mCpiKey(i) = key Then CpiValue = mCpiVal(i): Exit Function
+    Next i
+    CpiValue = 0#
+End Function
 
 Private Function KeyLbl(ByVal key As Long) As String
     Dim mon As Variant
@@ -372,7 +422,7 @@ End Function
 Private Sub ComputeSlide1Facts()
     Dim i As Long, runMin As Double, best As Double, drop As Double, a As Long, b As Long
 
-    fBase = mMonAvg(1): fCur = mMonAvg(mMonN)
+    fCur = mMonAvg(mMonN)
     fPeak = mMonAvg(1)
     For i = 2 To mMonN
         If mMonAvg(i) > fPeak Then fPeak = mMonAvg(i)
@@ -384,6 +434,14 @@ Private Sub ComputeSlide1Facts()
         If fLiftIdx = 0 And mMonAvg(i) > runMin + 0.1 Then fLiftIdx = i
     Next i
     If fLiftIdx = 0 Then fLiftIdx = 1
+
+    ' fBase = the pre-hike floor (lowest monthly average up to and including
+    ' lift-off) - not literally the curve's first observation, which may sit
+    ' well above zero if Curve extends back before the low-rate era.
+    fBase = mMonAvg(1)
+    For i = 1 To fLiftIdx
+        If mMonAvg(i) < fBase Then fBase = mMonAvg(i)
+    Next i
 
     fPlatA = 0: fPlatB = 0
     For i = 1 To mMonN
@@ -420,16 +478,16 @@ Private Sub ComputeSlide1Facts()
     fHikeMonths = MonthsBetween(mMonKey(fLiftIdx), mMonKey(fPlatA))
     fCutsBp = CLng((fPeak - fCur) * 100#)
 
-    If mCPI.Exists(mMonKey(1)) Then fCpiStart = mCPI(mMonKey(1))
-    If mCPI.Exists(mMonKey(fLiftIdx)) Then fCpiLift = mCPI(mMonKey(fLiftIdx))
-    If mCPI.Exists(mMonKey(fCutIdx)) Then fCpiCut = mCPI(mMonKey(fCutIdx))
+    If CpiExists(mMonKey(1)) Then fCpiStart = CpiValue(mMonKey(1))
+    If CpiExists(mMonKey(fLiftIdx)) Then fCpiLift = CpiValue(mMonKey(fLiftIdx))
+    If CpiExists(mMonKey(fCutIdx)) Then fCpiCut = CpiValue(mMonKey(fCutIdx))
     fCpiPeak = -999
-    Dim kk As Variant
-    For Each kk In mCPI.Keys
-        If mCPI(kk) > fCpiPeak Then fCpiPeak = mCPI(kk): fCpiPeakKey = CLng(kk)
-        If CLng(kk) > fCpiLastKey Then fCpiLastKey = CLng(kk)
-    Next kk
-    fCpiLast = mCPI(fCpiLastKey)
+    Dim ci As Long
+    For ci = 1 To mCpiN
+        If mCpiVal(ci) > fCpiPeak Then fCpiPeak = mCpiVal(ci): fCpiPeakKey = mCpiKey(ci)
+        If mCpiKey(ci) > fCpiLastKey Then fCpiLastKey = mCpiKey(ci)
+    Next ci
+    fCpiLast = CpiValue(fCpiLastKey)
 
     If mHas6M Then
         If mMon6(mMonN) >= 0# Then
@@ -770,7 +828,7 @@ Private Sub BuildDataSheet(ByVal wb As Workbook)
     For i = 1 To mMonN
         ws.Cells(i + 1, 1).Value = DateSerial(mMonKey(i) \ 100, mMonKey(i) Mod 100, 1)
         ws.Cells(i + 1, 2).Value = mMonAvg(i)
-        If mCPI.Exists(mMonKey(i)) Then ws.Cells(i + 1, 3).Value = mCPI(mMonKey(i))
+        If CpiExists(mMonKey(i)) Then ws.Cells(i + 1, 3).Value = CpiValue(mMonKey(i))
         If mHas6M Then If mMon6(i) >= 0# Then ws.Cells(i + 1, 4).Value = mMon6(i)
     Next i
     ws.Range("A2:A" & mMonN + 1).NumberFormat = "yyyy-mm"
@@ -872,6 +930,7 @@ Private Sub BuildSlide1(ByVal wb As Workbook)
         Format(fCur, "0.00") & "% - every turn was made by inflation data and the Fed's answer", 19, True, cTitle, RGB(255, 255, 255), xlLeft
     ws.Range("B3:R4").Font.Name = "Cambria"
 
+    On Error Resume Next
     Set co = ws.ChartObjects.Add(ws.Range("B6").Left, ws.Range("B6").Top, 860, 300)
     With co.Chart
         Set sr = .SeriesCollection.NewSeries
@@ -900,14 +959,18 @@ Private Sub BuildSlide1(ByVal wb As Workbook)
         sr.MarkerStyle = 8: sr.MarkerSize = 8
         sr.MarkerForegroundColor = RGB(255, 255, 255): sr.MarkerBackgroundColor = cMut
         sr.HasDataLabels = True
+        On Error Resume Next
         For i = 1 To 4
+            sr.Points(i).HasDataLabel = True
             With sr.Points(i).DataLabel
                 .Text = d.Cells(i + 1, 9).Value
                 .Font.Name = "Arial": .Font.Size = 8.5: .Font.Bold = True: .Font.Color = cTitle
                 .Position = IIf(i = 4, xlLabelPositionLeft, xlLabelPositionAbove)
             End With
         Next i
+        On Error GoTo 0
 
+        On Error Resume Next
         .HasTitle = False: .HasLegend = False
         .Axes(2).MinimumScale = 0#: .Axes(2).MaximumScale = 10#: .Axes(2).MajorUnit = 2#
         .Axes(2).TickLabels.NumberFormat = "0""%""": .Axes(2).TickLabels.Font.Size = 9: .Axes(2).TickLabels.Font.Color = cMut
@@ -917,6 +980,7 @@ Private Sub BuildSlide1(ByVal wb As Workbook)
         .Axes(1).TickLabels.NumberFormat = "mmm-yy": .Axes(1).TickLabels.Font.Size = 9: .Axes(1).TickLabels.Font.Color = cMut
         .Axes(1).HasMajorGridlines = False
         .ChartArea.Format.Line.Visible = 0
+        On Error GoTo 0
     End With
 
     Card ws, "B22:E26", "1", "Behind the curve", KeyLbl(mMonKey(1)) & " > " & KeyLbl(mMonKey(fLiftIdx)), _
@@ -976,6 +1040,7 @@ Private Sub BuildSlide2(ByVal wb As Workbook)
     ws.Range("B3:R4").Font.Name = "Cambria"
 
     ' left chart: excess bp over time
+    On Error Resume Next
     Set co = ws.ChartObjects.Add(ws.Range("B6").Left, ws.Range("B6").Top, 520, 290)
     With co.Chart
         Set sr = .SeriesCollection.NewSeries
@@ -986,13 +1051,16 @@ Private Sub BuildSlide2(ByVal wb As Workbook)
         sr.Name = "Zero": sr.ChartType = 75
         sr.XValues = d.Range("N2:N" & mDailyN + 1): sr.Values = d.Range("P2:P" & mDailyN + 1)
         sr.Format.Line.ForeColor.RGB = cFaint: sr.Format.Line.Weight = 0.8: sr.Format.Line.DashStyle = 4: sr.MarkerStyle = -4142
+        On Error Resume Next
         .HasTitle = True: .ChartTitle.Text = "6M excess vs rolled ON, by decision date"
         .HasLegend = False
         .Axes(2).TickLabels.NumberFormat = "0": .Axes(1).TickLabels.NumberFormat = "mmm-yy"
         .ChartArea.Format.Line.Visible = 0
+    On Error GoTo 0
     End With
 
     ' right chart: wealth of $1
+    On Error Resume Next
     Set co = ws.ChartObjects.Add(ws.Range("N6").Left, ws.Range("N6").Top, 380, 290)
     With co.Chart
         Set sr = .SeriesCollection.NewSeries
@@ -1003,10 +1071,12 @@ Private Sub BuildSlide2(ByVal wb As Workbook)
         sr.Name = "Lock 6M": sr.ChartType = 75
         sr.XValues = d.Range("R2:R" & mCurveN + 1): sr.Values = d.Range("T2:T" & mCurveN + 1)
         sr.Format.Line.ForeColor.RGB = cSeries2: sr.Format.Line.Weight = 1.8: sr.MarkerStyle = -4142
+        On Error Resume Next
         .HasTitle = True: .ChartTitle.Text = "Wealth of $1 | daily ON roll vs semiannual 6M roll"
         .HasLegend = True: .Legend.Position = xlLegendPositionBottom
         .Axes(2).TickLabels.NumberFormat = "0.00": .Axes(1).TickLabels.NumberFormat = "mmm-yy"
         .ChartArea.Format.Line.Visible = 0
+    On Error GoTo 0
     End With
 
     Kpi ws, "B24:E27", "6M win rate", Format(winPct, "0%"), Format(mDailyN, "#,##0") & " six-month decisions", cCard, cTitle, cMut, cAccent
@@ -1051,6 +1121,7 @@ Private Sub BuildSlide3(ByVal wb As Workbook)
         19, True, cTitle, RGB(255, 255, 255), xlLeft
     ws.Range("B3:R4").Font.Name = "Cambria"
 
+    On Error Resume Next
     Set co = ws.ChartObjects.Add(ws.Range("B6").Left, ws.Range("B6").Top, 860, 320)
     With co.Chart
         Set sr = .SeriesCollection.NewSeries
@@ -1061,10 +1132,12 @@ Private Sub BuildSlide3(ByVal wb As Workbook)
         sr.Name = "Mirror-image ON, inverted at 5.50%": sr.ChartType = 75
         sr.XValues = d.Range("V2:V" & mCurveN + 1): sr.Values = d.Range("X2:X" & mCurveN + 1)
         sr.Format.Line.ForeColor.RGB = cSeries2: sr.Format.Line.Weight = 2.2: sr.MarkerStyle = -4142
+        On Error Resume Next
         .HasTitle = False: .HasLegend = True: .Legend.Position = xlLegendPositionBottom
         .Axes(2).MinimumScale = 0#: .Axes(2).MaximumScale = 0.12: .Axes(2).TickLabels.NumberFormat = "0%"
         .Axes(1).TickLabels.NumberFormat = "mmm-yy"
         .ChartArea.Format.Line.Visible = 0
+    On Error GoTo 0
     End With
 
     Kpi ws, "B25:E28", "6M win rate - realized", Format(mHitRate, "0%"), "what actually happened", cCard, cTitle, cMut, cMut
@@ -1080,7 +1153,7 @@ Private Sub BuildSlide3(ByVal wb As Workbook)
         .WrapText = True: .VerticalAlignment = xlCenter
         .Interior.Color = cCard: .Borders.Color = cBorder
         .Font.Name = "Arial": .Font.Size = 10.5: .Font.Color = cMut
-        .Characters(1, 9).Font.Bold = True: .Characters(1, 9).Font.Color = cTitle
+        .Cells(1, 1).Characters(1, 9).Font.Bold = True: .Cells(1, 1).Characters(1, 9).Font.Color = cTitle
     End With
 
     TxtBlock ws, "B35:R36", "If the next cycle looks more like the mirror than the replay, locking term switches from drag to protection.   Next: price that risk and find the mix that neutralizes it.", _
@@ -1122,6 +1195,7 @@ Private Sub BuildSlide4(ByVal wb As Workbook)
     ws.Range("B3:R4").Font.Name = "Cambria"
 
     ' scenario fan chart
+    On Error Resume Next
     Set co = ws.ChartObjects.Add(ws.Range("B6").Left, ws.Range("B6").Top, 480, 260)
     With co.Chart
         For s = 1 To 5
@@ -1130,17 +1204,21 @@ Private Sub BuildSlide4(ByVal wb As Workbook)
             sr.XValues = d.Range("Z2:Z38"): sr.Values = d.Range(d.Cells(2, 26 + s), d.Cells(38, 26 + s))
             sr.Format.Line.ForeColor.RGB = scColors(s): sr.Format.Line.Weight = 1.6: sr.MarkerStyle = -4142
         Next s
+        On Error Resume Next
         .HasTitle = True: .ChartTitle.Text = "Overnight-rate paths by scenario (36 months)"
         .HasLegend = True: .Legend.Position = xlLegendPositionBottom: .Legend.Font.Size = 7.5
         .Axes(2).TickLabels.NumberFormat = "0%"
         .ChartArea.Format.Line.Visible = 0
+    On Error GoTo 0
     End With
 
     ' regret bar chart
+    On Error Resume Next
     Set co = ws.ChartObjects.Add(ws.Range("N6").Left, ws.Range("N6").Top, 480, 260)
     With co.Chart
         .ChartType = xlColumnClustered
         .SetSourceData d.Range("AH1:AK6")
+        On Error Resume Next
         .HasTitle = True: .ChartTitle.Text = "Regret by scenario (bp/yr): mix caps the worst case"
         .HasLegend = True: .Legend.Position = xlLegendPositionBottom
         .SeriesCollection(1).Format.Fill.ForeColor.RGB = cTitle
@@ -1148,6 +1226,7 @@ Private Sub BuildSlide4(ByVal wb As Workbook)
         .SeriesCollection(3).Format.Fill.ForeColor.RGB = cAccent
         .Axes(xlCategory).TickLabels.Font.Size = 7.5
         .ChartArea.Format.Line.Visible = 0
+    On Error GoTo 0
     End With
 
     ' return table
@@ -1168,7 +1247,7 @@ Private Sub BuildSlide4(ByVal wb As Workbook)
         .WrapText = True: .VerticalAlignment = xlCenter
         .Interior.Color = cCard: .Borders.Color = cBorder
         .Font.Name = "Arial": .Font.Size = 10: .Font.Color = cMut
-        .Characters(1, 9).Font.Bold = True: .Characters(1, 9).Font.Color = cTitle
+        .Cells(1, 1).Characters(1, 9).Font.Bold = True: .Cells(1, 1).Characters(1, 9).Font.Color = cTitle
     End With
 
     TxtBlock ws, "B30:R31", "Recommended mix: ON " & Format(mMix(1), "0%") & " / 1M " & Format(mMix(2), "0%") & " / 3M " & Format(mMix(3), "0%") & _
@@ -1238,6 +1317,7 @@ Private Sub BuildSlide5(ByVal wb As Workbook)
             End If
         Next i
         If n > 0 Then
+            On Error Resume Next
             Set co = ws.ChartObjects.Add(ws.Range("B17").Left, ws.Range("B17").Top, 560, 190)
             With co.Chart
                 Set sr = .SeriesCollection.NewSeries
@@ -1253,6 +1333,7 @@ Private Sub BuildSlide5(ByVal wb As Workbook)
                 .ChartArea.Format.Fill.ForeColor.RGB = cDarkBg: .ChartArea.Format.Line.Visible = 0
                 .PlotArea.Format.Fill.ForeColor.RGB = cDarkBg
             End With
+            On Error GoTo 0
             Kpi ws, "N17:R19", "Avg premium over market", "3M " & Format(sum3 / n, "0.0") & "bp | 6M " & Format(sum6 / n, "0.0") & "bp", _
                 CStr(n) & " observations", cDarkCard, cWhite, cDarkAccent, cWhite
             Kpi ws, "N20:R22", "Consistency range", "3M " & Format(mn3, "0") & "-" & Format(mx3, "0") & "bp", _
@@ -1289,10 +1370,10 @@ Private Sub PillarCard(ByVal ws As Worksheet, ByVal adr As String, ByVal num As 
         .Interior.Color = fill: .Borders.Color = borderC
         .Font.Name = "Arial": .Font.Size = 10: .Font.Color = accentC
         Dim hdr As String: hdr = num & "   " & ttl
-        .Characters(1, Len(hdr)).Font.Bold = True
-        .Characters(1, Len(hdr)).Font.Size = 13
-        .Characters(1, Len(hdr)).Font.Color = RGB(255, 255, 255)
-        .Characters(1, Len(hdr)).Font.Name = "Cambria"
+        .Cells(1, 1).Characters(1, Len(hdr)).Font.Bold = True
+        .Cells(1, 1).Characters(1, Len(hdr)).Font.Size = 13
+        .Cells(1, 1).Characters(1, Len(hdr)).Font.Color = RGB(255, 255, 255)
+        .Cells(1, 1).Characters(1, Len(hdr)).Font.Name = "Cambria"
     End With
 End Sub
 
@@ -1323,7 +1404,7 @@ Private Function NewSlideSheet(ByVal wb As Workbook, ByVal nm As String) As Work
             .PrintArea = "$A$1:$R$40"
         End With
     End With
-    NewSlideSheet = ws
+    Set NewSlideSheet = ws
 End Function
 
 Private Sub TxtBlock(ByVal ws As Worksheet, ByVal adr As String, ByVal sv As String, ByVal fs As Double, _
@@ -1346,10 +1427,10 @@ Private Sub Card(ByVal ws As Worksheet, ByVal adr As String, ByVal num As String
         .WrapText = True: .VerticalAlignment = xlTop
         .Interior.Color = fill: .Borders.Color = borderC
         .Font.Name = "Arial": .Font.Size = 9: .Font.Color = bodyC
-        .Characters(1, Len(hdr)).Font.Bold = True
-        .Characters(1, Len(hdr)).Font.Size = 10.5
-        .Characters(1, Len(hdr)).Font.Color = titleC
-        .Characters(1, Len(num)).Font.Color = accC
+        .Cells(1, 1).Characters(1, Len(hdr)).Font.Bold = True
+        .Cells(1, 1).Characters(1, Len(hdr)).Font.Size = 10.5
+        .Cells(1, 1).Characters(1, Len(hdr)).Font.Color = titleC
+        .Cells(1, 1).Characters(1, Len(num)).Font.Color = accC
     End With
 End Sub
 
@@ -1363,11 +1444,11 @@ Private Sub Kpi(ByVal ws As Worksheet, ByVal adr As String, ByVal lbl As String,
         .WrapText = True: .VerticalAlignment = xlCenter
         .Interior.Color = fill: .Borders.Color = noteC
         .Font.Name = "Arial": .Font.Size = 8.5: .Font.Color = noteC
-        .Characters(1, Len(lbl)).Font.Bold = True
-        .Characters(1, Len(lbl)).Font.Color = titleC
-        .Characters(valueStart, Len(val)).Font.Bold = True
-        .Characters(valueStart, Len(val)).Font.Size = 15
-        .Characters(valueStart, Len(val)).Font.Color = valC
+        .Cells(1, 1).Characters(1, Len(lbl)).Font.Bold = True
+        .Cells(1, 1).Characters(1, Len(lbl)).Font.Color = titleC
+        .Cells(1, 1).Characters(valueStart, Len(val)).Font.Bold = True
+        .Cells(1, 1).Characters(valueStart, Len(val)).Font.Size = 15
+        .Cells(1, 1).Characters(valueStart, Len(val)).Font.Color = valC
     End With
 End Sub
 
