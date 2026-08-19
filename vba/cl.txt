@@ -911,10 +911,11 @@ Private Sub BuildSlide1(ByVal wb As Workbook)
         .HasTitle = False: .HasLegend = False
         .Axes(2).MinimumScale = 0#: .Axes(2).MaximumScale = 10#: .Axes(2).MajorUnit = 2#
         .Axes(2).TickLabels.NumberFormat = "0""%""": .Axes(2).TickLabels.Font.Size = 9: .Axes(2).TickLabels.Font.Color = cMut
+        .Axes(2).HasMajorGridlines = True
         .Axes(2).MajorGridlines.Format.Line.ForeColor.RGB = RGB(237, 240, 244)
         .Axes(1).MinimumScale = CDbl(d.Cells(2, 1).Value): .Axes(1).MaximumScale = CDbl(d.Cells(mMonN + 1, 1).Value)
         .Axes(1).TickLabels.NumberFormat = "mmm-yy": .Axes(1).TickLabels.Font.Size = 9: .Axes(1).TickLabels.Font.Color = cMut
-        .Axes(1).MajorGridlines.Delete
+        .Axes(1).HasMajorGridlines = False
         .ChartArea.Format.Line.Visible = 0
     End With
 
