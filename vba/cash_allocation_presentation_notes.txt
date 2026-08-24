@@ -1,0 +1,155 @@
+CFO CASH ALLOCATION PRESENTATION
+SPEAKER COMMENTS, CONCLUSIONS AND TRANSITIONS
+
+Purpose
+This note supports the final cash-allocation presentation for a CFO / corporate treasury audience. The narrative is intentionally simple: start with what the market priced, show how the realized Fed path changed the outcome, demonstrate why concentration creates reinvestment risk, and finish with a data-driven diversified allocation framework.
+
+===============================================================================
+COVER — INTEREST RATES / CASH ALLOCATION
+===============================================================================
+
+Speaker comment
+The decision is straightforward: how much cash should remain short and liquid, and how much should be locked for longer? The difficulty is that the answer depends on a rate path that is not known today. The objective of the presentation is not to forecast the Fed perfectly. It is to show how the curve has historically reflected expectations, how different outcomes changed the value of each tenor, and how we can build a more robust allocation process.
+
+Conclusion
+Cash allocation is a risk-management decision before it is a rate forecast.
+
+Transition
+Start by looking at how the curve moved through the last cycle and what those moves were telling us about market expectations.
+
+===============================================================================
+SLIDE 1 — MARKET EXPECTATION DRIVES THE TERM STRUCTURE
+===============================================================================
+
+Speaker comment
+The curve moved before the policy decisions because term rates reflect what the market expects to happen next, not only where overnight rates are today.
+
+At the beginning of the hiking cycle, inflation was accelerating and the Fed was still behind the curve. Longer tenors moved higher as the market started pricing a faster policy response. Once the hiking cycle was established, the curve reflected the expected terminal rate and then stabilized around the plateau. Later, as inflation moderated and the probability of cuts increased, 3M and 6M started moving below ON before the first cuts were delivered.
+
+The important distinction is that the spread between 6M and ON is not a pure term premium. It combines the expected future ON path and compensation for uncertainty. When the market expects rates to fall, 6M can trade below ON even while there is still positive compensation for locking the tenor.
+
+Conclusion
+The curve is a forward-looking price of expectations and uncertainty. Longer tenors can move materially before the Fed changes the overnight rate.
+
+Transition
+But what the market prices today is only the starting point. The realized result depends on what the Fed actually does after the decision is made.
+
+===============================================================================
+SLIDE 2 — THE OUTCOME DEPENDS ON THE REALIZED FED PATH
+===============================================================================
+
+Speaker comment
+Looking back at the historical decisions, the initial 6M-versus-ON spread alone was not enough to identify the winning strategy. In the realized hiking cycle, remaining short often benefited because the cash was repeatedly reinvested at progressively higher rates.
+
+The statistics on the slide make that point. The 6M win rate was limited, and even observations with apparently attractive entry spreads did not consistently generate positive realized excess return. The scatter plot shows why: the same starting spread could lead to different outcomes depending on the subsequent policy path.
+
+This is the central reinvestment issue. A short-tenor strategy keeps optionality, but its return is exposed to the future rates available at every rollover. A longer tenor sacrifices that optionality in exchange for protection against falling reinvestment rates.
+
+Conclusion
+Entry pricing matters, but the realized policy path ultimately determines whether extending maturity adds value or creates opportunity cost.
+
+Transition
+To isolate that risk, we can replay the same historical cycle with the direction of rates reversed.
+
+===============================================================================
+SLIDE 3 — REPLAY THE CYCLE UPSIDE DOWN
+===============================================================================
+
+Speaker comment
+This is a stress test rather than a forecast. We keep the same magnitude and timing of the historical cycle, but invert the direction of rates.
+
+In the realized cycle, rolling short benefited from rising reinvestment rates and 6M underperformed. In the mirror cycle, the opposite happens: the locked 6M rate protects the portfolio as the reinvestment rate falls. The same maturity that was a drag in one environment becomes the strongest protection in the other.
+
+That is the key insight. The risk is not simply whether 6M is above or below ON today. The risk is concentrating the portfolio in one view of the future path.
+
+The comparison between the realized and inverted cases shows that maturity selection is asymmetric. Staying short maximizes flexibility when rates rise; extending tenor protects return when rates fall.
+
+Conclusion
+The historical winner can become the historical loser when the direction of the rate cycle changes. This is reinvestment risk, not a forecasting problem.
+
+Transition
+Once we accept that no single rate path should dominate the decision, the next step is to define a broader set of plausible 3-year scenarios.
+
+===============================================================================
+SLIDE 4 — FIVE 3-YEAR RATE PATHS / NO SINGLE TENOR WINS EVERY SCENARIO
+===============================================================================
+
+Speaker comment
+The scenario framework deliberately avoids one central forecast. We test five different 3-year paths: gradual normalization, higher for longer, renewed inflation, faster normalization, and recession / rapid easing.
+
+All scenarios start from the same market curve today. What changes is the expected ON path as new information arrives. At each point, 1M, 3M and 6M are calculated from the expected average ON over the tenor plus a term / uncertainty component calibrated from the historical curve.
+
+This is important because term rates should not have perfect knowledge of the future. In a renewed-inflation scenario, for example, 3M and 6M can move ahead of ON because the market starts pricing future hikes and greater uncertainty before those hikes are fully delivered. In an easing scenario, longer tenors can move below ON because future cuts are priced before overnight rates fall.
+
+Each path creates a different winning maturity. Higher-for-longer and renewed inflation favor short reinvestment. Faster normalization and recession favor locking term. Gradual normalization sits between the two.
+
+Conclusion
+No single tenor is structurally superior. The best maturity depends on the path, and the path is uncertain.
+
+Transition
+Instead of choosing one scenario, we can test every feasible maturity mix across all five scenarios and measure the cost of being wrong.
+
+===============================================================================
+SLIDE 5 — EFFICIENT FRONTIER / MODEL-SELECTED ALLOCATION
+===============================================================================
+
+Speaker comment
+This slide converts the scenario framework into a portfolio decision.
+
+For every scenario, the model calculates the 3-year annualized return from rolling ON, 1M, 3M and 6M. It then generates all feasible combinations of those four strategies, subject to the liquidity and concentration limits shown in the input assumptions.
+
+Every portfolio is evaluated on two dimensions.
+
+First, average excess return versus rolling ON. This is the return dimension.
+
+Second, maximum regret. Regret is the difference between the best ex-post strategy in a scenario and the return of the selected portfolio. Maximum regret is therefore the largest opportunity cost across the five scenarios. This is a useful CFO risk measure because it asks: if our rate view is wrong, how expensive can that decision become?
+
+The efficient frontier contains only portfolios for which another allocation cannot provide both higher return and lower regret. The minimum-regret point is the most defensive solution. The red model-selected point moves slightly away from that minimum only when the additional expected return is sufficient to justify the additional regret, using the tolerance defined in the model.
+
+The allocation shown on the right is therefore not an equal-weight portfolio and it is not a directional Fed forecast. It is the output of the return-versus-regret optimization using the actual scenario curves.
+
+When presenting the KPI cards, focus on the relationship between them rather than the absolute numbers:
+- Average excess return shows the value captured versus remaining fully overnight.
+- Maximum regret shows the worst opportunity cost across the scenarios.
+- Worst excess return shows the weakest performance versus ON.
+- Hit rate shows how often the allocation beats rolling ON across the tested paths.
+
+The lower regret chart makes the diversification argument visually. A concentrated ON position can perform very well when rates remain high or rise, but produces large regret when rates fall quickly. A concentrated 6M position does the opposite. The diversified allocation gives up part of the upside in the winning scenario to materially reduce the cost in the losing scenarios.
+
+Conclusion
+The optimal portfolio is not the strategy that wins one forecast. It is the allocation that captures return across scenarios while controlling the cost of an incorrect rate view.
+
+Transition
+Once the strategic maturity mix is defined, execution becomes a separate decision: liquidity, pricing, counterparty quality and flexibility determine how efficiently that allocation is implemented.
+
+===============================================================================
+SLIDE 6 — FRAMEWORK PAYS OFF IF EXECUTED
+===============================================================================
+
+Speaker comment
+The analytical framework should remain independent from the execution provider. The first decision is the maturity allocation. Only after that should we compare the executable rates, liquidity conditions and counterparty terms available in the market.
+
+Execution can add value in three areas.
+
+First, pricing. A consistent spread advantage improves the return of the allocation without changing the underlying risk framework.
+
+Second, liquidity and flexibility. Treasury needs the ability to adjust sizing, maturities and rollover decisions as cash forecasts change. The framework should support execution rather than force a rigid maturity profile.
+
+Third, counterparty quality and operating capacity. The cash return is only relevant if the counterparty risk, placement capacity and operational process fit the company's treasury policy.
+
+If the slide contains provider credentials, use them as evidence of execution capacity rather than as an input to the optimization. This keeps the model transparent and avoids mixing a strategic rate decision with commercial pricing.
+
+Conclusion
+Separate strategy from execution: use a market-neutral framework to determine the maturity mix, then use pricing, liquidity and counterparty strength to optimize implementation.
+
+===============================================================================
+FINAL CLOSE
+===============================================================================
+
+Suggested closing comment
+The framework changes the question from 'Where will the Fed be?' to 'How much risk are we prepared to take if the Fed path is different from what the market expects?'
+
+The historical analysis shows that the winning tenor changes with the cycle. The scenario analysis shows the same result prospectively. The allocation model then turns that uncertainty into a measurable portfolio decision.
+
+Final conclusion
+Keep enough liquidity for operational flexibility, lock enough term to protect against reinvestment risk, and use the efficient frontier to determine how much additional return is worth the additional cost of being wrong.
