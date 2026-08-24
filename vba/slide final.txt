@@ -1,150 +1,418 @@
-Paste this into an Excel VBA module and run `BuildFrameworkProcessSlide`.
-
-```vba
 Option Explicit
 
-Sub BuildFrameworkProcessSlide()
+'===============================================================================
+' CASH ALLOCATION | FINAL REPLACEMENT SLIDE
+'
+' Purpose
+'   Replaces the slide titled "No single tenor wins in every scenario" with a
+'   cleaner final decision slide.
+'
+' How to use
+'   1. Open the PowerPoint deck you want to update.
+'   2. Open Excel.
+'   3. Paste this full module into Excel VBA.
+'   4. Run: ReplaceNoSingleTenorSlideWithFinal
+'
+' Behavior
+'   - If a slide title contains "No single tenor wins", the macro deletes that
+'     slide and inserts the new slide in the same position.
+'   - If it cannot find that slide, it appends the new slide at the end.
+'   - Uses classic Office-safe formatting: Arial, native shapes, no external files.
+'===============================================================================
+
+Public Sub ReplaceNoSingleTenorSlideWithFinal()
 
     Const ppLayoutBlank As Long = 12
-    Const msoShapeRectangle As Long = 1
-    Const msoShapeRoundedRectangle As Long = 5
-    Const msoShapeArc As Long = 25
 
-    Dim ppApp As Object, ppPres As Object, sld As Object
-    Dim blue As Long, darkBlue As Long, lightBlue As Long, borderBlue As Long, grayText As Long
-    Dim sw As Double, sh As Double
+    Dim ppApp As Object
+    Dim ppPres As Object
+    Dim sld As Object
+    Dim slideIndex As Long
+    Dim replaceIndex As Long
 
-    blue = RGB(0, 85, 160)
-    darkBlue = RGB(0, 92, 165)
-    lightBlue = RGB(234, 242, 250)
-    borderBlue = RGB(204, 224, 242)
-    grayText = RGB(92, 108, 132)
-
+    On Error Resume Next
     Set ppApp = GetObject(, "PowerPoint.Application")
-    If ppApp Is Nothing Then Set ppApp = CreateObject("PowerPoint.Application")
+    On Error GoTo 0
+
+    If ppApp Is Nothing Then
+        Set ppApp = CreateObject("PowerPoint.Application")
+    End If
+
     ppApp.Visible = True
 
-    Set ppPres = ppApp.Presentations.Add
-    ppPres.PageSetup.SlideWidth = 13.333 * 72
-    ppPres.PageSetup.SlideHeight = 7.5 * 72
+    If ppApp.Presentations.Count = 0 Then
+        Set ppPres = ppApp.Presentations.Add
+    Else
+        Set ppPres = ppApp.ActivePresentation
+    End If
 
-    sw = ppPres.PageSetup.SlideWidth
-    sh = ppPres.PageSetup.SlideHeight
+    With ppPres.PageSetup
+        .SlideWidth = 13.333333 * 72
+        .SlideHeight = 7.5 * 72
+    End With
 
-    Set sld = ppPres.Slides.Add(1, ppLayoutBlank)
+    replaceIndex = FindSlideByTitle(ppPres, "No single tenor wins")
 
-    'Title
-    AddText sld, "Framework pays off when it becomes a process", _
-        0.42, 0.28, 12.1, 0.55, 28, blue, True
+    If replaceIndex > 0 Then
+        slideIndex = replaceIndex
+        ppPres.Slides(replaceIndex).Delete
+    Else
+        slideIndex = ppPres.Slides.Count + 1
+    End If
 
-    AddText sld, "The value is not a one-time maturity bet; it is a repeatable decision rule as rates and liquidity needs evolve.", _
-        0.45, 0.92, 12.0, 0.3, 11.5, grayText, False
-
-    'Top process cards
-    AddConnector sld, 2.9, 1.9, 3.1, 1.9, blue
-    AddConnector sld, 5.45, 1.9, 5.65, 1.9, blue
-    AddConnector sld, 8.0, 1.9, 8.2, 1.9, blue
-    AddConnector sld, 10.55, 1.9, 10.75, 1.9, blue
-
-    AddStepCard sld, 0.55, 1.45, 2.35, 1.15, "1", "Observe", _
-        "Current curve, liquidity needs and policy expectations", lightBlue, borderBlue, blue, RGB(30, 43, 60)
-
-    AddStepCard sld, 3.1, 1.45, 2.35, 1.15, "2", "Scenario", _
-        "Build five rate paths and term-rate curves", lightBlue, borderBlue, blue, RGB(30, 43, 60)
-
-    AddStepCard sld, 5.65, 1.45, 2.35, 1.15, "3", "Optimize", _
-        "Efficient frontier: return vs. maximum regret", darkBlue, darkBlue, RGB(255, 255, 255), RGB(255, 255, 255)
-
-    AddStepCard sld, 8.2, 1.45, 2.35, 1.15, "4", "Execute", _
-        "Allocate across ON / 1M / 3M / 6M within limits", lightBlue, borderBlue, blue, RGB(30, 43, 60)
-
-    AddStepCard sld, 10.75, 1.45, 2.35, 1.15, "5", "Review", _
-        "Rebalance as the curve and cash needs change", lightBlue, borderBlue, blue, RGB(30, 43, 60)
-
-    'Governance boxes
-    AddInfoBox sld, 0.65, 3.45, 3.55, 1.1, "Governance limits", _
-        "Liquidity floor, tenor cap, counterparty limits, maturity ladder, escalation triggers.", lightBlue, blue
-
-    AddInfoBox sld, 4.95, 3.45, 3.55, 1.1, "Decision trigger", _
-        "Update allocation when curve levels, Fed probabilities or cash forecast materially change.", lightBlue, blue
-
-    AddInfoBox sld, 9.25, 3.45, 3.55, 1.1, "Execution discipline", _
-        "Do not chase the highest single tenor. Execute the selected mix and track realized regret.", lightBlue, blue
-
-    'Conclusion band
-    Dim band As Object
-    Set band = sld.Shapes.AddShape(msoShapeRectangle, 0.75 * 72, 5.55 * 72, 12.05 * 72, 0.87 * 72)
-    band.Fill.ForeColor.RGB = darkBlue
-    band.Line.Visible = False
-
-    AddText sld, "Conclusion", 1.05, 5.78, 1.4, 0.25, 11, RGB(255, 255, 255), True
-
-    AddText sld, "The framework turns rate uncertainty into a disciplined allocation process: preserve liquidity, capture return, and limit the cost" & vbCrLf & _
-                 "of a wrong rate view.", _
-        2.8, 5.68, 9.3, 0.45, 10.8, RGB(255, 255, 255), True
-
-    'Footer
-    AddText sld, "Speaker notes included.  Replace illustrative values with live workbook output before external use.", _
-        0.45, 7.12, 7.0, 0.15, 5.5, RGB(130, 145, 165), False
-
-    'Small classic corner accent
-    Dim arc As Object
-    Set arc = sld.Shapes.AddShape(msoShapeArc, 12.95 * 72, 7.02 * 72, 0.25 * 72, 0.25 * 72)
-    arc.Fill.Visible = False
-    arc.Line.ForeColor.RGB = blue
-    arc.Line.Weight = 2
+    Set sld = ppPres.Slides.Add(slideIndex, ppLayoutBlank)
+    BuildFinalCashAllocationSlide sld
 
 End Sub
 
-Private Sub AddStepCard(sld As Object, x As Double, y As Double, w As Double, h As Double, _
-                        stepNo As String, title As String, body As String, _
-                        fillColor As Long, lineColor As Long, mainColor As Long, textColor As Long)
+Private Sub BuildFinalCashAllocationSlide(ByVal sld As Object)
 
-    Const msoShapeRoundedRectangle As Long = 5
+    Dim blue As Long
+    Dim darkBlue As Long
+    Dim ink As Long
+    Dim muted As Long
+    Dim lightBlue As Long
+    Dim lineGray As Long
+    Dim paleGray As Long
 
-    Dim card As Object
-    Set card = sld.Shapes.AddShape(msoShapeRoundedRectangle, x * 72, y * 72, w * 72, h * 72)
-    card.Fill.ForeColor.RGB = fillColor
-    card.Line.ForeColor.RGB = lineColor
-    card.Line.Weight = 0.75
-    card.Adjustments.Item(1) = 0.06
+    blue = RGB(0, 83, 160)
+    darkBlue = RGB(0, 42, 86)
+    ink = RGB(28, 40, 55)
+    muted = RGB(95, 110, 128)
+    lightBlue = RGB(236, 245, 253)
+    lineGray = RGB(213, 222, 232)
+    paleGray = RGB(248, 250, 252)
 
-    AddText sld, stepNo, x + 0.14, y + 0.16, 0.25, 0.25, 11, mainColor, True
-    AddText sld, title, x + 0.52, y + 0.18, 1.4, 0.25, 10.5, textColor, True
-    AddText sld, body, x + 0.14, y + 0.62, w - 0.28, 0.35, 7.5, textColor, False
+    ' Canvas
+    AddRect sld, 0, 0, 13.333, 7.5, RGB(255, 255, 255), RGB(255, 255, 255), 0
+
+    ' Header
+    AddText sld, "No single tenor wins every path — the process wins", _
+        0.48, 0.30, 12.20, 0.42, 26, blue, True, 0
+
+    AddText sld, "The decision is not ON versus 6M. It is how much maturity risk the cash book can carry under competing Fed outcomes.", _
+        0.50, 0.82, 11.80, 0.28, 11.5, muted, False, 0
+
+    ' Top horizontal rule
+    AddLine sld, 0.50, 1.18, 12.78, 1.18, lineGray, 0.8
+
+    ' Left argument panel
+    AddText sld, "Decision problem", 0.55, 1.42, 2.85, 0.24, 12.5, ink, True, 0
+    AddText sld, "A curve spread is a signal, not a mandate. The framework prices the risk of being wrong before locking term.", _
+        0.55, 1.72, 3.05, 0.58, 10.2, muted, False, 0
+
+    AddMiniPoint sld, 0.62, 2.48, "1", "Rate path uncertainty", _
+        "The same term premium can protect or drag depending on Fed timing.", blue, lightBlue, ink, muted
+
+    AddMiniPoint sld, 0.62, 3.23, "2", "Liquidity optionality", _
+        "ON preserves flexibility; term monetizes premium but consumes optionality.", blue, lightBlue, ink, muted
+
+    AddMiniPoint sld, 0.62, 3.98, "3", "Regret control", _
+        "A robust mix gives up some upside to limit the cost of a wrong view.", blue, lightBlue, ink, muted
+
+    ' Center process panel
+    AddRect sld, 4.10, 1.35, 4.95, 3.15, paleGray, lineGray, 0.08
+    AddText sld, "Repeatable allocation process", 4.35, 1.58, 4.35, 0.26, 13.5, blue, True, 0
+    AddText sld, "Use the workbook output as a decision rule, not as a one-off forecast.", _
+        4.35, 1.90, 4.35, 0.28, 9.8, muted, False, 0
+
+    AddArrow sld, 5.10, 2.72, 5.72, 2.72, blue
+    AddArrow sld, 7.30, 2.72, 7.92, 2.72, blue
+
+    AddProcessNode sld, 4.40, 2.35, 1.45, 0.76, "Observe", _
+        "Curve, Fed path, cash forecast", RGB(255, 255, 255), lineGray, blue, ink, muted
+
+    AddProcessNode sld, 6.08, 2.22, 1.70, 1.02, "Optimize", _
+        "Return vs. maximum regret", blue, blue, RGB(255, 255, 255), RGB(255, 255, 255), RGB(226, 238, 250)
+
+    AddProcessNode sld, 8.00, 2.35, 0.78, 0.76, "Review", _
+        "Rebalance", RGB(255, 255, 255), lineGray, blue, ink, muted
+
+    AddText sld, "Illustrative model output", 4.38, 3.48, 2.70, 0.20, 9.2, muted, False, 0
+    AddAllocationBar sld, 4.38, 3.78, 4.36, 0.36, _
+        0.3, 0.2, 0.25, 0.25, blue, RGB(78, 132, 190), RGB(126, 166, 210), RGB(27, 38, 84)
+
+    AddText sld, "ON 30%", 4.38, 4.18, 0.85, 0.16, 7.8, muted, True, 0
+    AddText sld, "1M 20%", 5.70, 4.18, 0.85, 0.16, 7.8, muted, True, 0
+    AddText sld, "3M 25%", 6.58, 4.18, 0.85, 0.16, 7.8, muted, True, 0
+    AddText sld, "6M 25%", 7.68, 4.18, 0.85, 0.16, 7.8, muted, True, 0
+
+    ' Right decision panel
+    AddRect sld, 9.48, 1.35, 3.25, 3.15, darkBlue, darkBlue, 0.08
+    AddText sld, "Execution rule", 9.75, 1.62, 2.65, 0.26, 13.5, RGB(255, 255, 255), True, 0
+
+    AddText sld, "Lock term only when compensation is sufficient after liquidity, counterparty and concentration limits.", _
+        9.75, 1.98, 2.55, 0.58, 10.0, RGB(226, 238, 250), False, 0
+
+    AddRuleLine sld, 9.78, 2.85, "Liquidity floor", "Minimum ON / overnight capacity stays protected", RGB(255, 255, 255)
+    AddRuleLine sld, 9.78, 3.38, "Tenor cap", "6M exposure is sized, not maximized", RGB(255, 255, 255)
+    AddRuleLine sld, 9.78, 3.91, "Review trigger", "Fed meeting, curve shift or cash forecast change", RGB(255, 255, 255)
+
+    ' Bottom governance band
+    AddRect sld, 0.55, 5.03, 12.20, 1.26, lightBlue, RGB(207, 226, 243), 0.08
+
+    AddText sld, "Governance conclusion", 0.88, 5.30, 2.25, 0.22, 11.8, blue, True, 0
+
+    AddText sld, "The output is not a forecast to defend. It is a disciplined allocation rule that separates liquidity, return and regret before execution.", _
+        3.18, 5.24, 8.95, 0.34, 12.2, ink, True, 0
+
+    AddText sld, "Use the selected mix as the starting allocation; refresh when market pricing or operational cash needs move enough to change the trade-off.", _
+        3.18, 5.70, 8.70, 0.28, 9.4, muted, False, 0
+
+    ' Footer
+    AddText sld, "Source: Curve workbook model. Allocation percentages above are illustrative placeholders if workbook output is not linked.", _
+        0.55, 6.96, 7.50, 0.14, 6.0, RGB(125, 140, 158), False, 0
+
+    AddText sld, "ANZ", 12.33, 6.80, 0.48, 0.18, 9.5, blue, True, 0
+    AddLogoDots sld, 12.56, 6.98, blue
 
 End Sub
 
-Private Sub AddInfoBox(sld As Object, x As Double, y As Double, w As Double, h As Double, _
-                       boxTitle As String, boxBody As String, fillColor As Long, blue As Long)
+Private Function FindSlideByTitle(ByVal ppPres As Object, ByVal titleFragment As String) As Long
 
-    Const msoShapeRoundedRectangle As Long = 5
+    Dim sld As Object
+    Dim shp As Object
+    Dim txt As String
 
-    Dim box As Object
-    Set box = sld.Shapes.AddShape(msoShapeRoundedRectangle, x * 72, y * 72, w * 72, h * 72)
-    box.Fill.ForeColor.RGB = fillColor
-    box.Line.Visible = False
-    box.Adjustments.Item(1) = 0.06
+    For Each sld In ppPres.Slides
 
-    AddText sld, boxTitle, x + 0.18, y + 0.18, w - 0.36, 0.22, 8.2, blue, True
-    AddText sld, boxBody, x + 0.18, y + 0.60, w - 0.36, 0.4, 8.8, RGB(30, 43, 60), False
+        For Each shp In sld.Shapes
+
+            txt = ""
+
+            On Error Resume Next
+            If shp.HasTextFrame Then
+                If shp.TextFrame.HasText Then
+                    txt = shp.TextFrame.TextRange.Text
+                End If
+            End If
+            On Error GoTo 0
+
+            If InStr(1, txt, titleFragment, vbTextCompare) > 0 Then
+                FindSlideByTitle = CLng(sld.SlideIndex)
+                Exit Function
+            End If
+
+        Next shp
+
+    Next sld
+
+    FindSlideByTitle = 0
+
+End Function
+
+Private Sub AddMiniPoint( _
+    ByVal sld As Object, _
+    ByVal x As Double, _
+    ByVal y As Double, _
+    ByVal noText As String, _
+    ByVal titleText As String, _
+    ByVal bodyText As String, _
+    ByVal blue As Long, _
+    ByVal lightBlue As Long, _
+    ByVal ink As Long, _
+    ByVal muted As Long)
+
+    AddRect sld, x, y, 2.98, 0.54, RGB(255, 255, 255), RGB(224, 232, 240), 0.06
+    AddOval sld, x + 0.12, y + 0.13, 0.28, 0.28, lightBlue, blue
+    AddText sld, noText, x + 0.205, y + 0.185, 0.12, 0.10, 7.0, blue, True, 1
+    AddText sld, titleText, x + 0.52, y + 0.10, 2.10, 0.16, 8.7, ink, True, 0
+    AddText sld, bodyText, x + 0.52, y + 0.30, 2.23, 0.14, 6.9, muted, False, 0
 
 End Sub
 
-Private Sub AddConnector(sld As Object, x1 As Double, y1 As Double, x2 As Double, y2 As Double, lineColor As Long)
+Private Sub AddProcessNode( _
+    ByVal sld As Object, _
+    ByVal x As Double, _
+    ByVal y As Double, _
+    ByVal w As Double, _
+    ByVal h As Double, _
+    ByVal titleText As String, _
+    ByVal bodyText As String, _
+    ByVal fillColor As Long, _
+    ByVal lineColor As Long, _
+    ByVal titleColor As Long, _
+    ByVal mainColor As Long, _
+    ByVal bodyColor As Long)
+
+    AddRect sld, x, y, w, h, fillColor, lineColor, 0.08
+    AddText sld, titleText, x + 0.12, y + 0.14, w - 0.24, 0.16, 8.8, titleColor, True, 1
+    AddText sld, bodyText, x + 0.12, y + 0.42, w - 0.24, 0.20, 6.8, bodyColor, False, 1
+
+End Sub
+
+Private Sub AddRuleLine( _
+    ByVal sld As Object, _
+    ByVal x As Double, _
+    ByVal y As Double, _
+    ByVal ruleTitle As String, _
+    ByVal ruleBody As String, _
+    ByVal whiteColor As Long)
+
+    AddText sld, ruleTitle, x, y, 1.28, 0.16, 8.7, whiteColor, True, 0
+    AddText sld, ruleBody, x + 1.28, y, 1.42, 0.24, 7.1, RGB(218, 232, 247), False, 0
+    AddLine sld, x, y + 0.38, x + 2.65, y + 0.38, RGB(42, 96, 150), 0.6
+
+End Sub
+
+Private Sub AddAllocationBar( _
+    ByVal sld As Object, _
+    ByVal x As Double, _
+    ByVal y As Double, _
+    ByVal w As Double, _
+    ByVal h As Double, _
+    ByVal pON As Double, _
+    ByVal p1M As Double, _
+    ByVal p3M As Double, _
+    ByVal p6M As Double, _
+    ByVal cON As Long, _
+    ByVal c1M As Long, _
+    ByVal c3M As Long, _
+    ByVal c6M As Long)
+
+    Dim x0 As Double
+
+    x0 = x
+    AddRect sld, x0, y, w * pON, h, cON, cON, 0.02
+    x0 = x0 + w * pON
+    AddRect sld, x0, y, w * p1M, h, c1M, c1M, 0.02
+    x0 = x0 + w * p1M
+    AddRect sld, x0, y, w * p3M, h, c3M, c3M, 0.02
+    x0 = x0 + w * p3M
+    AddRect sld, x0, y, w * p6M, h, c6M, c6M, 0.02
+
+End Sub
+
+Private Sub AddArrow( _
+    ByVal sld As Object, _
+    ByVal x1 As Double, _
+    ByVal y1 As Double, _
+    ByVal x2 As Double, _
+    ByVal y2 As Double, _
+    ByVal lineColor As Long)
+
+    Const msoLineDash As Long = 4
+    Const msoArrowheadTriangle As Long = 3
 
     Dim ln As Object
+
     Set ln = sld.Shapes.AddLine(x1 * 72, y1 * 72, x2 * 72, y2 * 72)
-    ln.Line.ForeColor.RGB = lineColor
-    ln.Line.Weight = 1.4
+
+    With ln.Line
+        .ForeColor.RGB = lineColor
+        .Weight = 1.1
+        .EndArrowheadStyle = msoArrowheadTriangle
+    End With
 
 End Sub
 
-Private Function AddText(sld As Object, txt As String, x As Double, y As Double, w As Double, h As Double, _
-                         fontSize As Double, fontColor As Long, isBold As Boolean) As Object
+Private Sub AddLogoDots(ByVal sld As Object, ByVal x As Double, ByVal y As Double, ByVal blue As Long)
+
+    AddOval sld, x, y, 0.09, 0.09, blue, blue
+    AddOval sld, x + 0.13, y - 0.05, 0.09, 0.09, blue, blue
+    AddOval sld, x + 0.13, y + 0.08, 0.09, 0.09, blue, blue
+
+End Sub
+
+Private Sub AddRect( _
+    ByVal sld As Object, _
+    ByVal x As Double, _
+    ByVal y As Double, _
+    ByVal w As Double, _
+    ByVal h As Double, _
+    ByVal fillColor As Long, _
+    ByVal lineColor As Long, _
+    ByVal radius As Double)
+
+    Const msoShapeRectangle As Long = 1
+    Const msoShapeRoundedRectangle As Long = 5
 
     Dim shp As Object
-    Set shp = sld.Shapes.AddTextbox(1, x * 72, y * 72, w * 72, h * 72)
+    Dim shapeType As Long
+
+    If radius > 0 Then
+        shapeType = msoShapeRoundedRectangle
+    Else
+        shapeType = msoShapeRectangle
+    End If
+
+    Set shp = sld.Shapes.AddShape(shapeType, x * 72, y * 72, w * 72, h * 72)
+
+    With shp
+        .Fill.ForeColor.RGB = fillColor
+        .Line.ForeColor.RGB = lineColor
+        .Line.Weight = 0.7
+        If radius > 0 Then
+            On Error Resume Next
+            .Adjustments.Item(1) = radius
+            On Error GoTo 0
+        End If
+    End With
+
+End Sub
+
+Private Sub AddOval( _
+    ByVal sld As Object, _
+    ByVal x As Double, _
+    ByVal y As Double, _
+    ByVal w As Double, _
+    ByVal h As Double, _
+    ByVal fillColor As Long, _
+    ByVal lineColor As Long)
+
+    Const msoShapeOval As Long = 9
+
+    Dim shp As Object
+
+    Set shp = sld.Shapes.AddShape(msoShapeOval, x * 72, y * 72, w * 72, h * 72)
+
+    With shp
+        .Fill.ForeColor.RGB = fillColor
+        .Line.ForeColor.RGB = lineColor
+        .Line.Weight = 0.7
+    End With
+
+End Sub
+
+Private Sub AddLine( _
+    ByVal sld As Object, _
+    ByVal x1 As Double, _
+    ByVal y1 As Double, _
+    ByVal x2 As Double, _
+    ByVal y2 As Double, _
+    ByVal lineColor As Long, _
+    ByVal weight As Double)
+
+    Dim ln As Object
+
+    Set ln = sld.Shapes.AddLine(x1 * 72, y1 * 72, x2 * 72, y2 * 72)
+
+    With ln.Line
+        .ForeColor.RGB = lineColor
+        .Weight = weight
+    End With
+
+End Sub
+
+Private Function AddText( _
+    ByVal sld As Object, _
+    ByVal txt As String, _
+    ByVal x As Double, _
+    ByVal y As Double, _
+    ByVal w As Double, _
+    ByVal h As Double, _
+    ByVal fontSize As Double, _
+    ByVal fontColor As Long, _
+    ByVal isBold As Boolean, _
+    ByVal alignMode As Long) As Object
+
+    Const msoTextOrientationHorizontal As Long = 1
+    Const msoAlignLeft As Long = 1
+    Const msoAlignCenter As Long = 2
+
+    Dim shp As Object
+
+    Set shp = sld.Shapes.AddTextbox(msoTextOrientationHorizontal, x * 72, y * 72, w * 72, h * 72)
 
     With shp.TextFrame
         .MarginLeft = 0
@@ -152,16 +420,21 @@ Private Function AddText(sld As Object, txt As String, x As Double, y As Double,
         .MarginTop = 0
         .MarginBottom = 0
         .WordWrap = True
+
         With .TextRange
             .Text = txt
             .Font.Name = "Arial"
             .Font.Size = fontSize
             .Font.Color.RGB = fontColor
             .Font.Bold = isBold
+            If alignMode = 1 Then
+                .ParagraphFormat.Alignment = msoAlignCenter
+            Else
+                .ParagraphFormat.Alignment = msoAlignLeft
+            End If
         End With
     End With
 
     Set AddText = shp
 
 End Function
-```
