@@ -1,0 +1,167 @@
+Paste this into an Excel VBA module and run `BuildFrameworkProcessSlide`.
+
+```vba
+Option Explicit
+
+Sub BuildFrameworkProcessSlide()
+
+    Const ppLayoutBlank As Long = 12
+    Const msoShapeRectangle As Long = 1
+    Const msoShapeRoundedRectangle As Long = 5
+    Const msoShapeArc As Long = 25
+
+    Dim ppApp As Object, ppPres As Object, sld As Object
+    Dim blue As Long, darkBlue As Long, lightBlue As Long, borderBlue As Long, grayText As Long
+    Dim sw As Double, sh As Double
+
+    blue = RGB(0, 85, 160)
+    darkBlue = RGB(0, 92, 165)
+    lightBlue = RGB(234, 242, 250)
+    borderBlue = RGB(204, 224, 242)
+    grayText = RGB(92, 108, 132)
+
+    Set ppApp = GetObject(, "PowerPoint.Application")
+    If ppApp Is Nothing Then Set ppApp = CreateObject("PowerPoint.Application")
+    ppApp.Visible = True
+
+    Set ppPres = ppApp.Presentations.Add
+    ppPres.PageSetup.SlideWidth = 13.333 * 72
+    ppPres.PageSetup.SlideHeight = 7.5 * 72
+
+    sw = ppPres.PageSetup.SlideWidth
+    sh = ppPres.PageSetup.SlideHeight
+
+    Set sld = ppPres.Slides.Add(1, ppLayoutBlank)
+
+    'Title
+    AddText sld, "Framework pays off when it becomes a process", _
+        0.42, 0.28, 12.1, 0.55, 28, blue, True
+
+    AddText sld, "The value is not a one-time maturity bet; it is a repeatable decision rule as rates and liquidity needs evolve.", _
+        0.45, 0.92, 12.0, 0.3, 11.5, grayText, False
+
+    'Top process cards
+    AddConnector sld, 2.9, 1.9, 3.1, 1.9, blue
+    AddConnector sld, 5.45, 1.9, 5.65, 1.9, blue
+    AddConnector sld, 8.0, 1.9, 8.2, 1.9, blue
+    AddConnector sld, 10.55, 1.9, 10.75, 1.9, blue
+
+    AddStepCard sld, 0.55, 1.45, 2.35, 1.15, "1", "Observe", _
+        "Current curve, liquidity needs and policy expectations", lightBlue, borderBlue, blue, RGB(30, 43, 60)
+
+    AddStepCard sld, 3.1, 1.45, 2.35, 1.15, "2", "Scenario", _
+        "Build five rate paths and term-rate curves", lightBlue, borderBlue, blue, RGB(30, 43, 60)
+
+    AddStepCard sld, 5.65, 1.45, 2.35, 1.15, "3", "Optimize", _
+        "Efficient frontier: return vs. maximum regret", darkBlue, darkBlue, RGB(255, 255, 255), RGB(255, 255, 255)
+
+    AddStepCard sld, 8.2, 1.45, 2.35, 1.15, "4", "Execute", _
+        "Allocate across ON / 1M / 3M / 6M within limits", lightBlue, borderBlue, blue, RGB(30, 43, 60)
+
+    AddStepCard sld, 10.75, 1.45, 2.35, 1.15, "5", "Review", _
+        "Rebalance as the curve and cash needs change", lightBlue, borderBlue, blue, RGB(30, 43, 60)
+
+    'Governance boxes
+    AddInfoBox sld, 0.65, 3.45, 3.55, 1.1, "Governance limits", _
+        "Liquidity floor, tenor cap, counterparty limits, maturity ladder, escalation triggers.", lightBlue, blue
+
+    AddInfoBox sld, 4.95, 3.45, 3.55, 1.1, "Decision trigger", _
+        "Update allocation when curve levels, Fed probabilities or cash forecast materially change.", lightBlue, blue
+
+    AddInfoBox sld, 9.25, 3.45, 3.55, 1.1, "Execution discipline", _
+        "Do not chase the highest single tenor. Execute the selected mix and track realized regret.", lightBlue, blue
+
+    'Conclusion band
+    Dim band As Object
+    Set band = sld.Shapes.AddShape(msoShapeRectangle, 0.75 * 72, 5.55 * 72, 12.05 * 72, 0.87 * 72)
+    band.Fill.ForeColor.RGB = darkBlue
+    band.Line.Visible = False
+
+    AddText sld, "Conclusion", 1.05, 5.78, 1.4, 0.25, 11, RGB(255, 255, 255), True
+
+    AddText sld, "The framework turns rate uncertainty into a disciplined allocation process: preserve liquidity, capture return, and limit the cost" & vbCrLf & _
+                 "of a wrong rate view.", _
+        2.8, 5.68, 9.3, 0.45, 10.8, RGB(255, 255, 255), True
+
+    'Footer
+    AddText sld, "Speaker notes included.  Replace illustrative values with live workbook output before external use.", _
+        0.45, 7.12, 7.0, 0.15, 5.5, RGB(130, 145, 165), False
+
+    'Small classic corner accent
+    Dim arc As Object
+    Set arc = sld.Shapes.AddShape(msoShapeArc, 12.95 * 72, 7.02 * 72, 0.25 * 72, 0.25 * 72)
+    arc.Fill.Visible = False
+    arc.Line.ForeColor.RGB = blue
+    arc.Line.Weight = 2
+
+End Sub
+
+Private Sub AddStepCard(sld As Object, x As Double, y As Double, w As Double, h As Double, _
+                        stepNo As String, title As String, body As String, _
+                        fillColor As Long, lineColor As Long, mainColor As Long, textColor As Long)
+
+    Const msoShapeRoundedRectangle As Long = 5
+
+    Dim card As Object
+    Set card = sld.Shapes.AddShape(msoShapeRoundedRectangle, x * 72, y * 72, w * 72, h * 72)
+    card.Fill.ForeColor.RGB = fillColor
+    card.Line.ForeColor.RGB = lineColor
+    card.Line.Weight = 0.75
+    card.Adjustments.Item(1) = 0.06
+
+    AddText sld, stepNo, x + 0.14, y + 0.16, 0.25, 0.25, 11, mainColor, True
+    AddText sld, title, x + 0.52, y + 0.18, 1.4, 0.25, 10.5, textColor, True
+    AddText sld, body, x + 0.14, y + 0.62, w - 0.28, 0.35, 7.5, textColor, False
+
+End Sub
+
+Private Sub AddInfoBox(sld As Object, x As Double, y As Double, w As Double, h As Double, _
+                       boxTitle As String, boxBody As String, fillColor As Long, blue As Long)
+
+    Const msoShapeRoundedRectangle As Long = 5
+
+    Dim box As Object
+    Set box = sld.Shapes.AddShape(msoShapeRoundedRectangle, x * 72, y * 72, w * 72, h * 72)
+    box.Fill.ForeColor.RGB = fillColor
+    box.Line.Visible = False
+    box.Adjustments.Item(1) = 0.06
+
+    AddText sld, boxTitle, x + 0.18, y + 0.18, w - 0.36, 0.22, 8.2, blue, True
+    AddText sld, boxBody, x + 0.18, y + 0.60, w - 0.36, 0.4, 8.8, RGB(30, 43, 60), False
+
+End Sub
+
+Private Sub AddConnector(sld As Object, x1 As Double, y1 As Double, x2 As Double, y2 As Double, lineColor As Long)
+
+    Dim ln As Object
+    Set ln = sld.Shapes.AddLine(x1 * 72, y1 * 72, x2 * 72, y2 * 72)
+    ln.Line.ForeColor.RGB = lineColor
+    ln.Line.Weight = 1.4
+
+End Sub
+
+Private Function AddText(sld As Object, txt As String, x As Double, y As Double, w As Double, h As Double, _
+                         fontSize As Double, fontColor As Long, isBold As Boolean) As Object
+
+    Dim shp As Object
+    Set shp = sld.Shapes.AddTextbox(1, x * 72, y * 72, w * 72, h * 72)
+
+    With shp.TextFrame
+        .MarginLeft = 0
+        .MarginRight = 0
+        .MarginTop = 0
+        .MarginBottom = 0
+        .WordWrap = True
+        With .TextRange
+            .Text = txt
+            .Font.Name = "Arial"
+            .Font.Size = fontSize
+            .Font.Color.RGB = fontColor
+            .Font.Bold = isBold
+        End With
+    End With
+
+    Set AddText = shp
+
+End Function
+```
