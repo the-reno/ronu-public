@@ -1,0 +1,1418 @@
+Option Explicit
+
+'===============================================================================
+' CFO CASH ALLOCATION | SINGLE-MODULE SLIDE BUILDER
+' Version 3.0
+'
+' PURPOSE
+'   Builds the complete Slide 4 allocation analysis from the five 3-year
+'   scenario curves created in Curve_Scenarios.
+'
+'   The slide is designed for a CFO / corporate treasury audience.
+'
+' CORE MESSAGE
+'   Diversification can be optimized, not guessed.
+'
+'   The model:
+'       1. Reads five 3-year market-rate scenarios.
+'       2. Calculates the return from rolling ON, 1M, 3M and 6M.
+'       3. Tests every feasible maturity mix.
+'       4. Measures return and the cost of being wrong (maximum regret).
+'       5. Builds an efficient frontier.
+'       6. Selects the highest-return portfolio within a small tolerance of
+'          the minimum-regret solution.
+'       7. Creates a slide-ready Excel layout with:
+'             - Efficient-frontier chart
+'             - Model-selected allocation
+'             - KPI cards
+'             - Regret-by-scenario comparison
+'             - Methodology strip
+'             - CFO conclusion
+'
+' REQUIRED INPUT SHEET
+'   Curve_Scenarios
+'
+' EXPECTED CURVE_SCENARIOS STRUCTURE
+'   Scenario block 1 begins at row 4.
+'   Each block is 11 rows.
+'
+'       Row +0 : Scenario name
+'       Row +1 : Headers
+'       Row +2 : Today
+'       Row +3 : 6M
+'       Row +4 : 12M
+'       Row +5 : 18M
+'       Row +6 : 24M
+'       Row +7 : 30M
+'       Row +8 : 36M
+'
+'   Columns:
+'       A Horizon
+'       B Month
+'       C ON
+'       D 1M
+'       E 3M
+'       F 6M
+'
+' FIRST RUN
+'   Run:
+'       BuildCFOAllocationSlide
+'
+'   No allocation input is required before first run.
+'
+' OUTPUT SHEETS
+'   Allocation_Inputs
+'   Strategy_Returns
+'   Allocation_Model
+'   Allocation_ChartData
+'   Allocation_Slide
+'
+' IMPORTANT RATE CONVENTION
+'   Curve_Scenarios rates are percentage points:
+'       4.00 means 4.00%
+'
+'===============================================================================
+
+Private Const SCENARIO_COUNT As Long = 5
+Private Const FIRST_SCENARIO_ROW As Long = 4
+Private Const SCENARIO_BLOCK_HEIGHT As Long = 11
+Private Const HORIZON_MONTHS As Long = 36
+
+' Slide palette
+Private Const CLR_BLUE As Long = 10441984
+Private Const CLR_DARKBLUE As Long = 7945735
+Private Const CLR_LIGHTBLUE As Long = 15790320
+Private Const CLR_PALEBLUE As Long = 16448250
+Private Const CLR_DARKTEXT As Long = 3158064
+Private Const CLR_MIDTEXT As Long = 6842472
+Private Const CLR_RED As Long = 192
+Private Const CLR_GREEN As Long = 5287936
+Private Const CLR_WHITE As Long = 16777215
+
+Public Sub BuildCFOAllocationSlide()
+
+    Dim wsCurves As Worksheet
+    Dim wsInputs As Worksheet
+    Dim wsReturns As Worksheet
+    Dim wsModel As Worksheet
+    Dim wsChartData As Worksheet
+    Dim wsSlide As Worksheet
+
+    Dim modelLastRow As Long
+    Dim recommendedRow As Long
+    Dim minRegretRow As Long
+    Dim stage As String
+
+    On Error GoTo CleanFail
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+
+    stage = "Checking Curve_Scenarios"
+    Set wsCurves = GetSheetIfExists("Curve_Scenarios")
+
+    If wsCurves Is Nothing Then
+        MsgBox "Required sheet 'Curve_Scenarios' was not found." & vbCrLf & _
+               "Run the data-based curve scenario builder first.", vbExclamation
+        GoTo CleanExit
+    End If
+
+    stage = "Creating output sheets"
+    Set wsInputs = GetOrCreateSheet("Allocation_Inputs")
+    Set wsReturns = GetOrCreateSheet("Strategy_Returns")
+    Set wsModel = GetOrCreateSheet("Allocation_Model")
+    Set wsChartData = GetOrCreateSheet("Allocation_ChartData")
+    Set wsSlide = GetOrCreateSheet("Allocation_Slide")
+
+    stage = "Setting default inputs"
+    SetupAllocationInputs wsInputs
+
+    stage = "Clearing previous outputs"
+    wsReturns.Cells.Clear
+    wsModel.Cells.Clear
+    wsChartData.Cells.Clear
+    ClearSlide wsSlide
+
+    stage = "Calculating strategy returns"
+    BuildStrategyReturns wsCurves, wsReturns
+
+    stage = "Building portfolio universe"
+    modelLastRow = BuildAllocationModel(wsInputs, wsReturns, wsModel)
+
+    stage = "Building efficient frontier"
+    MarkEfficientFrontier wsModel, modelLastRow
+
+    stage = "Finding minimum regret"
+    minRegretRow = FindMinimumRegretRow(wsModel, modelLastRow)
+
+    stage = "Selecting robust allocation"
+    recommendedRow = SelectRecommendedPortfolio(wsInputs, wsModel, modelLastRow, minRegretRow)
+
+    If recommendedRow < 2 Then
+        Err.Raise vbObjectError + 500, , "No valid recommended allocation was found."
+    End If
+
+    stage = "Preparing chart data"
+    BuildChartData wsReturns, wsModel, wsChartData, modelLastRow, recommendedRow, minRegretRow
+
+    stage = "Creating slide layout"
+    BuildSelectedSlideLayout _
+        wsInputs, wsReturns, wsModel, wsChartData, wsSlide, _
+        recommendedRow, minRegretRow
+
+    stage = "Formatting audit sheets"
+    FormatInputs wsInputs
+    FormatStrategyReturns wsReturns
+    FormatModel wsModel
+    FormatChartData wsChartData
+
+    stage = "Finalizing slide"
+    wsSlide.Activate
+
+    On Error Resume Next
+    ActiveWindow.DisplayGridlines = False
+    ActiveWindow.Zoom = 80
+    On Error GoTo CleanFail
+
+CleanExit:
+    Application.Calculation = xlCalculationAutomatic
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    Exit Sub
+
+CleanFail:
+    Application.Calculation = xlCalculationAutomatic
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    MsgBox "CFO allocation slide builder error." & vbCrLf & vbCrLf & _
+           "Stage: " & stage & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, vbExclamation
+
+End Sub
+
+Private Sub SetupAllocationInputs(ByVal ws As Worksheet)
+
+    If Len(Trim$(CStr(ws.Range("A1").Value))) > 0 Then Exit Sub
+
+    ws.Cells.Clear
+
+    ws.Range("A1:C1").Merge
+    ws.Range("A1").Value = "CFO Cash Allocation Model Inputs"
+
+    ws.Range("A3").Value = "Input"
+    ws.Range("B3").Value = "Value"
+    ws.Range("C3").Value = "Purpose"
+
+    ws.Range("A4").Value = "Allocation step"
+    ws.Range("B4").Value = 5
+    ws.Range("C4").Value = "Percentage-point increment. 5% creates 1,771 candidate portfolios."
+
+    ws.Range("A5").Value = "Regret tolerance"
+    ws.Range("B5").Value = 2
+    ws.Range("C5").Value = "bp above minimum regret allowed for the recommended portfolio."
+
+    ws.Range("A6").Value = "Minimum ON allocation"
+    ws.Range("B6").Value = 20
+    ws.Range("C6").Value = "Liquidity floor as % of total cash."
+
+    ws.Range("A7").Value = "Maximum 6M allocation"
+    ws.Range("B7").Value = 50
+    ws.Range("C7").Value = "Concentration limit as % of total cash."
+
+    ws.Range("A9:C9").Merge
+    ws.Range("A9").Value = _
+        "Selection rule: among valid portfolios, choose the highest average excess return " & _
+        "whose maximum regret is within the selected tolerance of the minimum-regret portfolio."
+
+End Sub
+
+Private Sub BuildStrategyReturns(ByVal wsCurves As Worksheet, ByVal wsReturns As Worksheet)
+
+    Dim i As Long
+    Dim scenarioStartRow As Long
+    Dim outRow As Long
+    Dim scenarioName As String
+
+    Dim rON As Double
+    Dim r1M As Double
+    Dim r3M As Double
+    Dim r6M As Double
+    Dim bestReturn As Double
+    Dim bestStrategy As String
+
+    wsReturns.Range("A1:G1").Merge
+    wsReturns.Range("A1").Value = "Pure Strategy Returns by Scenario"
+
+    wsReturns.Range("A3").Value = "Scenario"
+    wsReturns.Range("B3").Value = "ON"
+    wsReturns.Range("C3").Value = "1M"
+    wsReturns.Range("D3").Value = "3M"
+    wsReturns.Range("E3").Value = "6M"
+    wsReturns.Range("F3").Value = "Best ex-post"
+    wsReturns.Range("G3").Value = "Best pure strategy"
+
+    For i = 0 To SCENARIO_COUNT - 1
+
+        scenarioStartRow = FIRST_SCENARIO_ROW + i * SCENARIO_BLOCK_HEIGHT
+        outRow = 4 + i
+
+        scenarioName = Trim$(CStr(wsCurves.Cells(scenarioStartRow, 1).Value))
+
+        If Len(scenarioName) = 0 Then
+            Err.Raise vbObjectError + 501, , _
+                "Missing scenario name in Curve_Scenarios row " & scenarioStartRow & "."
+        End If
+
+        ValidateScenarioBlock wsCurves, scenarioStartRow
+
+        rON = AnnualizedStrategyReturn(wsCurves, scenarioStartRow, 3, 1)
+        r1M = AnnualizedStrategyReturn(wsCurves, scenarioStartRow, 4, 1)
+        r3M = AnnualizedStrategyReturn(wsCurves, scenarioStartRow, 5, 3)
+        r6M = AnnualizedStrategyReturn(wsCurves, scenarioStartRow, 6, 6)
+
+        bestReturn = rON
+        bestStrategy = "ON"
+
+        If r1M > bestReturn Then
+            bestReturn = r1M
+            bestStrategy = "1M"
+        End If
+
+        If r3M > bestReturn Then
+            bestReturn = r3M
+            bestStrategy = "3M"
+        End If
+
+        If r6M > bestReturn Then
+            bestReturn = r6M
+            bestStrategy = "6M"
+        End If
+
+        wsReturns.Cells(outRow, 1).Value = scenarioName
+        wsReturns.Cells(outRow, 2).Value = rON
+        wsReturns.Cells(outRow, 3).Value = r1M
+        wsReturns.Cells(outRow, 4).Value = r3M
+        wsReturns.Cells(outRow, 5).Value = r6M
+        wsReturns.Cells(outRow, 6).Value = bestReturn
+        wsReturns.Cells(outRow, 7).Value = bestStrategy
+
+    Next i
+
+End Sub
+
+Private Sub ValidateScenarioBlock(ByVal ws As Worksheet, ByVal scenarioStartRow As Long)
+
+    Dim dataStart As Long
+    Dim r As Long
+    Dim c As Long
+
+    dataStart = scenarioStartRow + 2
+
+    For r = dataStart To dataStart + 6
+
+        If Not IsNumeric(ws.Cells(r, 2).Value) Then
+            Err.Raise vbObjectError + 502, , _
+                "Non-numeric month in Curve_Scenarios row " & r & "."
+        End If
+
+        For c = 3 To 6
+            If Not IsNumeric(ws.Cells(r, c).Value) Then
+                Err.Raise vbObjectError + 503, , _
+                    "Non-numeric rate in Curve_Scenarios cell " & _
+                    ws.Cells(r, c).Address(False, False) & "."
+            End If
+        Next c
+
+    Next r
+
+End Sub
+
+Private Function AnnualizedStrategyReturn(ByVal wsCurves As Worksheet, ByVal scenarioStartRow As Long, ByVal tenorCol As Long, ByVal rolloverMonths As Long) As Double
+
+    Dim m As Long
+    Dim periodMonths As Long
+    Dim ratePct As Double
+    Dim wealth As Double
+    Dim years As Double
+
+    If rolloverMonths <= 0 Then rolloverMonths = 1
+
+    wealth = 1#
+    m = 0
+
+    Do While m < HORIZON_MONTHS
+
+        periodMonths = rolloverMonths
+
+        If m + periodMonths > HORIZON_MONTHS Then
+            periodMonths = HORIZON_MONTHS - m
+        End If
+
+        ratePct = RateAtMonth(wsCurves, scenarioStartRow, tenorCol, CDbl(m))
+
+        wealth = wealth * (1# + (ratePct / 100#) * (periodMonths / 12#))
+
+        m = m + periodMonths
+
+    Loop
+
+    years = HORIZON_MONTHS / 12#
+
+    If wealth <= 0 Then
+        AnnualizedStrategyReturn = -100
+    Else
+        AnnualizedStrategyReturn = (wealth ^ (1# / years) - 1#) * 100#
+    End If
+
+End Function
+
+Private Function RateAtMonth(ByVal wsCurves As Worksheet, ByVal scenarioStartRow As Long, ByVal tenorCol As Long, ByVal targetMonth As Double) As Double
+
+    Dim firstDataRow As Long
+    Dim r As Long
+
+    Dim m1 As Double
+    Dim m2 As Double
+    Dim y1 As Double
+    Dim y2 As Double
+
+    firstDataRow = scenarioStartRow + 2
+
+    If targetMonth <= 0 Then
+        RateAtMonth = CDbl(wsCurves.Cells(firstDataRow, tenorCol).Value)
+        Exit Function
+    End If
+
+    If targetMonth >= 36 Then
+        RateAtMonth = CDbl(wsCurves.Cells(firstDataRow + 6, tenorCol).Value)
+        Exit Function
+    End If
+
+    For r = firstDataRow To firstDataRow + 5
+
+        m1 = CDbl(wsCurves.Cells(r, 2).Value)
+        m2 = CDbl(wsCurves.Cells(r + 1, 2).Value)
+
+        If targetMonth >= m1 And targetMonth <= m2 Then
+
+            y1 = CDbl(wsCurves.Cells(r, tenorCol).Value)
+            y2 = CDbl(wsCurves.Cells(r + 1, tenorCol).Value)
+
+            RateAtMonth = LinearInterpolate(targetMonth, m1, y1, m2, y2)
+            Exit Function
+
+        End If
+
+    Next r
+
+    Err.Raise vbObjectError + 504, , _
+        "Could not interpolate scenario rate at month " & targetMonth & "."
+
+End Function
+
+Private Function BuildAllocationModel(ByVal wsInputs As Worksheet, ByVal wsReturns As Worksheet, ByVal wsModel As Worksheet) As Long
+
+    Dim stepPct As Double
+    Dim steps As Long
+
+    Dim a As Long
+    Dim b As Long
+    Dim c As Long
+    Dim d As Long
+
+    Dim wON As Double
+    Dim w1M As Double
+    Dim w3M As Double
+    Dim w6M As Double
+
+    Dim rowOut As Long
+    Dim idNum As Long
+
+    Dim minON As Double
+    Dim max6M As Double
+
+    stepPct = CDbl(wsInputs.Range("B4").Value)
+
+    If stepPct <= 0 Then stepPct = 5
+    If stepPct > 25 Then stepPct = 25
+
+    steps = CLng(100# / stepPct)
+
+    If Abs(steps * stepPct - 100#) > 0.0001 Then
+        Err.Raise vbObjectError + 505, , _
+            "Allocation step must divide 100 exactly. Use 5, 10, 20 or 25."
+    End If
+
+    minON = CDbl(wsInputs.Range("B6").Value) / 100#
+    max6M = CDbl(wsInputs.Range("B7").Value) / 100#
+
+    WriteModelHeaders wsModel
+
+    rowOut = 2
+    idNum = 1
+
+    For a = 0 To steps
+
+        For b = 0 To steps - a
+
+            For c = 0 To steps - a - b
+
+                d = steps - a - b - c
+
+                wON = a / steps
+                w1M = b / steps
+                w3M = c / steps
+                w6M = d / steps
+
+                WritePortfolioRow _
+                    wsReturns, wsModel, rowOut, idNum, _
+                    wON, w1M, w3M, w6M, _
+                    minON, max6M
+
+                rowOut = rowOut + 1
+                idNum = idNum + 1
+
+            Next c
+
+        Next b
+
+    Next a
+
+    BuildAllocationModel = rowOut - 1
+
+End Function
+
+Private Sub WriteModelHeaders(ByVal ws As Worksheet)
+
+    ws.Cells(1, 1).Value = "ID"
+    ws.Cells(1, 2).Value = "ON wt"
+    ws.Cells(1, 3).Value = "1M wt"
+    ws.Cells(1, 4).Value = "3M wt"
+    ws.Cells(1, 5).Value = "6M wt"
+
+    ws.Cells(1, 6).Value = "S1 return"
+    ws.Cells(1, 7).Value = "S2 return"
+    ws.Cells(1, 8).Value = "S3 return"
+    ws.Cells(1, 9).Value = "S4 return"
+    ws.Cells(1, 10).Value = "S5 return"
+
+    ws.Cells(1, 11).Value = "S1 regret bp"
+    ws.Cells(1, 12).Value = "S2 regret bp"
+    ws.Cells(1, 13).Value = "S3 regret bp"
+    ws.Cells(1, 14).Value = "S4 regret bp"
+    ws.Cells(1, 15).Value = "S5 regret bp"
+
+    ws.Cells(1, 16).Value = "Avg excess vs ON bp"
+    ws.Cells(1, 17).Value = "Max regret bp"
+    ws.Cells(1, 18).Value = "Worst excess bp"
+    ws.Cells(1, 19).Value = "Hit rate"
+    ws.Cells(1, 20).Value = "Valid"
+    ws.Cells(1, 21).Value = "Efficient"
+    ws.Cells(1, 22).Value = "Selected"
+
+End Sub
+
+Private Sub WritePortfolioRow(ByVal wsReturns As Worksheet, ByVal wsModel As Worksheet, ByVal rowOut As Long, ByVal idNum As Long, ByVal wON As Double, ByVal w1M As Double, ByVal w3M As Double, ByVal w6M As Double, ByVal minON As Double, ByVal max6M As Double)
+
+    Dim s As Long
+    Dim retRow As Long
+
+    Dim pureON As Double
+    Dim pure1M As Double
+    Dim pure3M As Double
+    Dim pure6M As Double
+    Dim bestReturn As Double
+
+    Dim wealthON As Double
+    Dim wealth1M As Double
+    Dim wealth3M As Double
+    Dim wealth6M As Double
+    Dim portfolioWealth As Double
+    Dim portfolioReturn As Double
+
+    Dim regretBP As Double
+    Dim excessBP As Double
+
+    Dim sumExcessBP As Double
+    Dim maxRegretBP As Double
+    Dim worstExcessBP As Double
+    Dim hitCount As Long
+    Dim validFlag As Long
+
+    wsModel.Cells(rowOut, 1).Value = idNum
+    wsModel.Cells(rowOut, 2).Value = wON
+    wsModel.Cells(rowOut, 3).Value = w1M
+    wsModel.Cells(rowOut, 4).Value = w3M
+    wsModel.Cells(rowOut, 5).Value = w6M
+
+    maxRegretBP = -1
+    worstExcessBP = 1E+30
+    sumExcessBP = 0
+    hitCount = 0
+
+    For s = 1 To SCENARIO_COUNT
+
+        retRow = 3 + s
+
+        pureON = CDbl(wsReturns.Cells(retRow, 2).Value)
+        pure1M = CDbl(wsReturns.Cells(retRow, 3).Value)
+        pure3M = CDbl(wsReturns.Cells(retRow, 4).Value)
+        pure6M = CDbl(wsReturns.Cells(retRow, 5).Value)
+        bestReturn = CDbl(wsReturns.Cells(retRow, 6).Value)
+
+        wealthON = (1# + pureON / 100#) ^ 3#
+        wealth1M = (1# + pure1M / 100#) ^ 3#
+        wealth3M = (1# + pure3M / 100#) ^ 3#
+        wealth6M = (1# + pure6M / 100#) ^ 3#
+
+        portfolioWealth = _
+            wON * wealthON + _
+            w1M * wealth1M + _
+            w3M * wealth3M + _
+            w6M * wealth6M
+
+        portfolioReturn = (portfolioWealth ^ (1# / 3#) - 1#) * 100#
+
+        regretBP = (bestReturn - portfolioReturn) * 100#
+        excessBP = (portfolioReturn - pureON) * 100#
+
+        wsModel.Cells(rowOut, 5 + s).Value = portfolioReturn
+        wsModel.Cells(rowOut, 10 + s).Value = regretBP
+
+        sumExcessBP = sumExcessBP + excessBP
+
+        If regretBP > maxRegretBP Then maxRegretBP = regretBP
+        If excessBP < worstExcessBP Then worstExcessBP = excessBP
+
+        If excessBP > 0.0000001 Then
+            hitCount = hitCount + 1
+        End If
+
+    Next s
+
+    validFlag = 1
+
+    If wON + 0.0000001 < minON Then validFlag = 0
+    If w6M - 0.0000001 > max6M Then validFlag = 0
+
+    wsModel.Cells(rowOut, 16).Value = sumExcessBP / SCENARIO_COUNT
+    wsModel.Cells(rowOut, 17).Value = maxRegretBP
+    wsModel.Cells(rowOut, 18).Value = worstExcessBP
+    wsModel.Cells(rowOut, 19).Value = hitCount / SCENARIO_COUNT
+    wsModel.Cells(rowOut, 20).Value = validFlag
+    wsModel.Cells(rowOut, 21).Value = 0
+    wsModel.Cells(rowOut, 22).Value = 0
+
+End Sub
+
+Private Sub MarkEfficientFrontier(ByVal wsModel As Worksheet, ByVal lastRow As Long)
+
+    Dim r As Long
+    Dim j As Long
+
+    Dim riskR As Double
+    Dim returnR As Double
+    Dim riskJ As Double
+    Dim returnJ As Double
+
+    Dim dominated As Boolean
+
+    For r = 2 To lastRow
+
+        If CLng(wsModel.Cells(r, 20).Value) = 1 Then
+
+            riskR = CDbl(wsModel.Cells(r, 17).Value)
+            returnR = CDbl(wsModel.Cells(r, 16).Value)
+            dominated = False
+
+            For j = 2 To lastRow
+
+                If j <> r Then
+
+                    If CLng(wsModel.Cells(j, 20).Value) = 1 Then
+
+                        riskJ = CDbl(wsModel.Cells(j, 17).Value)
+                        returnJ = CDbl(wsModel.Cells(j, 16).Value)
+
+                        If riskJ <= riskR + 0.0000001 _
+                           And returnJ >= returnR - 0.0000001 Then
+
+                            If riskJ < riskR - 0.0000001 _
+                               Or returnJ > returnR + 0.0000001 Then
+
+                                dominated = True
+                                Exit For
+
+                            End If
+
+                        End If
+
+                    End If
+
+                End If
+
+            Next j
+
+            If dominated Then
+                wsModel.Cells(r, 21).Value = 0
+            Else
+                wsModel.Cells(r, 21).Value = 1
+            End If
+
+        End If
+
+    Next r
+
+End Sub
+
+Private Function FindMinimumRegretRow(ByVal wsModel As Worksheet, ByVal lastRow As Long) As Long
+
+    Dim r As Long
+    Dim bestRow As Long
+    Dim bestRegret As Double
+    Dim thisRegret As Double
+    Dim thisReturn As Double
+    Dim bestReturn As Double
+
+    bestRegret = 1E+30
+    bestReturn = -1E+30
+    bestRow = 0
+
+    For r = 2 To lastRow
+
+        If CLng(wsModel.Cells(r, 20).Value) = 1 Then
+
+            thisRegret = CDbl(wsModel.Cells(r, 17).Value)
+            thisReturn = CDbl(wsModel.Cells(r, 16).Value)
+
+            If thisRegret < bestRegret - 0.0000001 Then
+
+                bestRegret = thisRegret
+                bestReturn = thisReturn
+                bestRow = r
+
+            ElseIf Abs(thisRegret - bestRegret) < 0.0000001 Then
+
+                If thisReturn > bestReturn Then
+                    bestReturn = thisReturn
+                    bestRow = r
+                End If
+
+            End If
+
+        End If
+
+    Next r
+
+    FindMinimumRegretRow = bestRow
+
+End Function
+
+Private Function SelectRecommendedPortfolio(ByVal wsInputs As Worksheet, ByVal wsModel As Worksheet, ByVal lastRow As Long, ByVal minRegretRow As Long) As Long
+
+    Dim r As Long
+
+    Dim toleranceBP As Double
+    Dim allowedRegret As Double
+
+    Dim thisRegret As Double
+    Dim thisReturn As Double
+
+    Dim bestReturn As Double
+    Dim bestRow As Long
+
+    If minRegretRow < 2 Then
+        SelectRecommendedPortfolio = 0
+        Exit Function
+    End If
+
+    toleranceBP = CDbl(wsInputs.Range("B5").Value)
+    If toleranceBP < 0 Then toleranceBP = 0
+
+    allowedRegret = CDbl(wsModel.Cells(minRegretRow, 17).Value) + toleranceBP
+
+    bestReturn = -1E+30
+    bestRow = 0
+
+    For r = 2 To lastRow
+
+        If CLng(wsModel.Cells(r, 20).Value) = 1 Then
+
+            thisRegret = CDbl(wsModel.Cells(r, 17).Value)
+            thisReturn = CDbl(wsModel.Cells(r, 16).Value)
+
+            If thisRegret <= allowedRegret + 0.0000001 Then
+
+                If thisReturn > bestReturn + 0.0000001 Then
+
+                    bestReturn = thisReturn
+                    bestRow = r
+
+                ElseIf Abs(thisReturn - bestReturn) < 0.0000001 Then
+
+                    If bestRow > 0 Then
+                        If thisRegret < CDbl(wsModel.Cells(bestRow, 17).Value) Then
+                            bestRow = r
+                        End If
+                    End If
+
+                End If
+
+            End If
+
+        End If
+
+    Next r
+
+    If bestRow > 0 Then
+        wsModel.Cells(bestRow, 22).Value = 1
+    End If
+
+    SelectRecommendedPortfolio = bestRow
+
+End Function
+
+Private Sub BuildChartData(ByVal wsReturns As Worksheet, ByVal wsModel As Worksheet, ByVal wsData As Worksheet, ByVal modelLastRow As Long, ByVal recommendedRow As Long, ByVal minRegretRow As Long)
+
+    Dim r As Long
+    Dim outRow As Long
+    Dim frontierLastRow As Long
+
+    Dim s As Long
+    Dim retRow As Long
+    Dim scenarioOutRow As Long
+
+    Dim bestRet As Double
+    Dim recRet As Double
+    Dim onRet As Double
+    Dim m6Ret As Double
+
+    wsData.Range("A1").Value = "All valid allocations"
+    wsData.Range("A2").Value = "Max regret bp"
+    wsData.Range("B2").Value = "Avg excess bp"
+
+    outRow = 3
+
+    For r = 2 To modelLastRow
+
+        If CLng(wsModel.Cells(r, 20).Value) = 1 Then
+
+            wsData.Cells(outRow, 1).Value = wsModel.Cells(r, 17).Value
+            wsData.Cells(outRow, 2).Value = wsModel.Cells(r, 16).Value
+            outRow = outRow + 1
+
+        End If
+
+    Next r
+
+    wsData.Range("D1").Value = "Efficient frontier"
+    wsData.Range("D2").Value = "Max regret bp"
+    wsData.Range("E2").Value = "Avg excess bp"
+
+    outRow = 3
+
+    For r = 2 To modelLastRow
+
+        If CLng(wsModel.Cells(r, 21).Value) = 1 Then
+
+            wsData.Cells(outRow, 4).Value = wsModel.Cells(r, 17).Value
+            wsData.Cells(outRow, 5).Value = wsModel.Cells(r, 16).Value
+            outRow = outRow + 1
+
+        End If
+
+    Next r
+
+    frontierLastRow = outRow - 1
+
+    If frontierLastRow >= 4 Then
+        wsData.Range("D3:E" & frontierLastRow).Sort _
+            Key1:=wsData.Range("D3"), _
+            Order1:=xlAscending, _
+            Header:=xlNo
+    End If
+
+    wsData.Range("G1").Value = "Selected"
+    wsData.Range("G2").Value = "Max regret bp"
+    wsData.Range("H2").Value = "Avg excess bp"
+    wsData.Range("G3").Value = wsModel.Cells(recommendedRow, 17).Value
+    wsData.Range("H3").Value = wsModel.Cells(recommendedRow, 16).Value
+
+    wsData.Range("J1").Value = "Minimum regret"
+    wsData.Range("J2").Value = "Max regret bp"
+    wsData.Range("K2").Value = "Avg excess bp"
+    wsData.Range("J3").Value = wsModel.Cells(minRegretRow, 17).Value
+    wsData.Range("K3").Value = wsModel.Cells(minRegretRow, 16).Value
+
+    wsData.Range("M1").Value = "Selected allocation"
+    wsData.Range("M2").Value = "Portfolio"
+    wsData.Range("N2").Value = "ON"
+    wsData.Range("O2").Value = "1M"
+    wsData.Range("P2").Value = "3M"
+    wsData.Range("Q2").Value = "6M"
+
+    wsData.Range("M3").Value = "Selected"
+    wsData.Range("N3").Value = wsModel.Cells(recommendedRow, 2).Value
+    wsData.Range("O3").Value = wsModel.Cells(recommendedRow, 3).Value
+    wsData.Range("P3").Value = wsModel.Cells(recommendedRow, 4).Value
+    wsData.Range("Q3").Value = wsModel.Cells(recommendedRow, 5).Value
+
+    wsData.Range("M6").Value = "Scenario"
+    wsData.Range("N6").Value = "Selected"
+    wsData.Range("O6").Value = "100% ON"
+    wsData.Range("P6").Value = "100% 6M"
+
+    For s = 1 To SCENARIO_COUNT
+
+        retRow = 3 + s
+        scenarioOutRow = 6 + s
+
+        bestRet = CDbl(wsReturns.Cells(retRow, 6).Value)
+        recRet = CDbl(wsModel.Cells(recommendedRow, 5 + s).Value)
+        onRet = CDbl(wsReturns.Cells(retRow, 2).Value)
+        m6Ret = CDbl(wsReturns.Cells(retRow, 5).Value)
+
+        wsData.Cells(scenarioOutRow, 13).Value = wsReturns.Cells(retRow, 1).Value
+        wsData.Cells(scenarioOutRow, 14).Value = (bestRet - recRet) * 100#
+        wsData.Cells(scenarioOutRow, 15).Value = (bestRet - onRet) * 100#
+        wsData.Cells(scenarioOutRow, 16).Value = (bestRet - m6Ret) * 100#
+
+    Next s
+
+End Sub
+
+Private Sub BuildSelectedSlideLayout(ByVal wsInputs As Worksheet, ByVal wsReturns As Worksheet, ByVal wsModel As Worksheet, ByVal wsData As Worksheet, ByVal wsSlide As Worksheet, ByVal recommendedRow As Long, ByVal minRegretRow As Long)
+
+    Dim titleText As String
+    Dim subtitleText As String
+    Dim conclusionText As String
+    Dim methodText As String
+
+    Dim avgExcess As Double
+    Dim maxRegret As Double
+    Dim worstExcess As Double
+    Dim hitRate As Double
+
+    Dim minRegret As Double
+    Dim tolerance As Double
+
+    Dim selectedLabel As String
+    Dim minimumLabel As String
+
+    wsSlide.Cells.Clear
+
+    wsSlide.Columns("A:N").ColumnWidth = 11
+    wsSlide.Rows("1:40").RowHeight = 14
+
+    titleText = "Diversification can be optimized, not guessed"
+
+    subtitleText = _
+        "Test every feasible maturity mix across five 3-year rate paths and select the portfolio " & _
+        "that preserves return while limiting the cost of an incorrect rate view."
+
+    avgExcess = CDbl(wsModel.Cells(recommendedRow, 16).Value)
+    maxRegret = CDbl(wsModel.Cells(recommendedRow, 17).Value)
+    worstExcess = CDbl(wsModel.Cells(recommendedRow, 18).Value)
+    hitRate = CDbl(wsModel.Cells(recommendedRow, 19).Value)
+
+    minRegret = CDbl(wsModel.Cells(minRegretRow, 17).Value)
+    tolerance = CDbl(wsInputs.Range("B5").Value)
+
+    methodText = _
+        "1  Five 3-year rate paths     " & ChrW(8594) & _
+        "     2  Roll ON / 1M / 3M / 6M     " & ChrW(8594) & _
+        "     3  Test all feasible mixes     " & ChrW(8594) & _
+        "     4  Optimize return vs. maximum regret"
+
+    conclusionText = _
+        "The optimal mix is not the portfolio that wins one forecast. " & _
+        "It gives up some upside in the winning scenario to materially reduce the cost of being wrong " & _
+        "while preserving liquidity across the 3-year horizon."
+
+    selectedLabel = _
+        "Selected: " & _
+        FormatPercent0(CDbl(wsModel.Cells(recommendedRow, 2).Value)) & " ON  |  " & _
+        FormatPercent0(CDbl(wsModel.Cells(recommendedRow, 3).Value)) & " 1M  |  " & _
+        FormatPercent0(CDbl(wsModel.Cells(recommendedRow, 4).Value)) & " 3M  |  " & _
+        FormatPercent0(CDbl(wsModel.Cells(recommendedRow, 5).Value)) & " 6M"
+
+    minimumLabel = _
+        "Minimum-regret portfolio: " & Format(minRegret, "0.0") & _
+        " bp  |  Recommendation allows +" & Format(tolerance, "0.0") & " bp"
+
+    AddFilledRectangle wsSlide, 0, 0, 960, 540, RGB(255, 255, 255), RGB(255, 255, 255)
+
+    AddTextBox wsSlide, 28, 20, 905, 32, titleText, 23, True, RGB(0, 83, 160), False, msoAlignLeft
+    AddTextBox wsSlide, 30, 56, 890, 34, subtitleText, 11.5, False, RGB(70, 70, 70), False, msoAlignLeft
+
+    AddTextBox wsSlide, 32, 102, 505, 22, _
+        "Return vs. cost of being wrong", 13, True, RGB(30, 30, 30), False, msoAlignLeft
+
+    AddTextBox wsSlide, 32, 124, 505, 20, _
+        "Each point is one feasible ON / 1M / 3M / 6M mix. Upper-left is preferred.", _
+        9, False, RGB(105, 105, 105), False, msoAlignLeft
+
+    BuildFrontierChart wsSlide, wsData
+
+    AddTextBox wsSlide, 38, 330, 490, 20, selectedLabel, 9.5, True, RGB(0, 83, 160), False, msoAlignLeft
+    AddTextBox wsSlide, 38, 350, 490, 18, minimumLabel, 8.5, False, RGB(100, 100, 100), False, msoAlignLeft
+
+    AddPanel wsSlide, 565, 101, 365, 267
+
+    AddTextBox wsSlide, 585, 116, 325, 22, _
+        "Model-selected robust allocation", 13, True, RGB(0, 83, 160), False, msoAlignLeft
+
+    BuildAllocationStackedChart wsSlide, wsData
+
+    AddKPICard wsSlide, 585, 220, 150, 58, "Average excess return", FormatSignedBP(avgExcess), "vs. rolling ON"
+    AddKPICard wsSlide, 750, 220, 150, 58, "Maximum regret", FormatBP(maxRegret), "worst scenario"
+
+    AddKPICard wsSlide, 585, 288, 150, 58, "Worst excess return", FormatSignedBP(worstExcess), "vs. rolling ON"
+    AddKPICard wsSlide, 750, 288, 150, 58, "Hit rate", Format(hitRate, "0%"), "scenarios > ON"
+
+    AddTextBox wsSlide, 32, 382, 890, 21, _
+        "Concentration wins when the rate call is right — diversification limits the cost when it is wrong", _
+        12.5, True, RGB(30, 30, 30), False, msoAlignLeft
+
+    BuildRegretChart wsSlide, wsData
+
+    AddFilledRectangle wsSlide, 32, 475, 896, 27, RGB(242, 247, 252), RGB(220, 230, 240)
+    AddTextBox wsSlide, 45, 480, 870, 18, methodText, 8.5, True, RGB(65, 85, 105), False, msoAlignCenter
+
+    AddFilledRectangle wsSlide, 32, 509, 896, 24, RGB(0, 83, 160), RGB(0, 83, 160)
+    AddTextBox wsSlide, 46, 512, 868, 18, conclusionText, 9, True, RGB(255, 255, 255), False, msoAlignCenter
+
+End Sub
+
+Private Sub BuildFrontierChart(ByVal wsSlide As Worksheet, ByVal wsData As Worksheet)
+
+    Dim chObj As ChartObject
+    Dim ch As Chart
+    Dim lastAll As Long
+    Dim lastFrontier As Long
+
+    lastAll = wsData.Cells(wsData.Rows.Count, 1).End(xlUp).Row
+    lastFrontier = wsData.Cells(wsData.Rows.Count, 4).End(xlUp).Row
+
+    Set chObj = wsSlide.ChartObjects.Add(32, 145, 505, 180)
+    Set ch = chObj.Chart
+
+    ch.ChartType = xlXYScatter
+
+    AddXYSeries ch, wsData, "Feasible allocations", _
+        wsData.Range("A3:A" & lastAll), _
+        wsData.Range("B3:B" & lastAll), _
+        RGB(180, 205, 230), xlMarkerStyleCircle, 3, False
+
+    If lastFrontier >= 3 Then
+
+        AddXYSeries ch, wsData, "Efficient frontier", _
+            wsData.Range("D3:D" & lastFrontier), _
+            wsData.Range("E3:E" & lastFrontier), _
+            RGB(0, 83, 160), xlMarkerStyleCircle, 5, True
+
+    End If
+
+    AddXYSeries ch, wsData, "Minimum regret", _
+        wsData.Range("J3:J3"), _
+        wsData.Range("K3:K3"), _
+        RGB(0, 176, 80), xlMarkerStyleCircle, 8, False
+
+    AddXYSeries ch, wsData, "Recommended", _
+        wsData.Range("G3:G3"), _
+        wsData.Range("H3:H3"), _
+        RGB(192, 0, 0), xlMarkerStyleDiamond, 9, False
+
+    ch.HasTitle = False
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+
+    On Error Resume Next
+
+    ch.ChartArea.Format.Fill.Visible = msoFalse
+    ch.PlotArea.Format.Fill.Visible = msoFalse
+    ch.ChartArea.Format.Line.Visible = msoFalse
+
+    ch.Axes(xlCategory).HasTitle = True
+    ch.Axes(xlCategory).AxisTitle.Text = "Maximum regret | bp"
+    ch.Axes(xlCategory).TickLabels.Font.Size = 8
+
+    ch.Axes(xlValue).HasTitle = True
+    ch.Axes(xlValue).AxisTitle.Text = "Average excess return vs. ON | bp"
+    ch.Axes(xlValue).TickLabels.Font.Size = 8
+
+    ch.Legend.Font.Size = 8
+
+    ch.Axes(xlCategory).MajorGridlines.Format.Line.ForeColor.RGB = RGB(225, 225, 225)
+    ch.Axes(xlValue).MajorGridlines.Format.Line.ForeColor.RGB = RGB(225, 225, 225)
+
+    On Error GoTo 0
+
+End Sub
+
+Private Sub BuildAllocationStackedChart(ByVal wsSlide As Worksheet, ByVal wsData As Worksheet)
+
+    Dim chObj As ChartObject
+    Dim ch As Chart
+    Dim s As Series
+
+    Set chObj = wsSlide.ChartObjects.Add(585, 147, 315, 62)
+    Set ch = chObj.Chart
+
+    ch.ChartType = xlBarStacked
+    ch.SetSourceData Source:=wsData.Range("M2:Q3")
+
+    ch.HasTitle = False
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+
+    On Error Resume Next
+
+    ch.ChartArea.Format.Fill.Visible = msoFalse
+    ch.PlotArea.Format.Fill.Visible = msoFalse
+    ch.ChartArea.Format.Line.Visible = msoFalse
+
+    ch.Axes(xlCategory).Delete
+    ch.Axes(xlValue).MinimumScale = 0
+    ch.Axes(xlValue).MaximumScale = 1
+    ch.Axes(xlValue).Delete
+
+    ch.Legend.Font.Size = 8
+
+    For Each s In ch.SeriesCollection
+        s.HasDataLabels = True
+        s.DataLabels.NumberFormat = "0%"
+        s.DataLabels.Font.Size = 8
+        s.DataLabels.Font.Bold = True
+    Next s
+
+    On Error GoTo 0
+
+End Sub
+
+Private Sub BuildRegretChart(ByVal wsSlide As Worksheet, ByVal wsData As Worksheet)
+
+    Dim chObj As ChartObject
+    Dim ch As Chart
+    Dim s As Series
+
+    Set chObj = wsSlide.ChartObjects.Add(32, 406, 896, 65)
+    Set ch = chObj.Chart
+
+    ch.ChartType = xlColumnClustered
+    ch.SetSourceData Source:=wsData.Range("M6:P11")
+
+    ch.HasTitle = False
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+
+    On Error Resume Next
+
+    ch.ChartArea.Format.Fill.Visible = msoFalse
+    ch.PlotArea.Format.Fill.Visible = msoFalse
+    ch.ChartArea.Format.Line.Visible = msoFalse
+
+    ch.Axes(xlValue).MinimumScale = 0
+    ch.Axes(xlValue).HasTitle = True
+    ch.Axes(xlValue).AxisTitle.Text = "Regret | bp"
+    ch.Axes(xlValue).TickLabels.Font.Size = 7
+
+    ch.Axes(xlCategory).TickLabels.Font.Size = 7
+    ch.Legend.Font.Size = 8
+
+    ch.Axes(xlValue).MajorGridlines.Format.Line.ForeColor.RGB = RGB(225, 225, 225)
+
+    If ch.SeriesCollection.Count >= 3 Then
+
+        ch.SeriesCollection(1).Format.Fill.ForeColor.RGB = RGB(0, 83, 160)
+        ch.SeriesCollection(1).Format.Line.ForeColor.RGB = RGB(0, 83, 160)
+
+        ch.SeriesCollection(2).Format.Fill.ForeColor.RGB = RGB(150, 150, 150)
+        ch.SeriesCollection(2).Format.Line.ForeColor.RGB = RGB(150, 150, 150)
+
+        ch.SeriesCollection(3).Format.Fill.ForeColor.RGB = RGB(45, 45, 90)
+        ch.SeriesCollection(3).Format.Line.ForeColor.RGB = RGB(45, 45, 90)
+
+    End If
+
+    For Each s In ch.SeriesCollection
+        s.GapWidth = 90
+    Next s
+
+    On Error GoTo 0
+
+End Sub
+
+Private Sub AddXYSeries(ByVal ch As Chart, ByVal ws As Worksheet, ByVal seriesName As String, ByVal xRange As Range, ByVal yRange As Range, ByVal seriesColor As Long, ByVal markerStyle As XlMarkerStyle, ByVal markerSize As Long, ByVal connectLine As Boolean)
+
+    Dim s As Series
+
+    Set s = ch.SeriesCollection.NewSeries
+
+    s.Name = seriesName
+    s.XValues = xRange
+    s.Values = yRange
+
+    If connectLine Then
+        s.ChartType = xlXYScatterLines
+    Else
+        s.ChartType = xlXYScatter
+    End If
+
+    On Error Resume Next
+
+    s.MarkerStyle = markerStyle
+    s.MarkerSize = markerSize
+    s.MarkerForegroundColor = seriesColor
+    s.MarkerBackgroundColor = seriesColor
+
+    If connectLine Then
+        s.Format.Line.Visible = msoTrue
+        s.Format.Line.ForeColor.RGB = seriesColor
+        s.Format.Line.Weight = 1.8
+    Else
+        s.Format.Line.Visible = msoFalse
+    End If
+
+    On Error GoTo 0
+
+End Sub
+
+Private Sub AddPanel(ByVal ws As Worksheet, ByVal leftPos As Double, ByVal topPos As Double, ByVal panelWidth As Double, ByVal panelHeight As Double)
+
+    Dim shp As Shape
+
+    Set shp = ws.Shapes.AddShape(msoShapeRoundedRectangle, leftPos, topPos, panelWidth, panelHeight)
+
+    shp.Fill.ForeColor.RGB = RGB(248, 250, 252)
+    shp.Line.ForeColor.RGB = RGB(220, 228, 236)
+    shp.Line.Weight = 1
+    shp.Adjustments.Item(1) = 0.08
+
+End Sub
+
+Private Sub AddKPICard(ByVal ws As Worksheet, ByVal leftPos As Double, ByVal topPos As Double, ByVal cardWidth As Double, ByVal cardHeight As Double, ByVal labelText As String, ByVal valueText As String, ByVal footerText As String)
+
+    Dim shp As Shape
+
+    Set shp = ws.Shapes.AddShape(msoShapeRoundedRectangle, leftPos, topPos, cardWidth, cardHeight)
+
+    shp.Fill.ForeColor.RGB = RGB(255, 255, 255)
+    shp.Line.ForeColor.RGB = RGB(220, 228, 236)
+    shp.Line.Weight = 0.8
+    shp.Adjustments.Item(1) = 0.08
+
+    AddTextBox ws, leftPos + 9, topPos + 6, cardWidth - 18, 14, _
+        labelText, 8.2, False, RGB(95, 95, 95), False, msoAlignLeft
+
+    AddTextBox ws, leftPos + 9, topPos + 20, cardWidth - 18, 22, _
+        valueText, 16, True, RGB(0, 83, 160), False, msoAlignLeft
+
+    AddTextBox ws, leftPos + 9, topPos + 42, cardWidth - 18, 11, _
+        footerText, 7.5, False, RGB(125, 125, 125), False, msoAlignLeft
+
+End Sub
+
+Private Sub AddFilledRectangle(ByVal ws As Worksheet, ByVal leftPos As Double, ByVal topPos As Double, ByVal boxWidth As Double, ByVal boxHeight As Double, ByVal fillColor As Long, ByVal lineColor As Long)
+
+    Dim shp As Shape
+
+    Set shp = ws.Shapes.AddShape(msoShapeRectangle, leftPos, topPos, boxWidth, boxHeight)
+
+    shp.Fill.ForeColor.RGB = fillColor
+    shp.Line.ForeColor.RGB = lineColor
+
+End Sub
+
+Private Sub AddTextBox(ByVal ws As Worksheet, ByVal leftPos As Double, ByVal topPos As Double, ByVal boxWidth As Double, ByVal boxHeight As Double, ByVal textValue As String, ByVal fontSize As Double, ByVal isBold As Boolean, ByVal fontColor As Long, ByVal hasFill As Boolean, ByVal paragraphAlignment As Long)
+
+    Dim shp As Shape
+
+    Set shp = ws.Shapes.AddTextbox( _
+                    Orientation:=msoTextOrientationHorizontal, _
+                    Left:=leftPos, _
+                    Top:=topPos, _
+                    Width:=boxWidth, _
+                    Height:=boxHeight)
+
+    shp.Line.Visible = msoFalse
+
+    If hasFill Then
+        shp.Fill.Visible = msoTrue
+        shp.Fill.ForeColor.RGB = RGB(255, 255, 255)
+    Else
+        shp.Fill.Visible = msoFalse
+    End If
+
+    With shp.TextFrame2
+
+        .MarginLeft = 1
+        .MarginRight = 1
+        .MarginTop = 1
+        .MarginBottom = 1
+        .WordWrap = msoTrue
+
+        .TextRange.Text = textValue
+        .TextRange.Font.Name = "Arial"
+        .TextRange.Font.Size = fontSize
+        .TextRange.Font.Fill.ForeColor.RGB = fontColor
+
+        If isBold Then
+            .TextRange.Font.Bold = msoTrue
+        Else
+            .TextRange.Font.Bold = msoFalse
+        End If
+
+        .TextRange.ParagraphFormat.Alignment = paragraphAlignment
+
+    End With
+
+End Sub
+
+Private Sub FormatInputs(ByVal ws As Worksheet)
+
+    ws.Columns("A").ColumnWidth = 28
+    ws.Columns("B").ColumnWidth = 16
+    ws.Columns("C").ColumnWidth = 72
+
+    ws.Range("A1:C1").Font.Bold = True
+    ws.Range("A1:C1").Font.Size = 16
+
+    ws.Range("A3:C3").Font.Bold = True
+
+    ws.Range("B4:B7").Font.Color = RGB(0, 0, 255)
+    ws.Range("B4:B7").Interior.Color = RGB(255, 255, 204)
+
+    ws.Range("A3:C7").Borders.LineStyle = xlContinuous
+    ws.Range("A9:C9").WrapText = True
+
+End Sub
+
+Private Sub FormatStrategyReturns(ByVal ws As Worksheet)
+
+    ws.Columns("A").ColumnWidth = 28
+    ws.Columns("B:F").ColumnWidth = 14
+    ws.Columns("G").ColumnWidth = 18
+
+    ws.Range("A1:G1").Font.Bold = True
+    ws.Range("A1:G1").Font.Size = 16
+
+    ws.Range("A3:G3").Font.Bold = True
+    ws.Range("B4:F8").NumberFormat = "0.00""%"""
+
+    ws.Range("A3:G8").Borders.LineStyle = xlContinuous
+
+End Sub
+
+Private Sub FormatModel(ByVal ws As Worksheet)
+
+    ws.Cells.Font.Name = "Arial"
+    ws.Cells.Font.Size = 9
+
+    ws.Range("A1:V1").Font.Bold = True
+
+    ws.Columns("A").ColumnWidth = 8
+    ws.Columns("B:E").ColumnWidth = 9
+    ws.Columns("F:J").ColumnWidth = 12
+    ws.Columns("K:R").ColumnWidth = 13
+    ws.Columns("S:V").ColumnWidth = 10
+
+    ws.Columns("B:E").NumberFormat = "0%"
+    ws.Columns("F:J").NumberFormat = "0.00""%"""
+    ws.Columns("K:R").NumberFormat = "0.0"
+    ws.Columns("S").NumberFormat = "0%"
+
+End Sub
+
+Private Sub FormatChartData(ByVal ws As Worksheet)
+
+    ws.Cells.Font.Name = "Arial"
+    ws.Cells.Font.Size = 9
+
+    ws.Columns("A:Q").AutoFit
+
+    ws.Range("N3:Q3").NumberFormat = "0%"
+    ws.Range("N7:P11").NumberFormat = "0.0"
+
+End Sub
+
+Private Sub ClearSlide(ByVal ws As Worksheet)
+
+    Dim i As Long
+
+    ws.Cells.Clear
+
+    For i = ws.ChartObjects.Count To 1 Step -1
+        ws.ChartObjects(i).Delete
+    Next i
+
+    For i = ws.Shapes.Count To 1 Step -1
+        ws.Shapes(i).Delete
+    Next i
+
+End Sub
+
+Private Function FormatPercent0(ByVal v As Double) As String
+
+    FormatPercent0 = Format(v, "0%")
+
+End Function
+
+Private Function FormatBP(ByVal v As Double) As String
+
+    FormatBP = Format(v, "0.0") & " bp"
+
+End Function
+
+Private Function FormatSignedBP(ByVal v As Double) As String
+
+    If v > 0.0000001 Then
+        FormatSignedBP = "+" & Format(v, "0.0") & " bp"
+    ElseIf v < -0.0000001 Then
+        FormatSignedBP = Format(v, "0.0") & " bp"
+    Else
+        FormatSignedBP = "0.0 bp"
+    End If
+
+End Function
+
+Private Function LinearInterpolate(ByVal x As Double, ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double) As Double
+
+    If x2 = x1 Then
+        LinearInterpolate = y2
+    Else
+        LinearInterpolate = y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+    End If
+
+End Function
+
+Private Function GetSheetIfExists(ByVal sheetName As String) As Worksheet
+
+    On Error Resume Next
+    Set GetSheetIfExists = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+
+End Function
+
+Private Function GetOrCreateSheet(ByVal sheetName As String) As Worksheet
+
+    On Error Resume Next
+    Set GetOrCreateSheet = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+
+    If GetOrCreateSheet Is Nothing Then
+
+        Set GetOrCreateSheet = _
+            ThisWorkbook.Worksheets.Add( _
+                After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+
+        GetOrCreateSheet.Name = sheetName
+
+    End If
+
+End Function
