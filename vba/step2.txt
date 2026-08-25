@@ -1,0 +1,1944 @@
+Option Explicit
+
+'===============================================================================
+' ALLOCATION / RETURN / REGRET ANALYSIS | DETAILED CHART SOURCE VERSION
+'
+' REQUIRED INPUT
+'   Scenario_Daily
+'   Scenario_Assumptions
+'
+' NO CURVE SHEET REQUIRED.
+'
+' EXPECTED Scenario_Daily COLUMNS
+'   A = Date
+'   B = Scenario
+'   D = ON
+'   Q = 1M
+'   R = 3M
+'   S = 6M
+'
+' OUTPUT
+'   Allocation_Strategies       named strategies + summary statistics
+'   Allocation_Base             pure-tenor return engine (hidden)
+'   Allocation_Return_By_Date   dates in rows, strategies in columns
+'   Allocation_Regret_By_Date   dates in rows, strategies in columns
+'   Allocation_Grid             EVERY feasible allocation + exact metrics
+'   Allocation_Scenario_Summary named strategy x scenario analysis
+'   Allocation_Best_Tenor       best pure-tenor frequency by scenario
+'   Allocation_Extreme_Cases    worst realized regret dates by strategy
+'   Allocation_Charts           expanded analytical charts
+'   Allocation_Chart_Data       explicit scatter / frontier source mapping (hidden)
+'
+' RUN
+'   Build_Allocation_Analysis
+'
+' KEY DESIGN CHANGE
+'
+'   1) RETURN / REGRET BY DATE
+'
+'      Each row = one scenario + one starting date.
+'      Each strategy = one separate column.
+'
+'      This makes the calculation easy to audit:
+'
+'      Date | Best tenor | ON only | 1M only | 3M only | 6M only |
+'             Short/Liquid | Equal Ladder | Barbell | Balanced | Term Heavy
+'
+'   2) EFFICIENT FRONTIER
+'
+'      Allocation_Grid contains one row for EVERY feasible allocation.
+'
+'      Allocation ID
+'      Allocation description
+'      Exact ON / 1M / 3M / 6M weights
+'      Weighted tenor
+'      Average return
+'      Return volatility
+'      Average regret
+'      Worst regret
+'      P95 regret
+'      <=5bp hit rate
+'      Efficient frontier flag
+'
+'      Average return vs worst regret therefore plots EVERY allocation.
+'
+'   3) COST OF BEING WRONG
+'
+'      Charts use Allocation_Regret_By_Date directly.
+'      Dates are on the rows / x-axis.
+'      Each named strategy is a separate series / column.
+'
+'===============================================================================
+
+Private Const ALLOC_DEFAULT_HORIZON As Long = 180
+Private Const ALLOC_DEFAULT_STEP As Double = 0.1
+Private Const ALLOC_DEFAULT_MIN_SHORT As Double = 0.3
+Private Const ALLOC_DEFAULT_MAX_6M As Double = 0.7
+Private Const ALLOC_HIT_THRESHOLD_BP As Double = 5#
+
+Private Const STRAT_FIRST_ROW As Long = 4
+Private Const STRAT_LAST_ROW As Long = 12
+Private Const STRAT_COUNT As Long = 9
+
+'===============================================================================
+' MAIN
+'===============================================================================
+Public Sub Build_Allocation_Analysis()
+
+    Dim wb As Workbook
+    Dim horizonDays As Long
+    Dim gridStep As Double
+    Dim minShort As Double
+    Dim max6M As Double
+    Dim oldCalc As XlCalculation
+
+    Set wb = ThisWorkbook
+
+    If Not Alloc_SheetExists(wb, "Scenario_Daily") Then
+        MsgBox "Missing Scenario_Daily. Run the standalone scenario model first.", vbCritical
+        Exit Sub
+    End If
+
+    If Not Alloc_SheetExists(wb, "Scenario_Assumptions") Then
+        MsgBox "Missing Scenario_Assumptions. Run the standalone scenario model first.", vbCritical
+        Exit Sub
+    End If
+
+    On Error GoTo Fail
+
+    oldCalc = Application.Calculation
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+
+    Alloc_DeleteSheetIfExists wb, "Allocation_Strategies"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Base"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Return_By_Date"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Regret_By_Date"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Grid"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Scenario_Summary"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Best_Tenor"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Extreme_Cases"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Charts"
+    Alloc_DeleteSheetIfExists wb, "Allocation_Chart_Data"
+
+    Alloc_CreateStrategySheet wb
+
+    horizonDays = CLng(wb.Worksheets("Allocation_Strategies").Range("B17").Value2)
+    gridStep = CDbl(wb.Worksheets("Allocation_Strategies").Range("B18").Value2)
+    minShort = CDbl(wb.Worksheets("Allocation_Strategies").Range("B19").Value2)
+    max6M = CDbl(wb.Worksheets("Allocation_Strategies").Range("B20").Value2)
+
+    If horizonDays < 30 Then Err.Raise vbObjectError + 201, , "Analysis horizon must be at least 30 days."
+    If gridStep <= 0# Or gridStep > 1# Then Err.Raise vbObjectError + 202, , "Allocation step must be between 0 and 100%."
+    If minShort < 0# Or minShort > 1# Then Err.Raise vbObjectError + 203, , "Minimum ON + 1M must be between 0 and 100%."
+    If max6M < 0# Or max6M > 1# Then Err.Raise vbObjectError + 204, , "Maximum 6M must be between 0 and 100%."
+
+    Alloc_BuildBaseReturns wb, horizonDays
+    Alloc_BuildWideDateMatrices wb, horizonDays
+    Alloc_SummarizeNamedStrategies wb
+    Alloc_BuildScenarioSummary wb
+    Alloc_BuildBestTenorSummary wb
+    Alloc_BuildExtremeCases wb
+    Alloc_BuildGridAnalysis wb, horizonDays, gridStep, minShort, max6M
+    Alloc_MarkEfficientFrontier wb
+    Alloc_BuildDetailedChartSource wb
+    Alloc_BuildDetailedCharts wb
+    Alloc_FormatOutputs wb
+
+Done:
+    On Error Resume Next
+    Application.Calculation = oldCalc
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    On Error GoTo 0
+
+    MsgBox "Detailed allocation return / regret analysis created.", vbInformation
+    Exit Sub
+
+Fail:
+    MsgBox "Allocation analysis failed: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume Done
+
+End Sub
+
+'===============================================================================
+' NAMED STRATEGIES
+'===============================================================================
+Private Sub Alloc_CreateStrategySheet(ByVal wb As Workbook)
+
+    Dim ws As Worksheet
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Allocation_Strategies"
+
+    ws.Range("A1:M1").Merge
+    ws.Range("A1").Value = "CASH ALLOCATION STRATEGIES | RETURN + REGRET"
+    ws.Range("A1").Font.Bold = True
+    ws.Range("A1").Font.Size = 16
+
+    ws.Range("A3").Value = "Strategy"
+    ws.Range("B3").Value = "ON"
+    ws.Range("C3").Value = "1M"
+    ws.Range("D3").Value = "3M"
+    ws.Range("E3").Value = "6M"
+    ws.Range("F3").Value = "Weighted tenor"
+    ws.Range("G3").Value = "Avg ann return"
+    ws.Range("H3").Value = "Return vol"
+    ws.Range("I3").Value = "Avg regret bp"
+    ws.Range("J3").Value = "Worst regret bp"
+    ws.Range("K3").Value = "P95 regret bp"
+    ws.Range("L3").Value = "<=5bp hit"
+    ws.Range("M3").Value = "Description"
+
+    Alloc_SetStrategy ws, 4, "ON only", 1#, 0#, 0#, 0#, "Maximum reset flexibility."
+    Alloc_SetStrategy ws, 5, "1M only", 0#, 1#, 0#, 0#, "Monthly reset strategy."
+    Alloc_SetStrategy ws, 6, "3M only", 0#, 0#, 1#, 0#, "Quarterly lock / reset."
+    Alloc_SetStrategy ws, 7, "6M only", 0#, 0#, 0#, 1#, "Maximum six-month rate certainty."
+    Alloc_SetStrategy ws, 8, "Short / liquid", 0.5, 0.3, 0.2, 0#, "High liquidity and frequent repricing."
+    Alloc_SetStrategy ws, 9, "Equal ladder", 0.25, 0.25, 0.25, 0.25, "Diversified evenly across the curve."
+    Alloc_SetStrategy ws, 10, "Barbell", 0.3, 0#, 0#, 0.7, "Daily liquidity plus six-month anchor."
+    Alloc_SetStrategy ws, 11, "Balanced", 0#, 0.3, 0#, 0.7, "Monthly liquidity plus six-month anchor."
+    Alloc_SetStrategy ws, 12, "Term heavy", 0#, 0#, 0.3, 0.7, "3M plus six-month anchor."
+
+    ws.Range("A16").Value = "ANALYSIS SETTINGS"
+    ws.Range("A16").Font.Bold = True
+
+    ws.Range("A17").Value = "Holding period days"
+    ws.Range("B17").Value = ALLOC_DEFAULT_HORIZON
+
+    ws.Range("A18").Value = "Allocation grid step"
+    ws.Range("B18").Value = ALLOC_DEFAULT_STEP
+
+    ws.Range("A19").Value = "Minimum ON + 1M"
+    ws.Range("B19").Value = ALLOC_DEFAULT_MIN_SHORT
+
+    ws.Range("A20").Value = "Maximum 6M"
+    ws.Range("B20").Value = ALLOC_DEFAULT_MAX_6M
+
+    ws.Range("A21").Value = "Near-best threshold"
+    ws.Range("B21").Value = ALLOC_HIT_THRESHOLD_BP
+    ws.Range("C21").Value = "bp"
+
+    ws.Range("A23").Value = "REGRET"
+    ws.Range("A23").Font.Bold = True
+
+    ws.Range("A24:M25").Merge
+    ws.Range("A24").Value = "For each scenario and each daily starting date: regret = ex-post best pure-tenor annualized return minus strategy annualized return. The wide date matrices below make every observation visible."
+    ws.Range("A24").WrapText = True
+
+    ws.Range("B4:E12").NumberFormat = "0%"
+    ws.Range("F4:F12").NumberFormat = "0.0"
+    ws.Range("G4:H12").NumberFormat = "0.00%"
+    ws.Range("I4:K12").NumberFormat = "0.0"
+    ws.Range("L4:L12").NumberFormat = "0.0%"
+    ws.Range("B18:B20").NumberFormat = "0%"
+
+    ws.Range("A3:M3").Font.Bold = True
+
+End Sub
+
+Private Sub Alloc_SetStrategy(ByVal ws As Worksheet, ByVal r As Long, ByVal nm As String, ByVal wON As Double, ByVal w1 As Double, ByVal w3 As Double, ByVal w6 As Double, ByVal description As String)
+
+    ws.Cells(r, 1).Value = nm
+    ws.Cells(r, 2).Value = wON
+    ws.Cells(r, 3).Value = w1
+    ws.Cells(r, 4).Value = w3
+    ws.Cells(r, 5).Value = w6
+    ws.Cells(r, 6).Value = w1 + 3# * w3 + 6# * w6
+    ws.Cells(r, 13).Value = description
+
+End Sub
+
+'===============================================================================
+' PURE-TENOR BASE RETURN ENGINE
+'
+' One row = one scenario + one eligible daily starting date.
+'
+' This is the common calculation source for every strategy and every allocation.
+'===============================================================================
+Private Sub Alloc_BuildBaseReturns(ByVal wb As Workbook, ByVal horizonDays As Long)
+
+    Dim src As Worksheet
+    Dim ws As Worksheet
+    Dim assumptions As Worksheet
+
+    Dim scenarioHorizon As Long
+    Dim s As Long
+    Dim d As Long
+    Dim firstRow As Long
+    Dim startRow As Long
+    Dim outRow As Long
+    Dim maxStartDay As Long
+
+    Dim retON As Double
+    Dim ret1 As Double
+    Dim ret3 As Double
+    Dim ret6 As Double
+
+    Dim annON As Double
+    Dim ann1 As Double
+    Dim ann3 As Double
+    Dim ann6 As Double
+
+    Dim bestAnn As Double
+    Dim bestTenor As String
+
+    Set src = wb.Worksheets("Scenario_Daily")
+    Set assumptions = wb.Worksheets("Scenario_Assumptions")
+
+    scenarioHorizon = CLng(assumptions.Range("B8").Value2)
+
+    If horizonDays > scenarioHorizon Then
+        Err.Raise vbObjectError + 210, , "Holding period exceeds scenario horizon."
+    End If
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Allocation_Base"
+
+    ws.Range("A1:M1").Value = Array("Scenario", "Start date", "End date", "ON HP return", "1M HP return", "3M HP return", "6M HP return", "ON ann", "1M ann", "3M ann", "6M ann", "Best ann", "Best tenor")
+    ws.Range("A1:M1").Font.Bold = True
+
+    outRow = 2
+    maxStartDay = scenarioHorizon - horizonDays
+
+    For s = 1 To 5
+
+        firstRow = 2 + (s - 1) * (scenarioHorizon + 1)
+
+        For d = 0 To maxStartDay
+
+            startRow = firstRow + d
+
+            retON = Alloc_SleeveHoldingReturn(src, startRow, horizonDays, 1, 4)
+            ret1 = Alloc_SleeveHoldingReturn(src, startRow, horizonDays, 30, 17)
+            ret3 = Alloc_SleeveHoldingReturn(src, startRow, horizonDays, 90, 18)
+            ret6 = Alloc_SleeveHoldingReturn(src, startRow, horizonDays, 180, 19)
+
+            annON = Alloc_Annualize(retON, horizonDays)
+            ann1 = Alloc_Annualize(ret1, horizonDays)
+            ann3 = Alloc_Annualize(ret3, horizonDays)
+            ann6 = Alloc_Annualize(ret6, horizonDays)
+
+            bestAnn = annON
+            bestTenor = "ON"
+
+            If ann1 > bestAnn Then
+                bestAnn = ann1
+                bestTenor = "1M"
+            End If
+
+            If ann3 > bestAnn Then
+                bestAnn = ann3
+                bestTenor = "3M"
+            End If
+
+            If ann6 > bestAnn Then
+                bestAnn = ann6
+                bestTenor = "6M"
+            End If
+
+            ws.Cells(outRow, 1).Value = src.Cells(startRow, 2).Value
+            ws.Cells(outRow, 2).Value = src.Cells(startRow, 1).Value2
+            ws.Cells(outRow, 3).Value = src.Cells(startRow + horizonDays, 1).Value2
+
+            ws.Cells(outRow, 4).Value = retON
+            ws.Cells(outRow, 5).Value = ret1
+            ws.Cells(outRow, 6).Value = ret3
+            ws.Cells(outRow, 7).Value = ret6
+
+            ws.Cells(outRow, 8).Value = annON
+            ws.Cells(outRow, 9).Value = ann1
+            ws.Cells(outRow, 10).Value = ann3
+            ws.Cells(outRow, 11).Value = ann6
+
+            ws.Cells(outRow, 12).Value = bestAnn
+            ws.Cells(outRow, 13).Value = bestTenor
+
+            outRow = outRow + 1
+
+        Next d
+
+    Next s
+
+    ws.Columns("B:C").NumberFormat = "dd-mmm-yyyy"
+    ws.Columns("D:L").NumberFormat = "0.000%"
+
+End Sub
+
+'===============================================================================
+' SLEEVE HOLDING-PERIOD RETURN
+'
+' ON  : resets each day
+' 1M  : trades at day 0, 30, 60, 90, 120, 150
+' 3M  : trades at day 0 and 90
+' 6M  : one trade at day 0
+'
+' The prevailing tenor rate on each reset date is locked until the next reset.
+'===============================================================================
+Private Function Alloc_SleeveHoldingReturn(ByVal ws As Worksheet, ByVal startRow As Long, ByVal holdingDays As Long, ByVal resetDays As Long, ByVal rateCol As Long) As Double
+
+    Dim wealth As Double
+    Dim elapsed As Long
+    Dim daysThis As Long
+    Dim lockedRate As Double
+
+    wealth = 1#
+    elapsed = 0
+
+    Do While elapsed < holdingDays
+
+        daysThis = resetDays
+
+        If elapsed + daysThis > holdingDays Then
+            daysThis = holdingDays - elapsed
+        End If
+
+        lockedRate = CDbl(ws.Cells(startRow + elapsed, rateCol).Value2)
+
+        wealth = wealth * (1# + lockedRate * daysThis / 360#)
+
+        elapsed = elapsed + daysThis
+
+    Loop
+
+    Alloc_SleeveHoldingReturn = wealth - 1#
+
+End Function
+
+Private Function Alloc_Annualize(ByVal holdingReturn As Double, ByVal holdingDays As Long) As Double
+
+    If holdingDays <= 0 Then
+        Alloc_Annualize = 0#
+        Exit Function
+    End If
+
+    If 1# + holdingReturn <= 0# Then
+        Alloc_Annualize = -1#
+        Exit Function
+    End If
+
+    Alloc_Annualize = (1# + holdingReturn) ^ (360# / CDbl(holdingDays)) - 1#
+
+End Function
+
+'===============================================================================
+' WIDE DATE MATRICES
+'
+' THIS IS THE MAIN AUDIT / CHART SOURCE REQUESTED.
+'
+' ROWS:
+'   Scenario + Start Date
+'
+' COLUMNS:
+'   Every named strategy
+'
+' Return sheet:
+'   annualized return
+'
+' Regret sheet:
+'   best pure-tenor annualized return - strategy annualized return, in bp
+'===============================================================================
+Private Sub Alloc_BuildWideDateMatrices(ByVal wb As Workbook, ByVal horizonDays As Long)
+
+    Dim base As Worksheet
+    Dim strat As Worksheet
+    Dim retWS As Worksheet
+    Dim regWS As Worksheet
+
+    Dim baseLast As Long
+    Dim r As Long
+    Dim sr As Long
+    Dim outCol As Long
+
+    Dim wON As Double
+    Dim w1 As Double
+    Dim w3 As Double
+    Dim w6 As Double
+
+    Dim hpRet As Double
+    Dim annRet As Double
+    Dim bestAnn As Double
+    Dim regret As Double
+
+    Set base = wb.Worksheets("Allocation_Base")
+    Set strat = wb.Worksheets("Allocation_Strategies")
+
+    Set retWS = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    retWS.Name = "Allocation_Return_By_Date"
+
+    Set regWS = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    regWS.Name = "Allocation_Regret_By_Date"
+
+    ' Common descriptive columns
+    retWS.Range("A1:E1").Value = Array("Scenario", "Start date", "End date", "Best tenor", "Best pure-tenor ann return")
+    regWS.Range("A1:E1").Value = Array("Scenario", "Start date", "End date", "Best tenor", "Best pure-tenor ann return")
+
+    ' One strategy per column
+    outCol = 6
+
+    For sr = STRAT_FIRST_ROW To STRAT_LAST_ROW
+
+        retWS.Cells(1, outCol).Value = strat.Cells(sr, 1).Value
+        regWS.Cells(1, outCol).Value = strat.Cells(sr, 1).Value
+
+        outCol = outCol + 1
+
+    Next sr
+
+    baseLast = base.Cells(base.Rows.Count, 1).End(xlUp).Row
+
+    For r = 2 To baseLast
+
+        retWS.Cells(r, 1).Value = base.Cells(r, 1).Value
+        retWS.Cells(r, 2).Value = base.Cells(r, 2).Value
+        retWS.Cells(r, 3).Value = base.Cells(r, 3).Value
+        retWS.Cells(r, 4).Value = base.Cells(r, 13).Value
+        retWS.Cells(r, 5).Value = base.Cells(r, 12).Value
+
+        regWS.Cells(r, 1).Value = base.Cells(r, 1).Value
+        regWS.Cells(r, 2).Value = base.Cells(r, 2).Value
+        regWS.Cells(r, 3).Value = base.Cells(r, 3).Value
+        regWS.Cells(r, 4).Value = base.Cells(r, 13).Value
+        regWS.Cells(r, 5).Value = base.Cells(r, 12).Value
+
+        bestAnn = CDbl(base.Cells(r, 12).Value2)
+
+        outCol = 6
+
+        For sr = STRAT_FIRST_ROW To STRAT_LAST_ROW
+
+            wON = CDbl(strat.Cells(sr, 2).Value2)
+            w1 = CDbl(strat.Cells(sr, 3).Value2)
+            w3 = CDbl(strat.Cells(sr, 4).Value2)
+            w6 = CDbl(strat.Cells(sr, 5).Value2)
+
+            Alloc_ValidateWeights wON, w1, w3, w6, CStr(strat.Cells(sr, 1).Value)
+
+            hpRet = wON * CDbl(base.Cells(r, 4).Value2)
+            hpRet = hpRet + w1 * CDbl(base.Cells(r, 5).Value2)
+            hpRet = hpRet + w3 * CDbl(base.Cells(r, 6).Value2)
+            hpRet = hpRet + w6 * CDbl(base.Cells(r, 7).Value2)
+
+            annRet = Alloc_Annualize(hpRet, horizonDays)
+            regret = (bestAnn - annRet) * 10000#
+
+            If regret < 0# And Abs(regret) < 0.000001 Then regret = 0#
+
+            retWS.Cells(r, outCol).Value = annRet
+            regWS.Cells(r, outCol).Value = regret
+
+            outCol = outCol + 1
+
+        Next sr
+
+    Next r
+
+    retWS.Range("A1:N1").Font.Bold = True
+    regWS.Range("A1:N1").Font.Bold = True
+
+    retWS.Columns("B:C").NumberFormat = "dd-mmm-yyyy"
+    regWS.Columns("B:C").NumberFormat = "dd-mmm-yyyy"
+
+    retWS.Range("E2:N" & baseLast).NumberFormat = "0.000%"
+    regWS.Range("E2:E" & baseLast).NumberFormat = "0.000%"
+    regWS.Range("F2:N" & baseLast).NumberFormat = "0.0"
+
+    ' Visual audit: low regret green, high regret red.
+    With regWS.Range("F2:N" & baseLast)
+        .FormatConditions.Delete
+        .FormatConditions.AddColorScale ColorScaleType:=3
+    End With
+
+End Sub
+
+'===============================================================================
+' NAMED STRATEGY SUMMARY
+'
+' Summary values are calculated directly from the visible date-by-date matrices.
+'===============================================================================
+Private Sub Alloc_SummarizeNamedStrategies(ByVal wb As Workbook)
+
+    Dim strat As Worksheet
+    Dim retWS As Worksheet
+    Dim regWS As Worksheet
+
+    Dim lastRow As Long
+    Dim sr As Long
+    Dim dataCol As Long
+
+    Dim avgRet As Double
+    Dim volRet As Double
+    Dim avgReg As Double
+    Dim worstReg As Double
+    Dim p95Reg As Double
+    Dim hitRate As Double
+
+    Set strat = wb.Worksheets("Allocation_Strategies")
+    Set retWS = wb.Worksheets("Allocation_Return_By_Date")
+    Set regWS = wb.Worksheets("Allocation_Regret_By_Date")
+
+    lastRow = retWS.Cells(retWS.Rows.Count, 1).End(xlUp).Row
+
+    dataCol = 6
+
+    For sr = STRAT_FIRST_ROW To STRAT_LAST_ROW
+
+        avgRet = Application.WorksheetFunction.Average(retWS.Range(retWS.Cells(2, dataCol), retWS.Cells(lastRow, dataCol)))
+        volRet = Application.WorksheetFunction.StDev_P(retWS.Range(retWS.Cells(2, dataCol), retWS.Cells(lastRow, dataCol)))
+        avgReg = Application.WorksheetFunction.Average(regWS.Range(regWS.Cells(2, dataCol), regWS.Cells(lastRow, dataCol)))
+        worstReg = Application.WorksheetFunction.Max(regWS.Range(regWS.Cells(2, dataCol), regWS.Cells(lastRow, dataCol)))
+        p95Reg = Alloc_RangePercentile(regWS.Range(regWS.Cells(2, dataCol), regWS.Cells(lastRow, dataCol)), 0.95)
+        hitRate = Application.WorksheetFunction.CountIf(regWS.Range(regWS.Cells(2, dataCol), regWS.Cells(lastRow, dataCol)), "<=" & ALLOC_HIT_THRESHOLD_BP) / CDbl(lastRow - 1)
+
+        strat.Cells(sr, 7).Value = avgRet
+        strat.Cells(sr, 8).Value = volRet
+        strat.Cells(sr, 9).Value = avgReg
+        strat.Cells(sr, 10).Value = worstReg
+        strat.Cells(sr, 11).Value = p95Reg
+        strat.Cells(sr, 12).Value = hitRate
+
+        dataCol = dataCol + 1
+
+    Next sr
+
+End Sub
+
+
+'===============================================================================
+' SCENARIO SUMMARY
+'
+' One row = one named strategy in one scenario.
+'
+' This table is intentionally visible and is the direct source for:
+'   - Average return by scenario
+'   - Average regret by scenario
+'   - Near-best hit rate by scenario
+'   - Scenario P95 / worst regret analysis
+'===============================================================================
+Private Sub Alloc_BuildScenarioSummary(ByVal wb As Workbook)
+
+    Dim strat As Worksheet
+    Dim retWS As Worksheet
+    Dim regWS As Worksheet
+    Dim ws As Worksheet
+
+    Dim lastRow As Long
+    Dim sr As Long
+    Dim s As Long
+    Dim r As Long
+    Dim outRow As Long
+    Dim dataCol As Long
+
+    Dim scenarioName As String
+    Dim n As Long
+    Dim sumRet As Double
+    Dim sumRetSq As Double
+    Dim sumReg As Double
+    Dim worstReg As Double
+    Dim hitN As Long
+    Dim retValue As Double
+    Dim regValue As Double
+    Dim avgRet As Double
+    Dim volRet As Double
+    Dim avgReg As Double
+    Dim p95Reg As Double
+
+    Dim tempRegrets() As Double
+
+    Set strat = wb.Worksheets("Allocation_Strategies")
+    Set retWS = wb.Worksheets("Allocation_Return_By_Date")
+    Set regWS = wb.Worksheets("Allocation_Regret_By_Date")
+
+    lastRow = retWS.Cells(retWS.Rows.Count, 1).End(xlUp).Row
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Allocation_Scenario_Summary"
+
+    ws.Range("A1:P1").Value = Array( _
+        "Scenario", _
+        "Strategy", _
+        "ON", _
+        "1M", _
+        "3M", _
+        "6M", _
+        "Weighted tenor", _
+        "Observations", _
+        "Avg ann return", _
+        "Return vol", _
+        "Avg regret bp", _
+        "P95 regret bp", _
+        "Worst regret bp", _
+        "<=5bp hit", _
+        "Return rank", _
+        "Regret rank")
+
+    ws.Range("A1:P1").Font.Bold = True
+
+    outRow = 2
+
+    For s = 1 To 5
+
+        scenarioName = Alloc_ScenarioName(s)
+
+        For sr = STRAT_FIRST_ROW To STRAT_LAST_ROW
+
+            dataCol = 6 + (sr - STRAT_FIRST_ROW)
+
+            n = 0
+            sumRet = 0#
+            sumRetSq = 0#
+            sumReg = 0#
+            worstReg = 0#
+            hitN = 0
+
+            ReDim tempRegrets(1 To lastRow - 1)
+
+            For r = 2 To lastRow
+
+                If CStr(retWS.Cells(r, 1).Value) = scenarioName Then
+
+                    n = n + 1
+
+                    retValue = CDbl(retWS.Cells(r, dataCol).Value2)
+                    regValue = CDbl(regWS.Cells(r, dataCol).Value2)
+
+                    sumRet = sumRet + retValue
+                    sumRetSq = sumRetSq + retValue * retValue
+                    sumReg = sumReg + regValue
+
+                    If regValue > worstReg Then worstReg = regValue
+                    If regValue <= ALLOC_HIT_THRESHOLD_BP Then hitN = hitN + 1
+
+                    tempRegrets(n) = regValue
+
+                End If
+
+            Next r
+
+            If n > 0 Then
+
+                avgRet = sumRet / n
+                volRet = Sqr(Application.WorksheetFunction.Max(0#, sumRetSq / n - avgRet * avgRet))
+                avgReg = sumReg / n
+                p95Reg = Alloc_Percentile(tempRegrets, n, 0.95)
+
+            Else
+
+                avgRet = 0#
+                volRet = 0#
+                avgReg = 0#
+                p95Reg = 0#
+
+            End If
+
+            ws.Cells(outRow, 1).Value = scenarioName
+            ws.Cells(outRow, 2).Value = strat.Cells(sr, 1).Value
+
+            ws.Cells(outRow, 3).Value = strat.Cells(sr, 2).Value
+            ws.Cells(outRow, 4).Value = strat.Cells(sr, 3).Value
+            ws.Cells(outRow, 5).Value = strat.Cells(sr, 4).Value
+            ws.Cells(outRow, 6).Value = strat.Cells(sr, 5).Value
+            ws.Cells(outRow, 7).Value = strat.Cells(sr, 6).Value
+
+            ws.Cells(outRow, 8).Value = n
+            ws.Cells(outRow, 9).Value = avgRet
+            ws.Cells(outRow, 10).Value = volRet
+            ws.Cells(outRow, 11).Value = avgReg
+            ws.Cells(outRow, 12).Value = p95Reg
+            ws.Cells(outRow, 13).Value = worstReg
+
+            If n > 0 Then
+                ws.Cells(outRow, 14).Value = hitN / CDbl(n)
+            Else
+                ws.Cells(outRow, 14).Value = 0#
+            End If
+
+            outRow = outRow + 1
+
+        Next sr
+
+    Next s
+
+    ' Rank strategies inside each 9-row scenario block.
+    Dim blockStart As Long
+    Dim blockEnd As Long
+    Dim rr As Long
+
+    For s = 1 To 5
+
+        blockStart = 2 + (s - 1) * STRAT_COUNT
+        blockEnd = blockStart + STRAT_COUNT - 1
+
+        For rr = blockStart To blockEnd
+
+            ws.Cells(rr, 15).Formula = "=RANK.EQ(I" & rr & ",$I$" & blockStart & ":$I$" & blockEnd & ",0)"
+            ws.Cells(rr, 16).Formula = "=RANK.EQ(K" & rr & ",$K$" & blockStart & ":$K$" & blockEnd & ",1)"
+
+        Next rr
+
+    Next s
+
+    ws.Range("C2:F" & outRow - 1).NumberFormat = "0%"
+    ws.Range("G2:G" & outRow - 1).NumberFormat = "0.0"
+    ws.Range("I2:J" & outRow - 1).NumberFormat = "0.00%"
+    ws.Range("K2:M" & outRow - 1).NumberFormat = "0.0"
+    ws.Range("N2:N" & outRow - 1).NumberFormat = "0.0%"
+    ws.Range("O2:P" & outRow - 1).NumberFormat = "0"
+
+End Sub
+
+'===============================================================================
+' BEST PURE-TENOR FREQUENCY
+'
+' Shows which pure tenor wins ex-post for each daily starting date.
+'
+' Source:
+'   Allocation_Return_By_Date column D = Best tenor
+'
+' This analysis is useful because it demonstrates whether one tenor dominates
+' or whether the winning tenor changes materially with the path and start date.
+'===============================================================================
+Private Sub Alloc_BuildBestTenorSummary(ByVal wb As Workbook)
+
+    Dim src As Worksheet
+    Dim ws As Worksheet
+
+    Dim lastRow As Long
+    Dim s As Long
+    Dim r As Long
+    Dim outRow As Long
+
+    Dim scenarioName As String
+    Dim totalN As Long
+    Dim onN As Long
+    Dim m1N As Long
+    Dim m3N As Long
+    Dim m6N As Long
+    Dim bestTenor As String
+
+    Set src = wb.Worksheets("Allocation_Return_By_Date")
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Allocation_Best_Tenor"
+
+    ws.Range("A1:J1").Value = Array( _
+        "Scenario", _
+        "Observations", _
+        "ON wins", _
+        "1M wins", _
+        "3M wins", _
+        "6M wins", _
+        "ON win %", _
+        "1M win %", _
+        "3M win %", _
+        "6M win %")
+
+    ws.Range("A1:J1").Font.Bold = True
+
+    lastRow = src.Cells(src.Rows.Count, 1).End(xlUp).Row
+    outRow = 2
+
+    For s = 1 To 5
+
+        scenarioName = Alloc_ScenarioName(s)
+
+        totalN = 0
+        onN = 0
+        m1N = 0
+        m3N = 0
+        m6N = 0
+
+        For r = 2 To lastRow
+
+            If CStr(src.Cells(r, 1).Value) = scenarioName Then
+
+                totalN = totalN + 1
+                bestTenor = CStr(src.Cells(r, 4).Value)
+
+                Select Case bestTenor
+                    Case "ON"
+                        onN = onN + 1
+                    Case "1M"
+                        m1N = m1N + 1
+                    Case "3M"
+                        m3N = m3N + 1
+                    Case "6M"
+                        m6N = m6N + 1
+                End Select
+
+            End If
+
+        Next r
+
+        ws.Cells(outRow, 1).Value = scenarioName
+        ws.Cells(outRow, 2).Value = totalN
+        ws.Cells(outRow, 3).Value = onN
+        ws.Cells(outRow, 4).Value = m1N
+        ws.Cells(outRow, 5).Value = m3N
+        ws.Cells(outRow, 6).Value = m6N
+
+        If totalN > 0 Then
+            ws.Cells(outRow, 7).Value = onN / CDbl(totalN)
+            ws.Cells(outRow, 8).Value = m1N / CDbl(totalN)
+            ws.Cells(outRow, 9).Value = m3N / CDbl(totalN)
+            ws.Cells(outRow, 10).Value = m6N / CDbl(totalN)
+        End If
+
+        outRow = outRow + 1
+
+    Next s
+
+    ' Overall row
+    ws.Cells(outRow, 1).Value = "All scenarios"
+    ws.Cells(outRow, 2).Formula = "=SUM(B2:B6)"
+    ws.Cells(outRow, 3).Formula = "=SUM(C2:C6)"
+    ws.Cells(outRow, 4).Formula = "=SUM(D2:D6)"
+    ws.Cells(outRow, 5).Formula = "=SUM(E2:E6)"
+    ws.Cells(outRow, 6).Formula = "=SUM(F2:F6)"
+    ws.Cells(outRow, 7).Formula = "=C" & outRow & "/B" & outRow
+    ws.Cells(outRow, 8).Formula = "=D" & outRow & "/B" & outRow
+    ws.Cells(outRow, 9).Formula = "=E" & outRow & "/B" & outRow
+    ws.Cells(outRow, 10).Formula = "=F" & outRow & "/B" & outRow
+
+    ws.Range("G2:J" & outRow).NumberFormat = "0.0%"
+
+End Sub
+
+'===============================================================================
+' EXTREME REGRET CASES
+'
+' Lists the 10 largest regret observations for each named strategy.
+'
+' This is the transaction-style audit requested:
+'   strategy | scenario | start date | end date | return | best tenor | regret
+'
+' It makes the "cost of being wrong" tangible by showing the exact dates/paths
+' that generate each strategy's largest opportunity cost.
+'===============================================================================
+Private Sub Alloc_BuildExtremeCases(ByVal wb As Workbook)
+
+    Dim retWS As Worksheet
+    Dim regWS As Worksheet
+    Dim strat As Worksheet
+    Dim ws As Worksheet
+
+    Dim lastRow As Long
+    Dim sr As Long
+    Dim dataCol As Long
+    Dim rankNo As Long
+    Dim r As Long
+    Dim bestRow As Long
+    Dim outRow As Long
+
+    Dim used() As Boolean
+    Dim maxReg As Double
+    Dim thisReg As Double
+
+    Set retWS = wb.Worksheets("Allocation_Return_By_Date")
+    Set regWS = wb.Worksheets("Allocation_Regret_By_Date")
+    Set strat = wb.Worksheets("Allocation_Strategies")
+
+    lastRow = retWS.Cells(retWS.Rows.Count, 1).End(xlUp).Row
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Allocation_Extreme_Cases"
+
+    ws.Range("A1:J1").Value = Array( _
+        "Strategy", _
+        "Rank", _
+        "Scenario", _
+        "Start date", _
+        "End date", _
+        "Strategy ann return", _
+        "Best tenor", _
+        "Best pure-tenor ann", _
+        "Regret bp", _
+        "Interpretation")
+
+    ws.Range("A1:J1").Font.Bold = True
+
+    outRow = 2
+
+    For sr = STRAT_FIRST_ROW To STRAT_LAST_ROW
+
+        dataCol = 6 + (sr - STRAT_FIRST_ROW)
+        ReDim used(2 To lastRow)
+
+        For rankNo = 1 To 10
+
+            maxReg = -1#
+            bestRow = 0
+
+            For r = 2 To lastRow
+
+                If Not used(r) Then
+
+                    thisReg = CDbl(regWS.Cells(r, dataCol).Value2)
+
+                    If thisReg > maxReg Then
+                        maxReg = thisReg
+                        bestRow = r
+                    End If
+
+                End If
+
+            Next r
+
+            If bestRow > 0 Then
+
+                used(bestRow) = True
+
+                ws.Cells(outRow, 1).Value = strat.Cells(sr, 1).Value
+                ws.Cells(outRow, 2).Value = rankNo
+                ws.Cells(outRow, 3).Value = retWS.Cells(bestRow, 1).Value
+                ws.Cells(outRow, 4).Value = retWS.Cells(bestRow, 2).Value
+                ws.Cells(outRow, 5).Value = retWS.Cells(bestRow, 3).Value
+                ws.Cells(outRow, 6).Value = retWS.Cells(bestRow, dataCol).Value
+                ws.Cells(outRow, 7).Value = retWS.Cells(bestRow, 4).Value
+                ws.Cells(outRow, 8).Value = retWS.Cells(bestRow, 5).Value
+                ws.Cells(outRow, 9).Value = maxReg
+                ws.Cells(outRow, 10).Value = "Missed best tenor = " & CStr(retWS.Cells(bestRow, 4).Value)
+
+                outRow = outRow + 1
+
+            End If
+
+        Next rankNo
+
+    Next sr
+
+    ws.Columns("D:E").NumberFormat = "dd-mmm-yyyy"
+    ws.Columns("F:H").NumberFormat = "0.000%"
+    ws.Columns("I").NumberFormat = "0.0"
+
+End Sub
+
+Private Function Alloc_ScenarioName(ByVal scen As Long) As String
+
+    Select Case scen
+        Case 1
+            Alloc_ScenarioName = "Gradual normalization"
+        Case 2
+            Alloc_ScenarioName = "Higher for longer"
+        Case 3
+            Alloc_ScenarioName = "Renewed inflation"
+        Case 4
+            Alloc_ScenarioName = "Faster normalization"
+        Case 5
+            Alloc_ScenarioName = "Recession / rapid cuts"
+        Case Else
+            Alloc_ScenarioName = "Unknown"
+    End Select
+
+End Function
+
+
+'===============================================================================
+' FULL FEASIBLE ALLOCATION GRID
+'
+' EVERY ALLOCATION GETS ITS OWN ROW.
+'
+' This sheet is the direct source for the return-vs-regret scatter.
+'===============================================================================
+Private Sub Alloc_BuildGridAnalysis(ByVal wb As Workbook, ByVal horizonDays As Long, ByVal stepSize As Double, ByVal minShort As Double, ByVal max6M As Double)
+
+    Dim base As Worksheet
+    Dim ws As Worksheet
+
+    Dim baseLast As Long
+    Dim nSteps As Long
+
+    Dim iON As Long
+    Dim i1 As Long
+    Dim i3 As Long
+    Dim i6 As Long
+
+    Dim wON As Double
+    Dim w1 As Double
+    Dim w3 As Double
+    Dim w6 As Double
+
+    Dim r As Long
+    Dim outRow As Long
+    Dim allocID As Long
+
+    Dim hpRet As Double
+    Dim annRet As Double
+    Dim bestAnn As Double
+    Dim regret As Double
+
+    Dim sumRet As Double
+    Dim sumRetSq As Double
+    Dim sumReg As Double
+    Dim worstReg As Double
+    Dim hitN As Long
+    Dim nObs As Long
+
+    Dim regrets() As Double
+
+    Dim avgRet As Double
+    Dim volRet As Double
+    Dim avgReg As Double
+    Dim p95Reg As Double
+
+    Set base = wb.Worksheets("Allocation_Base")
+
+    baseLast = base.Cells(base.Rows.Count, 1).End(xlUp).Row
+    nObs = baseLast - 1
+
+    ReDim regrets(1 To nObs)
+
+    nSteps = CLng(Round(1# / stepSize, 0))
+
+    If Abs(nSteps * stepSize - 1#) > 0.000001 Then
+        Err.Raise vbObjectError + 220, , "Allocation step must divide 100% exactly. Example: 10%, 5%, 20%."
+    End If
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Allocation_Grid"
+
+    ws.Range("A1:N1").Value = Array("Allocation ID", "Allocation", "ON", "1M", "3M", "6M", "Weighted tenor", "Avg ann return", "Return vol", "Avg regret bp", "Worst regret bp", "P95 regret bp", "<=5bp hit", "Efficient")
+    ws.Range("A1:N1").Font.Bold = True
+
+    outRow = 2
+    allocID = 1
+
+    For iON = 0 To nSteps
+
+        For i1 = 0 To nSteps - iON
+
+            For i3 = 0 To nSteps - iON - i1
+
+                i6 = nSteps - iON - i1 - i3
+
+                wON = iON * stepSize
+                w1 = i1 * stepSize
+                w3 = i3 * stepSize
+                w6 = i6 * stepSize
+
+                If wON + w1 + 0.0000001 >= minShort And w6 <= max6M + 0.0000001 Then
+
+                    sumRet = 0#
+                    sumRetSq = 0#
+                    sumReg = 0#
+                    worstReg = 0#
+                    hitN = 0
+
+                    For r = 2 To baseLast
+
+                        hpRet = wON * CDbl(base.Cells(r, 4).Value2)
+                        hpRet = hpRet + w1 * CDbl(base.Cells(r, 5).Value2)
+                        hpRet = hpRet + w3 * CDbl(base.Cells(r, 6).Value2)
+                        hpRet = hpRet + w6 * CDbl(base.Cells(r, 7).Value2)
+
+                        annRet = Alloc_Annualize(hpRet, horizonDays)
+                        bestAnn = CDbl(base.Cells(r, 12).Value2)
+                        regret = (bestAnn - annRet) * 10000#
+
+                        If regret < 0# And Abs(regret) < 0.000001 Then regret = 0#
+
+                        sumRet = sumRet + annRet
+                        sumRetSq = sumRetSq + annRet * annRet
+                        sumReg = sumReg + regret
+
+                        If regret > worstReg Then worstReg = regret
+                        If regret <= ALLOC_HIT_THRESHOLD_BP Then hitN = hitN + 1
+
+                        regrets(r - 1) = regret
+
+                    Next r
+
+                    avgRet = sumRet / nObs
+                    volRet = Sqr(Application.WorksheetFunction.Max(0#, sumRetSq / nObs - avgRet * avgRet))
+                    avgReg = sumReg / nObs
+                    p95Reg = Alloc_Percentile(regrets, nObs, 0.95)
+
+                    ws.Cells(outRow, 1).Value = "A" & Format(allocID, "000")
+                    ws.Cells(outRow, 2).Value = Alloc_AllocationLabel(wON, w1, w3, w6)
+
+                    ws.Cells(outRow, 3).Value = wON
+                    ws.Cells(outRow, 4).Value = w1
+                    ws.Cells(outRow, 5).Value = w3
+                    ws.Cells(outRow, 6).Value = w6
+
+                    ws.Cells(outRow, 7).Value = w1 + 3# * w3 + 6# * w6
+                    ws.Cells(outRow, 8).Value = avgRet
+                    ws.Cells(outRow, 9).Value = volRet
+                    ws.Cells(outRow, 10).Value = avgReg
+                    ws.Cells(outRow, 11).Value = worstReg
+                    ws.Cells(outRow, 12).Value = p95Reg
+                    ws.Cells(outRow, 13).Value = hitN / CDbl(nObs)
+                    ws.Cells(outRow, 14).Value = ""
+
+                    outRow = outRow + 1
+                    allocID = allocID + 1
+
+                End If
+
+            Next i3
+
+        Next i1
+
+    Next iON
+
+    ws.Range("C2:F" & outRow - 1).NumberFormat = "0%"
+    ws.Range("G2:G" & outRow - 1).NumberFormat = "0.0"
+    ws.Range("H2:I" & outRow - 1).NumberFormat = "0.00%"
+    ws.Range("J2:L" & outRow - 1).NumberFormat = "0.0"
+    ws.Range("M2:M" & outRow - 1).NumberFormat = "0.0%"
+
+End Sub
+
+Private Function Alloc_AllocationLabel(ByVal wON As Double, ByVal w1 As Double, ByVal w3 As Double, ByVal w6 As Double) As String
+
+    Alloc_AllocationLabel = "ON " & Format(wON, "0%") & " | 1M " & Format(w1, "0%") & " | 3M " & Format(w3, "0%") & " | 6M " & Format(w6, "0%")
+
+End Function
+
+'===============================================================================
+' RETURN / WORST-REGRET EFFICIENT FRONTIER
+'
+' A point is efficient when no other feasible allocation has BOTH:
+'   higher/equal average return
+'   lower/equal worst regret
+'
+' with at least one strict improvement.
+'===============================================================================
+Private Sub Alloc_MarkEfficientFrontier(ByVal wb As Workbook)
+
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim i As Long
+    Dim j As Long
+
+    Dim retI As Double
+    Dim regI As Double
+    Dim retJ As Double
+    Dim regJ As Double
+
+    Dim dominated As Boolean
+
+    Set ws = wb.Worksheets("Allocation_Grid")
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+
+    For i = 2 To lastRow
+
+        retI = CDbl(ws.Cells(i, 8).Value2)
+        regI = CDbl(ws.Cells(i, 11).Value2)
+
+        dominated = False
+
+        For j = 2 To lastRow
+
+            If j <> i Then
+
+                retJ = CDbl(ws.Cells(j, 8).Value2)
+                regJ = CDbl(ws.Cells(j, 11).Value2)
+
+                If retJ >= retI - 0.0000000001 And regJ <= regI + 0.0000000001 Then
+
+                    If retJ > retI + 0.0000000001 Or regJ < regI - 0.0000000001 Then
+                        dominated = True
+                        Exit For
+                    End If
+
+                End If
+
+            End If
+
+        Next j
+
+        If dominated Then
+            ws.Cells(i, 14).Value = "No"
+        Else
+            ws.Cells(i, 14).Value = "Yes"
+        End If
+
+    Next i
+
+End Sub
+
+'===============================================================================
+' EXPLICIT CHART SOURCE
+'
+' This sheet makes the scatter source completely transparent.
+'
+' LEFT:
+'   EVERY feasible allocation
+'
+' RIGHT:
+'   efficient-frontier allocations only, including full weight description
+'===============================================================================
+Private Sub Alloc_BuildDetailedChartSource(ByVal wb As Workbook)
+
+    Dim grid As Worksheet
+    Dim data As Worksheet
+
+    Dim lastRow As Long
+    Dim r As Long
+    Dim fRow As Long
+
+    Set grid = wb.Worksheets("Allocation_Grid")
+
+    Set data = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    data.Name = "Allocation_Chart_Data"
+
+    data.Range("A1:H1").Value = Array("Allocation ID", "Allocation", "ON", "1M", "3M", "6M", "Worst regret bp", "Avg ann return")
+    data.Range("J1:Q1").Value = Array("Frontier ID", "Frontier allocation", "ON", "1M", "3M", "6M", "Worst regret bp", "Avg ann return")
+
+    lastRow = grid.Cells(grid.Rows.Count, 1).End(xlUp).Row
+    fRow = 2
+
+    For r = 2 To lastRow
+
+        data.Cells(r, 1).Value = grid.Cells(r, 1).Value
+        data.Cells(r, 2).Value = grid.Cells(r, 2).Value
+        data.Cells(r, 3).Value = grid.Cells(r, 3).Value
+        data.Cells(r, 4).Value = grid.Cells(r, 4).Value
+        data.Cells(r, 5).Value = grid.Cells(r, 5).Value
+        data.Cells(r, 6).Value = grid.Cells(r, 6).Value
+        data.Cells(r, 7).Value = grid.Cells(r, 11).Value
+        data.Cells(r, 8).Value = grid.Cells(r, 8).Value
+
+        If CStr(grid.Cells(r, 14).Value) = "Yes" Then
+
+            data.Cells(fRow, 10).Value = grid.Cells(r, 1).Value
+            data.Cells(fRow, 11).Value = grid.Cells(r, 2).Value
+            data.Cells(fRow, 12).Value = grid.Cells(r, 3).Value
+            data.Cells(fRow, 13).Value = grid.Cells(r, 4).Value
+            data.Cells(fRow, 14).Value = grid.Cells(r, 5).Value
+            data.Cells(fRow, 15).Value = grid.Cells(r, 6).Value
+            data.Cells(fRow, 16).Value = grid.Cells(r, 11).Value
+            data.Cells(fRow, 17).Value = grid.Cells(r, 8).Value
+
+            fRow = fRow + 1
+
+        End If
+
+    Next r
+
+    data.Range("C2:F" & lastRow).NumberFormat = "0%"
+    data.Range("G2:G" & lastRow).NumberFormat = "0.0"
+    data.Range("H2:H" & lastRow).NumberFormat = "0.00%"
+
+    If fRow > 2 Then
+        data.Range("L2:O" & fRow - 1).NumberFormat = "0%"
+        data.Range("P2:P" & fRow - 1).NumberFormat = "0.0"
+        data.Range("Q2:Q" & fRow - 1).NumberFormat = "0.00%"
+    End If
+
+End Sub
+
+'===============================================================================
+' DETAILED CHARTS
+'
+' 1) Average return vs worst regret
+'    EVERY feasible allocation is plotted.
+'    Efficient allocations are highlighted and labeled with Allocation ID.
+'
+' 2) Cost of being wrong
+'    One chart per scenario.
+'    X axis = daily starting date.
+'    Each named strategy = a separate column / series from Regret_By_Date.
+'===============================================================================
+Private Sub Alloc_BuildDetailedCharts(ByVal wb As Workbook)
+
+    Dim grid As Worksheet
+    Dim data As Worksheet
+    Dim regret As Worksheet
+    Dim retWS As Worksheet
+    Dim strat As Worksheet
+    Dim scenSum As Worksheet
+    Dim bestTenor As Worksheet
+    Dim assumptions As Worksheet
+    Dim ws As Worksheet
+
+    Dim gridLast As Long
+    Dim frontierLast As Long
+    Dim scenarioHorizon As Long
+    Dim horizonDays As Long
+    Dim obsPerScenario As Long
+
+    Dim s As Long
+    Dim firstRow As Long
+    Dim lastRow As Long
+
+    Dim co As ChartObject
+    Dim ser As Series
+    Dim p As Long
+    Dim strategyCol As Long
+    Dim topPos As Double
+
+    Set grid = wb.Worksheets("Allocation_Grid")
+    Set data = wb.Worksheets("Allocation_Chart_Data")
+    Set regret = wb.Worksheets("Allocation_Regret_By_Date")
+    Set retWS = wb.Worksheets("Allocation_Return_By_Date")
+    Set strat = wb.Worksheets("Allocation_Strategies")
+    Set scenSum = wb.Worksheets("Allocation_Scenario_Summary")
+    Set bestTenor = wb.Worksheets("Allocation_Best_Tenor")
+    Set assumptions = wb.Worksheets("Scenario_Assumptions")
+
+    scenarioHorizon = CLng(assumptions.Range("B8").Value2)
+    horizonDays = CLng(strat.Range("B17").Value2)
+    obsPerScenario = scenarioHorizon - horizonDays + 1
+
+    gridLast = data.Cells(data.Rows.Count, 1).End(xlUp).Row
+    frontierLast = data.Cells(data.Rows.Count, 10).End(xlUp).Row
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Allocation_Charts"
+
+    ws.Range("A1").Value = "ALLOCATION | EXPANDED RETURN + REGRET ANALYSIS"
+    ws.Range("A1").Font.Bold = True
+    ws.Range("A1").Font.Size = 20
+
+    ws.Range("A2").Value = "Every chart points to an explicit source table. Daily charts use one row per starting date; scatter charts use one row per exact allocation."
+    ws.Range("A2").Font.Italic = True
+
+    '---------------------------------------------------------------------------
+    ' CHART 1 | EVERY ALLOCATION
+    ' Average return vs worst regret
+    '---------------------------------------------------------------------------
+    Set co = ws.ChartObjects.Add(20, 55, 1050, 420)
+
+    With co.Chart
+
+        .ChartType = xlXYScatter
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).Name = "Every feasible allocation"
+        .SeriesCollection(1).XValues = data.Range("G2:G" & gridLast)
+        .SeriesCollection(1).Values = data.Range("H2:H" & gridLast)
+        .SeriesCollection(1).MarkerSize = 5
+
+        If frontierLast >= 2 Then
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(2).Name = "Efficient frontier"
+            .SeriesCollection(2).XValues = data.Range("P2:P" & frontierLast)
+            .SeriesCollection(2).Values = data.Range("Q2:Q" & frontierLast)
+            .SeriesCollection(2).MarkerSize = 8
+
+            Set ser = .SeriesCollection(2)
+            ser.ApplyDataLabels
+
+            For p = 1 To ser.Points.Count
+                ser.Points(p).DataLabel.Text = CStr(data.Cells(p + 1, 10).Value)
+                ser.Points(p).DataLabel.Font.Size = 8
+            Next p
+
+        End If
+
+        .HasTitle = True
+        .ChartTitle.Text = "Average return vs worst regret | every feasible allocation"
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        .Axes(xlCategory).HasTitle = True
+        .Axes(xlCategory).AxisTitle.Text = "Worst regret (bp)"
+
+        .Axes(xlValue).HasTitle = True
+        .Axes(xlValue).AxisTitle.Text = "Average annualized return"
+        .Axes(xlValue).TickLabels.NumberFormat = "0.00%"
+
+    End With
+
+    ws.Range("A24").Value = "Source: Allocation_Grid and Allocation_Chart_Data. Every point has an Allocation ID and exact ON / 1M / 3M / 6M weights."
+    ws.Range("A24").Font.Italic = True
+
+    '---------------------------------------------------------------------------
+    ' CHART 2 | EVERY ALLOCATION
+    ' Weighted tenor vs worst regret
+    '
+    ' Shows whether increasing duration systematically improves or worsens the
+    ' cost of being wrong.
+    '---------------------------------------------------------------------------
+    Set co = ws.ChartObjects.Add(20, 500, 520, 330)
+
+    With co.Chart
+
+        .ChartType = xlXYScatter
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).Name = "Feasible allocations"
+        .SeriesCollection(1).XValues = grid.Range("G2:G" & grid.Cells(grid.Rows.Count, 1).End(xlUp).Row)
+        .SeriesCollection(1).Values = grid.Range("K2:K" & grid.Cells(grid.Rows.Count, 1).End(xlUp).Row)
+        .SeriesCollection(1).MarkerSize = 5
+
+        .HasTitle = True
+        .ChartTitle.Text = "Weighted tenor vs worst regret | every allocation"
+
+        .HasLegend = False
+
+        .Axes(xlCategory).HasTitle = True
+        .Axes(xlCategory).AxisTitle.Text = "Weighted tenor (months)"
+
+        .Axes(xlValue).HasTitle = True
+        .Axes(xlValue).AxisTitle.Text = "Worst regret (bp)"
+
+    End With
+
+    '---------------------------------------------------------------------------
+    ' CHART 3 | NAMED STRATEGIES
+    ' Return vs worst regret
+    '---------------------------------------------------------------------------
+    Set co = ws.ChartObjects.Add(560, 500, 510, 330)
+
+    With co.Chart
+
+        .ChartType = xlXYScatter
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).Name = "Named strategies"
+        .SeriesCollection(1).XValues = strat.Range("J4:J12")
+        .SeriesCollection(1).Values = strat.Range("G4:G12")
+        .SeriesCollection(1).MarkerSize = 9
+
+        Set ser = .SeriesCollection(1)
+        ser.ApplyDataLabels
+
+        For p = 1 To STRAT_COUNT
+            ser.Points(p).DataLabel.Text = CStr(strat.Cells(STRAT_FIRST_ROW + p - 1, 1).Value)
+            ser.Points(p).DataLabel.Font.Size = 8
+        Next p
+
+        .HasTitle = True
+        .ChartTitle.Text = "Named strategies | average return vs worst regret"
+
+        .HasLegend = False
+
+        .Axes(xlCategory).HasTitle = True
+        .Axes(xlCategory).AxisTitle.Text = "Worst regret (bp)"
+
+        .Axes(xlValue).HasTitle = True
+        .Axes(xlValue).AxisTitle.Text = "Average annualized return"
+        .Axes(xlValue).TickLabels.NumberFormat = "0.00%"
+
+    End With
+
+    '---------------------------------------------------------------------------
+    ' CHART 4 | NAMED STRATEGIES
+    ' Average / P95 / worst regret
+    '---------------------------------------------------------------------------
+    Set co = ws.ChartObjects.Add(20, 850, 1050, 330)
+
+    With co.Chart
+
+        .ChartType = xlColumnClustered
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).Name = "Average regret"
+        .SeriesCollection(1).XValues = strat.Range("A4:A12")
+        .SeriesCollection(1).Values = strat.Range("I4:I12")
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(2).Name = "P95 regret"
+        .SeriesCollection(2).XValues = strat.Range("A4:A12")
+        .SeriesCollection(2).Values = strat.Range("K4:K12")
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(3).Name = "Worst regret"
+        .SeriesCollection(3).XValues = strat.Range("A4:A12")
+        .SeriesCollection(3).Values = strat.Range("J4:J12")
+
+        .HasTitle = True
+        .ChartTitle.Text = "Named strategies | average, P95 and worst cost of being wrong"
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        .Axes(xlValue).HasTitle = True
+        .Axes(xlValue).AxisTitle.Text = "Regret (bp)"
+
+    End With
+
+    '---------------------------------------------------------------------------
+    ' CHART 5 | BEST TENOR FREQUENCY
+    '
+    ' Each row in Allocation_Best_Tenor is one scenario.
+    ' Bars sum to 100%.
+    '---------------------------------------------------------------------------
+    Set co = ws.ChartObjects.Add(20, 1200, 1050, 330)
+
+    With co.Chart
+
+        .ChartType = xlColumnStacked100
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).Name = "ON"
+        .SeriesCollection(1).XValues = bestTenor.Range("A2:A6")
+        .SeriesCollection(1).Values = bestTenor.Range("G2:G6")
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(2).Name = "1M"
+        .SeriesCollection(2).XValues = bestTenor.Range("A2:A6")
+        .SeriesCollection(2).Values = bestTenor.Range("H2:H6")
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(3).Name = "3M"
+        .SeriesCollection(3).XValues = bestTenor.Range("A2:A6")
+        .SeriesCollection(3).Values = bestTenor.Range("I2:I6")
+
+        .SeriesCollection.NewSeries
+        .SeriesCollection(4).Name = "6M"
+        .SeriesCollection(4).XValues = bestTenor.Range("A2:A6")
+        .SeriesCollection(4).Values = bestTenor.Range("J2:J6")
+
+        .HasTitle = True
+        .ChartTitle.Text = "Which tenor wins? | share of daily starting dates by scenario"
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        .Axes(xlValue).TickLabels.NumberFormat = "0%"
+
+    End With
+
+    '---------------------------------------------------------------------------
+    ' CHART 6 | AVERAGE RETURN BY SCENARIO
+    '
+    ' One strategy per category; five scenario series.
+    ' Direct source = Allocation_Scenario_Summary.
+    '---------------------------------------------------------------------------
+    Set co = ws.ChartObjects.Add(20, 1550, 1050, 350)
+
+    With co.Chart
+
+        .ChartType = xlColumnClustered
+
+        For s = 1 To 5
+
+            firstRow = 2 + (s - 1) * STRAT_COUNT
+            lastRow = firstRow + STRAT_COUNT - 1
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(.SeriesCollection.Count).Name = scenSum.Cells(firstRow, 1).Value
+            .SeriesCollection(.SeriesCollection.Count).XValues = scenSum.Range("B" & firstRow & ":B" & lastRow)
+            .SeriesCollection(.SeriesCollection.Count).Values = scenSum.Range("I" & firstRow & ":I" & lastRow)
+
+        Next s
+
+        .HasTitle = True
+        .ChartTitle.Text = "Named strategies | average annualized return by scenario"
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        .Axes(xlValue).TickLabels.NumberFormat = "0.00%"
+
+    End With
+
+    '---------------------------------------------------------------------------
+    ' CHART 7 | AVERAGE REGRET BY SCENARIO
+    '---------------------------------------------------------------------------
+    Set co = ws.ChartObjects.Add(20, 1920, 1050, 350)
+
+    With co.Chart
+
+        .ChartType = xlColumnClustered
+
+        For s = 1 To 5
+
+            firstRow = 2 + (s - 1) * STRAT_COUNT
+            lastRow = firstRow + STRAT_COUNT - 1
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(.SeriesCollection.Count).Name = scenSum.Cells(firstRow, 1).Value
+            .SeriesCollection(.SeriesCollection.Count).XValues = scenSum.Range("B" & firstRow & ":B" & lastRow)
+            .SeriesCollection(.SeriesCollection.Count).Values = scenSum.Range("K" & firstRow & ":K" & lastRow)
+
+        Next s
+
+        .HasTitle = True
+        .ChartTitle.Text = "Named strategies | average regret by scenario"
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        .Axes(xlValue).HasTitle = True
+        .Axes(xlValue).AxisTitle.Text = "Average regret (bp)"
+
+    End With
+
+    '---------------------------------------------------------------------------
+    ' CHART 8 | NEAR-BEST HIT RATE BY SCENARIO
+    '
+    ' Measures how often a strategy stays within 5 bp of the best pure tenor.
+    '---------------------------------------------------------------------------
+    Set co = ws.ChartObjects.Add(20, 2290, 1050, 350)
+
+    With co.Chart
+
+        .ChartType = xlColumnClustered
+
+        For s = 1 To 5
+
+            firstRow = 2 + (s - 1) * STRAT_COUNT
+            lastRow = firstRow + STRAT_COUNT - 1
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(.SeriesCollection.Count).Name = scenSum.Cells(firstRow, 1).Value
+            .SeriesCollection(.SeriesCollection.Count).XValues = scenSum.Range("B" & firstRow & ":B" & lastRow)
+            .SeriesCollection(.SeriesCollection.Count).Values = scenSum.Range("N" & firstRow & ":N" & lastRow)
+
+        Next s
+
+        .HasTitle = True
+        .ChartTitle.Text = "Named strategies | probability of finishing within 5 bp of best tenor"
+
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+
+        .Axes(xlValue).TickLabels.NumberFormat = "0%"
+
+    End With
+
+    '---------------------------------------------------------------------------
+    ' CHARTS 9-13 | DAILY COST OF BEING WRONG
+    '
+    ' One scenario at a time.
+    ' X axis = daily starting date.
+    ' Each named strategy = one column / one series.
+    '
+    ' Direct source:
+    '   Allocation_Regret_By_Date
+    '---------------------------------------------------------------------------
+    topPos = 2660
+
+    For s = 1 To 5
+
+        firstRow = 2 + (s - 1) * obsPerScenario
+        lastRow = firstRow + obsPerScenario - 1
+
+        Set co = ws.ChartObjects.Add(20, topPos, 1050, 300)
+
+        With co.Chart
+
+            .ChartType = xlLine
+
+            For strategyCol = 6 To 14
+
+                .SeriesCollection.NewSeries
+
+                .SeriesCollection(.SeriesCollection.Count).Name = regret.Cells(1, strategyCol).Value
+                .SeriesCollection(.SeriesCollection.Count).XValues = regret.Range(regret.Cells(firstRow, 2), regret.Cells(lastRow, 2))
+                .SeriesCollection(.SeriesCollection.Count).Values = regret.Range(regret.Cells(firstRow, strategyCol), regret.Cells(lastRow, strategyCol))
+
+            Next strategyCol
+
+            .HasTitle = True
+            .ChartTitle.Text = "Daily cost of being wrong | " & CStr(regret.Cells(firstRow, 1).Value)
+
+            .HasLegend = True
+            .Legend.Position = xlLegendPositionBottom
+
+            .Axes(xlCategory).HasTitle = True
+            .Axes(xlCategory).AxisTitle.Text = "Starting date"
+
+            .Axes(xlValue).HasTitle = True
+            .Axes(xlValue).AxisTitle.Text = "Regret vs best tenor (bp)"
+
+        End With
+
+        topPos = topPos + 325
+
+    Next s
+
+End Sub
+
+'===============================================================================
+' PERCENTILE
+'===============================================================================
+Private Function Alloc_RangePercentile(ByVal rng As Range, ByVal p As Double) As Double
+
+    Dim arr() As Double
+    Dim n As Long
+    Dim i As Long
+
+    n = rng.Rows.Count
+    ReDim arr(1 To n)
+
+    For i = 1 To n
+        arr(i) = CDbl(rng.Cells(i, 1).Value2)
+    Next i
+
+    Alloc_RangePercentile = Alloc_Percentile(arr, n, p)
+
+End Function
+
+Private Function Alloc_Percentile(ByRef values() As Double, ByVal n As Long, ByVal p As Double) As Double
+
+    Dim temp() As Double
+    Dim i As Long
+
+    If n <= 0 Then
+        Alloc_Percentile = 0#
+        Exit Function
+    End If
+
+    ReDim temp(1 To n)
+
+    For i = 1 To n
+        temp(i) = values(i)
+    Next i
+
+    Alloc_QuickSort temp, 1, n
+
+    Alloc_Percentile = Alloc_PercentileSorted(temp, n, p)
+
+End Function
+
+Private Function Alloc_PercentileSorted(ByRef values() As Double, ByVal n As Long, ByVal p As Double) As Double
+
+    Dim pos As Double
+    Dim lo As Long
+    Dim hi As Long
+    Dim frac As Double
+
+    If p <= 0# Then
+        Alloc_PercentileSorted = values(1)
+        Exit Function
+    End If
+
+    If p >= 1# Then
+        Alloc_PercentileSorted = values(n)
+        Exit Function
+    End If
+
+    pos = 1# + (n - 1#) * p
+    lo = Int(pos)
+    hi = lo + 1
+
+    If hi > n Then hi = n
+
+    frac = pos - lo
+
+    Alloc_PercentileSorted = values(lo) + frac * (values(hi) - values(lo))
+
+End Function
+
+Private Sub Alloc_QuickSort(ByRef arr() As Double, ByVal first As Long, ByVal last As Long)
+
+    Dim i As Long
+    Dim j As Long
+    Dim pivot As Double
+    Dim temp As Double
+
+    i = first
+    j = last
+    pivot = arr((first + last) \ 2)
+
+    Do While i <= j
+
+        Do While arr(i) < pivot
+            i = i + 1
+        Loop
+
+        Do While arr(j) > pivot
+            j = j - 1
+        Loop
+
+        If i <= j Then
+
+            temp = arr(i)
+            arr(i) = arr(j)
+            arr(j) = temp
+
+            i = i + 1
+            j = j - 1
+
+        End If
+
+    Loop
+
+    If first < j Then Alloc_QuickSort arr, first, j
+    If i < last Then Alloc_QuickSort arr, i, last
+
+End Sub
+
+'===============================================================================
+' VALIDATION / FORMAT / UTILITIES
+'===============================================================================
+Private Sub Alloc_ValidateWeights(ByVal wON As Double, ByVal w1 As Double, ByVal w3 As Double, ByVal w6 As Double, ByVal strategyName As String)
+
+    Dim total As Double
+
+    total = wON + w1 + w3 + w6
+
+    If wON < 0# Or w1 < 0# Or w3 < 0# Or w6 < 0# Then
+        Err.Raise vbObjectError + 230, , "Negative weight in strategy: " & strategyName
+    End If
+
+    If Abs(total - 1#) > 0.000001 Then
+        Err.Raise vbObjectError + 231, , "Weights must total 100% for strategy: " & strategyName
+    End If
+
+End Sub
+
+Private Sub Alloc_FormatOutputs(ByVal wb As Workbook)
+
+    Dim ws As Worksheet
+
+    Set ws = wb.Worksheets("Allocation_Strategies")
+    ws.Range("A3:M12").Borders.LineStyle = xlContinuous
+    ws.Columns("A:M").AutoFit
+
+    Set ws = wb.Worksheets("Allocation_Return_By_Date")
+    ws.Range("A1:N1").AutoFilter
+    ws.Columns("A:N").AutoFit
+
+    Set ws = wb.Worksheets("Allocation_Regret_By_Date")
+    ws.Range("A1:N1").AutoFilter
+    ws.Columns("A:N").AutoFit
+
+    Set ws = wb.Worksheets("Allocation_Grid")
+    ws.Range("A1:N1").AutoFilter
+    ws.Columns("A:N").AutoFit
+
+    Set ws = wb.Worksheets("Allocation_Scenario_Summary")
+    ws.Range("A1:P1").AutoFilter
+    ws.Columns("A:P").AutoFit
+
+    Set ws = wb.Worksheets("Allocation_Best_Tenor")
+    ws.Range("A1:J1").AutoFilter
+    ws.Columns("A:J").AutoFit
+
+    Set ws = wb.Worksheets("Allocation_Extreme_Cases")
+    ws.Range("A1:J1").AutoFilter
+    ws.Columns("A:J").AutoFit
+
+    Set ws = wb.Worksheets("Allocation_Base")
+    ws.Visible = xlSheetHidden
+
+    Set ws = wb.Worksheets("Allocation_Chart_Data")
+    ws.Visible = xlSheetHidden
+
+End Sub
+
+Private Function Alloc_SheetExists(ByVal wb As Workbook, ByVal sheetName As String) As Boolean
+
+    Dim ws As Worksheet
+
+    For Each ws In wb.Worksheets
+
+        If LCase$(ws.Name) = LCase$(sheetName) Then
+            Alloc_SheetExists = True
+            Exit Function
+        End If
+
+    Next ws
+
+End Function
+
+Private Sub Alloc_DeleteSheetIfExists(ByVal wb As Workbook, ByVal sheetName As String)
+
+    On Error Resume Next
+    wb.Worksheets(sheetName).Delete
+    On Error GoTo 0
+
+End Sub
