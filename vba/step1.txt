@@ -1,0 +1,779 @@
+Option Explicit
+
+'===============================================================================
+' STANDALONE DAILY CURVE SCENARIO MODEL
+'
+' NO SOURCE CURVE IS REQUIRED.
+'
+' FIRST RUN:
+'   Creates Scenario_Assumptions with editable starting rates.
+'
+' OUTPUT:
+'   Scenario_Assumptions   - editable model inputs
+'   Scenario_Daily         - five daily 3-year curve paths
+'   Scenario_Charts        - total-rate and term-premium charts
+'
+' RUN:
+'   Build_Standalone_Daily_Rate_Scenarios
+'
+' MODEL:
+'
+'   Tenor Rate =
+'       Expected average future ON
+'       + Total Term Premium
+'
+'   Total Term Premium =
+'       Mean-reverting initial premium
+'       + Persistent sentiment premium
+'       + Temporary market-stress premium
+'
+' Positive sentiment = inflation / hawkish / rates-risk environment.
+' Negative sentiment = disinflation / dovish / risk-off environment.
+'
+' Longer tenors have materially greater sensitivity to sentiment and stress.
+'===============================================================================
+
+Private Const EXTRA_DAYS As Long = 180
+Private Const TP_HALFLIFE As Double = 365#
+Private Const FLOOR_RATE As Double = 0.0001
+
+' Long-run normal term premium
+Private Const LR_TP_1M As Double = 0.0001       ' 1 bp
+Private Const LR_TP_3M As Double = 0.0004       ' 4 bp
+Private Const LR_TP_6M As Double = 0.0008       ' 8 bp
+
+' Persistent market-sentiment sensitivity
+Private Const BETA_TP_1M As Double = 0.0005     ' 5 bp
+Private Const BETA_TP_3M As Double = 0.0018     ' 18 bp
+Private Const BETA_TP_6M As Double = 0.0045     ' 45 bp
+
+'===============================================================================
+' MAIN
+'===============================================================================
+Public Sub Build_Standalone_Daily_Rate_Scenarios()
+
+    Dim wb As Workbook
+    Dim wsA As Worksheet
+    Dim startDate As Double
+    Dim startON As Double
+    Dim start1M As Double
+    Dim start3M As Double
+    Dim start6M As Double
+    Dim horizonDays As Long
+    Dim s As Long
+    Dim oldCalc As XlCalculation
+
+    Set wb = ThisWorkbook
+
+    If Not SheetExists(wb, "Scenario_Assumptions") Then
+        CreateDefaultAssumptions wb
+    End If
+
+    Set wsA = wb.Worksheets("Scenario_Assumptions")
+
+    If Not IsNumeric(wsA.Range("B3").Value2) Then
+        MsgBox "Scenario_Assumptions!B3 must contain a valid Excel date.", vbCritical
+        Exit Sub
+    End If
+
+    startDate = CDbl(wsA.Range("B3").Value2)
+    startON = NormalizeRate(wsA.Range("B4").Value2)
+    start1M = NormalizeRate(wsA.Range("B5").Value2)
+    start3M = NormalizeRate(wsA.Range("B6").Value2)
+    start6M = NormalizeRate(wsA.Range("B7").Value2)
+    horizonDays = CLng(wsA.Range("B8").Value2)
+
+    If horizonDays < 180 Then
+        MsgBox "Horizon must be at least 180 days.", vbCritical
+        Exit Sub
+    End If
+
+    On Error GoTo Fail
+
+    oldCalc = Application.Calculation
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+
+    DeleteSheetIfExists wb, "Scenario_Daily"
+    DeleteSheetIfExists wb, "Scenario_Charts"
+
+    For s = 1 To 5
+        BuildOneScenario wb, s, startDate, startON, start1M, start3M, start6M, horizonDays
+    Next s
+
+    FormatDailySheet wb
+    BuildScenarioCharts wb, horizonDays
+    UpdateScenarioSummary wsA
+
+Done:
+    On Error Resume Next
+    Application.Calculation = oldCalc
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    On Error GoTo 0
+
+    MsgBox "Standalone daily curve scenarios created.", vbInformation
+    Exit Sub
+
+Fail:
+    MsgBox "Scenario build failed: " & Err.Number & " - " & Err.description, vbCritical
+    Resume Done
+
+End Sub
+
+'===============================================================================
+' DEFAULT ASSUMPTIONS
+'===============================================================================
+Private Sub CreateDefaultAssumptions(ByVal wb As Workbook)
+
+    Dim ws As Worksheet
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Scenario_Assumptions"
+
+    ws.Range("A1:F1").Merge
+    ws.Range("A1").Value = "STANDALONE DAILY CURVE SCENARIO MODEL"
+    ws.Range("A1").Font.Bold = True
+    ws.Range("A1").Font.Size = 16
+
+    ws.Range("A3").Value = "Starting date"
+    ws.Range("B3").Value = DateSerial(2026, 8, 25)
+
+    ws.Range("A4").Value = "Starting ON"
+    ws.Range("B4").Value = 0.0355
+
+    ws.Range("A5").Value = "Starting 1M"
+    ws.Range("B5").Value = 0.03683
+
+    ws.Range("A6").Value = "Starting 3M"
+    ws.Range("B6").Value = 0.037672
+
+    ws.Range("A7").Value = "Starting 6M"
+    ws.Range("B7").Value = 0.038925
+
+    ws.Range("A8").Value = "Horizon days"
+    ws.Range("B8").Value = 1095
+
+    ws.Range("D3").Value = "Term premium"
+    ws.Range("E3").Value = "Long-run"
+    ws.Range("F3").Value = "Sentiment beta"
+
+    ws.Range("D4").Value = "1M"
+    ws.Range("E4").Value = LR_TP_1M
+    ws.Range("F4").Value = BETA_TP_1M
+
+    ws.Range("D5").Value = "3M"
+    ws.Range("E5").Value = LR_TP_3M
+    ws.Range("F5").Value = BETA_TP_3M
+
+    ws.Range("D6").Value = "6M"
+    ws.Range("E6").Value = LR_TP_6M
+    ws.Range("F6").Value = BETA_TP_6M
+
+    ws.Range("A11").Value = "Scenario"
+    ws.Range("B11").Value = "Policy path"
+    ws.Range("C11").Value = "Sentiment"
+    ws.Range("D11").Value = "Main TP stress"
+
+    ws.Range("A12").Value = "1 | Gradual normalization"
+    ws.Range("B12").Value = "Slow easing"
+    ws.Range("C12").Value = "Mild dovish"
+    ws.Range("D12").Value = "+25 bp inflation scare / -20 bp later compression"
+
+    ws.Range("A13").Value = "2 | Higher for longer"
+    ws.Range("B13").Value = "High / sticky"
+    ws.Range("C13").Value = "Hawkish"
+    ws.Range("D13").Value = "+40 bp and +30 bp widening episodes"
+
+    ws.Range("A14").Value = "3 | Renewed inflation"
+    ws.Range("B14").Value = "Additional hikes"
+    ws.Range("C14").Value = "Strong hawkish"
+    ws.Range("D14").Value = "+60 / +85 / +40 bp 6M TP shocks"
+
+    ws.Range("A15").Value = "4 | Faster normalization"
+    ws.Range("B15").Value = "Fast easing"
+    ws.Range("C15").Value = "Dovish"
+    ws.Range("D15").Value = "-30 / -25 bp compression episodes"
+
+    ws.Range("A16").Value = "5 | Recession / rapid cuts"
+    ws.Range("B16").Value = "Emergency easing"
+    ws.Range("C16").Value = "Strong risk-off"
+    ws.Range("D16").Value = "-60 / -75 bp compression, then +30 bp normalization"
+
+    ws.Range("A19").Value = "MODEL INTERPRETATION"
+    ws.Range("A20").Value = "ON = policy path."
+    ws.Range("A21").Value = "1M / 3M / 6M = expected future ON + term premium."
+    ws.Range("A22").Value = "Term premium can move before ON because market sentiment reprices inflation, uncertainty and duration risk."
+    ws.Range("A23").Value = "Stress is deliberately stronger in 6M than 3M and 1M."
+
+    ws.Range("B3").NumberFormat = "dd-mmm-yyyy"
+    ws.Range("B4:B7").NumberFormat = "0.000%"
+    ws.Range("E4:F6").NumberFormat = "0.00%"
+
+    ws.Range("A3:A8").Font.Bold = True
+    ws.Range("A11:D11").Font.Bold = True
+    ws.Range("A19").Font.Bold = True
+
+    ws.Columns("A:F").AutoFit
+
+End Sub
+
+'===============================================================================
+' BUILD ONE DAILY SCENARIO
+'===============================================================================
+Private Sub BuildOneScenario(ByVal wb As Workbook, ByVal scen As Long, ByVal startDate As Double, ByVal startON As Double, ByVal start1M As Double, ByVal start3M As Double, ByVal start6M As Double, ByVal horizonDays As Long)
+
+    Dim ws As Worksheet
+    Dim onPath() As Double
+    Dim cumON() As Double
+    Dim totalDays As Long
+    Dim d As Long
+    Dim outRow As Long
+
+    Dim avg1 As Double
+    Dim avg3 As Double
+    Dim avg6 As Double
+
+    Dim initialTP1 As Double
+    Dim initialTP3 As Double
+    Dim initialTP6 As Double
+
+    Dim coreTP1 As Double
+    Dim coreTP3 As Double
+    Dim coreTP6 As Double
+
+    Dim stressTP1 As Double
+    Dim stressTP3 As Double
+    Dim stressTP6 As Double
+
+    Dim totalTP1 As Double
+    Dim totalTP3 As Double
+    Dim totalTP6 As Double
+
+    Dim sentiment As Double
+    Dim decay As Double
+
+    Dim rate1 As Double
+    Dim rate3 As Double
+    Dim rate6 As Double
+
+    totalDays = horizonDays + EXTRA_DAYS
+
+    ReDim onPath(0 To totalDays)
+    ReDim cumON(0 To totalDays + 1)
+
+    For d = 0 To totalDays
+        onPath(d) = ScenarioON(startON, scen, d)
+        If onPath(d) < FLOOR_RATE Then onPath(d) = FLOOR_RATE
+    Next d
+
+    cumON(0) = 0#
+
+    For d = 0 To totalDays
+        cumON(d + 1) = cumON(d) + onPath(d)
+    Next d
+
+    ' Calibrate initial term premium separately for each scenario so every
+    ' scenario begins at exactly the same starting curve.
+    avg1 = AverageForwardON(cumON, 0, 30)
+    avg3 = AverageForwardON(cumON, 0, 90)
+    avg6 = AverageForwardON(cumON, 0, 180)
+
+    initialTP1 = start1M - avg1
+    initialTP3 = start3M - avg3
+    initialTP6 = start6M - avg6
+
+    If Not SheetExists(wb, "Scenario_Daily") Then
+
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = "Scenario_Daily"
+
+        ws.Cells(1, 1).Value = "Date"
+        ws.Cells(1, 2).Value = "Scenario"
+        ws.Cells(1, 3).Value = "Sentiment"
+        ws.Cells(1, 4).Value = "ON"
+        ws.Cells(1, 5).Value = "Expected ON 1M"
+        ws.Cells(1, 6).Value = "Expected ON 3M"
+        ws.Cells(1, 7).Value = "Expected ON 6M"
+        ws.Cells(1, 8).Value = "Core TP 1M"
+        ws.Cells(1, 9).Value = "Core TP 3M"
+        ws.Cells(1, 10).Value = "Core TP 6M"
+        ws.Cells(1, 11).Value = "Stress TP 1M"
+        ws.Cells(1, 12).Value = "Stress TP 3M"
+        ws.Cells(1, 13).Value = "Stress TP 6M"
+        ws.Cells(1, 14).Value = "Total TP 1M"
+        ws.Cells(1, 15).Value = "Total TP 3M"
+        ws.Cells(1, 16).Value = "Total TP 6M"
+        ws.Cells(1, 17).Value = "1M"
+        ws.Cells(1, 18).Value = "3M"
+        ws.Cells(1, 19).Value = "6M"
+
+    Else
+
+        Set ws = wb.Worksheets("Scenario_Daily")
+
+    End If
+
+    outRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row + 1
+
+    For d = 0 To horizonDays
+
+        sentiment = ScenarioSentiment(scen, d)
+
+        avg1 = AverageForwardON(cumON, d, 30)
+        avg3 = AverageForwardON(cumON, d, 90)
+        avg6 = AverageForwardON(cumON, d, 180)
+
+        decay = Exp(-d / TP_HALFLIFE)
+
+        coreTP1 = LR_TP_1M + (initialTP1 - LR_TP_1M) * decay + BETA_TP_1M * sentiment
+        coreTP3 = LR_TP_3M + (initialTP3 - LR_TP_3M) * decay + BETA_TP_3M * sentiment
+        coreTP6 = LR_TP_6M + (initialTP6 - LR_TP_6M) * decay + BETA_TP_6M * sentiment
+
+        stressTP1 = TermPremiumStress(scen, d, 1)
+        stressTP3 = TermPremiumStress(scen, d, 3)
+        stressTP6 = TermPremiumStress(scen, d, 6)
+
+        totalTP1 = coreTP1 + stressTP1
+        totalTP3 = coreTP3 + stressTP3
+        totalTP6 = coreTP6 + stressTP6
+
+        rate1 = avg1 + totalTP1
+        rate3 = avg3 + totalTP3
+        rate6 = avg6 + totalTP6
+
+        If rate1 < FLOOR_RATE Then rate1 = FLOOR_RATE
+        If rate3 < FLOOR_RATE Then rate3 = FLOOR_RATE
+        If rate6 < FLOOR_RATE Then rate6 = FLOOR_RATE
+
+        ws.Cells(outRow, 1).Value2 = startDate + d
+        ws.Cells(outRow, 2).Value = ScenarioName(scen)
+        ws.Cells(outRow, 3).Value = sentiment
+
+        ws.Cells(outRow, 4).Value = onPath(d)
+
+        ws.Cells(outRow, 5).Value = avg1
+        ws.Cells(outRow, 6).Value = avg3
+        ws.Cells(outRow, 7).Value = avg6
+
+        ws.Cells(outRow, 8).Value = coreTP1
+        ws.Cells(outRow, 9).Value = coreTP3
+        ws.Cells(outRow, 10).Value = coreTP6
+
+        ws.Cells(outRow, 11).Value = stressTP1
+        ws.Cells(outRow, 12).Value = stressTP3
+        ws.Cells(outRow, 13).Value = stressTP6
+
+        ws.Cells(outRow, 14).Value = totalTP1
+        ws.Cells(outRow, 15).Value = totalTP3
+        ws.Cells(outRow, 16).Value = totalTP6
+
+        ws.Cells(outRow, 17).Value = rate1
+        ws.Cells(outRow, 18).Value = rate3
+        ws.Cells(outRow, 19).Value = rate6
+
+        outRow = outRow + 1
+
+    Next d
+
+End Sub
+
+'===============================================================================
+' POLICY / ON PATH
+'===============================================================================
+Private Function ScenarioON(ByVal startON As Double, ByVal scen As Long, ByVal d As Long) As Double
+
+    Dim delta As Double
+
+    Select Case scen
+
+        Case 1
+            ' Gradual normalization
+            delta = Interp6(d, 0, 0#, 90, -0.001, 180, -0.0025, 365, -0.0075, 730, -0.011, 1095, -0.0125)
+
+        Case 2
+            ' Higher for longer
+            delta = Interp6(d, 0, 0#, 90, 0.001, 180, 0.0025, 365, 0.0035, 730, 0.0015, 1095, -0.002)
+
+        Case 3
+            ' Renewed inflation
+            delta = Interp6(d, 0, 0#, 90, 0.002, 180, 0.0065, 365, 0.01, 730, 0.005, 1095, 0#)
+
+        Case 4
+            ' Faster normalization
+            delta = Interp6(d, 0, 0#, 90, -0.0025, 180, -0.0075, 365, -0.0125, 730, -0.015, 1095, -0.0125)
+
+        Case 5
+            ' Recession / rapid cuts
+            delta = Interp6(d, 0, 0#, 90, -0.0075, 180, -0.015, 365, -0.02, 730, -0.0175, 1095, -0.0125)
+
+    End Select
+
+    ScenarioON = startON + delta
+
+End Function
+
+'===============================================================================
+' PERSISTENT MARKET SENTIMENT
+'===============================================================================
+Private Function ScenarioSentiment(ByVal scen As Long, ByVal d As Long) As Double
+
+    Dim s As Double
+
+    Select Case scen
+
+        Case 1
+            s = Interp6(d, 0, 0#, 90, 0.1, 180, 0.2, 365, -0.15, 730, -0.25, 1095, -0.1)
+
+        Case 2
+            s = Interp6(d, 0, 0#, 90, 0.3, 180, 0.5, 365, 0.7, 730, 0.4, 1095, 0.15)
+
+        Case 3
+            s = Interp6(d, 0, 0#, 90, 0.5, 180, 0.85, 365, 1#, 730, 0.55, 1095, 0.15)
+
+        Case 4
+            s = Interp6(d, 0, 0#, 90, -0.3, 180, -0.55, 365, -0.65, 730, -0.35, 1095, -0.1)
+
+        Case 5
+            s = Interp6(d, 0, 0#, 90, -0.65, 180, -1#, 365, -0.8, 730, -0.35, 1095, -0.05)
+
+    End Select
+
+    ' Small deterministic daily oscillation
+    s = s + 0.05 * Sin(d * 6.28318530717959 / 45#)
+
+    If s > 1# Then s = 1#
+    If s < -1# Then s = -1#
+
+    ScenarioSentiment = s
+
+End Function
+
+'===============================================================================
+' TEMPORARY MARKET-STRESS TERM PREMIUM
+'
+' 6M receives full shock.
+' 3M receives 55%.
+' 1M receives 20%.
+'
+' The declaration is deliberately kept on ONE LINE to avoid VBA continuation
+' syntax problems.
+'===============================================================================
+Private Function TermPremiumStress(ByVal scen As Long, ByVal d As Long, ByVal tenor As Long) As Double
+
+    Dim shock As Double
+    Dim kscale As Double
+
+    Select Case tenor
+        Case 1
+            kscale = 0.2
+        Case 3
+            kscale = 0.55
+        Case 6
+            kscale = 1#
+        Case Else
+            kscale = 0#
+    End Select
+
+    Select Case scen
+
+        Case 1
+            ' Temporary inflation scare, then later duration-demand compression
+            shock = StressPulse(d, 120, 55, 0.0025)
+            shock = shock + StressPulse(d, 520, 90, -0.002)
+
+        Case 2
+            ' Sticky inflation repeatedly pushes term premium wider
+            shock = StressPulse(d, 140, 75, 0.004)
+            shock = shock + StressPulse(d, 420, 100, 0.003)
+
+        Case 3
+            ' Strong inflation reacceleration: large and persistent TP widening
+            shock = StressPulse(d, 90, 55, 0.006)
+            shock = shock + StressPulse(d, 260, 95, 0.0085)
+            shock = shock + StressPulse(d, 520, 110, 0.004)
+
+        Case 4
+            ' Faster disinflation compresses duration risk premium
+            shock = StressPulse(d, 100, 65, -0.003)
+            shock = shock + StressPulse(d, 300, 95, -0.0025)
+            shock = shock + StressPulse(d, 650, 100, 0.001)
+
+        Case 5
+            ' Recession / flight to quality causes violent compression
+            shock = StressPulse(d, 70, 45, -0.006)
+            shock = shock + StressPulse(d, 180, 80, -0.0075)
+            shock = shock + StressPulse(d, 480, 110, 0.003)
+
+    End Select
+
+    TermPremiumStress = shock * kscale
+
+End Function
+
+'===============================================================================
+' GAUSSIAN STRESS PULSE
+'===============================================================================
+Private Function StressPulse(ByVal d As Long, ByVal peakDay As Long, ByVal width As Long, ByVal amplitude As Double) As Double
+
+    Dim z As Double
+
+    If width <= 0 Then
+        StressPulse = 0#
+        Exit Function
+    End If
+
+    z = (d - peakDay) / CDbl(width)
+    StressPulse = amplitude * Exp(-0.5 * z * z)
+
+End Function
+
+'===============================================================================
+' SMOOTH 6-ANCHOR INTERPOLATION
+'===============================================================================
+Private Function Interp6(ByVal x As Long, ByVal x0 As Long, ByVal y0 As Double, ByVal x1 As Long, ByVal y1 As Double, ByVal x2 As Long, ByVal y2 As Double, ByVal x3 As Long, ByVal y3 As Double, ByVal x4 As Long, ByVal y4 As Double, ByVal x5 As Long, ByVal y5 As Double) As Double
+
+    If x <= x0 Then
+        Interp6 = y0
+    ElseIf x <= x1 Then
+        Interp6 = SmoothInterp(x, x0, x1, y0, y1)
+    ElseIf x <= x2 Then
+        Interp6 = SmoothInterp(x, x1, x2, y1, y2)
+    ElseIf x <= x3 Then
+        Interp6 = SmoothInterp(x, x2, x3, y2, y3)
+    ElseIf x <= x4 Then
+        Interp6 = SmoothInterp(x, x3, x4, y3, y4)
+    ElseIf x <= x5 Then
+        Interp6 = SmoothInterp(x, x4, x5, y4, y5)
+    Else
+        Interp6 = y5
+    End If
+
+End Function
+
+Private Function SmoothInterp(ByVal x As Long, ByVal xa As Long, ByVal xb As Long, ByVal ya As Double, ByVal yb As Double) As Double
+
+    Dim t As Double
+    Dim z As Double
+
+    If xb = xa Then
+        SmoothInterp = yb
+        Exit Function
+    End If
+
+    t = (x - xa) / CDbl(xb - xa)
+    z = t * t * (3# - 2# * t)
+
+    SmoothInterp = ya + (yb - ya) * z
+
+End Function
+
+'===============================================================================
+' EXPECTED AVERAGE FUTURE ON
+'===============================================================================
+Private Function AverageForwardON(ByRef cumulative() As Double, ByVal startDay As Long, ByVal tenorDays As Long) As Double
+
+    AverageForwardON = (cumulative(startDay + tenorDays) - cumulative(startDay)) / CDbl(tenorDays)
+
+End Function
+
+'===============================================================================
+' CHARTS
+'===============================================================================
+Private Sub BuildScenarioCharts(ByVal wb As Workbook, ByVal horizonDays As Long)
+
+    Dim src As Worksheet
+    Dim ws As Worksheet
+    Dim co As ChartObject
+    Dim s As Long
+    Dim firstRow As Long
+    Dim finalRow As Long
+    Dim topPos As Double
+    Dim leftPos As Double
+
+    Set src = wb.Worksheets("Scenario_Daily")
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    ws.Name = "Scenario_Charts"
+
+    ws.Range("A1").Value = "STANDALONE DAILY CURVE SCENARIOS"
+    ws.Range("A1").Font.Size = 20
+    ws.Range("A1").Font.Bold = True
+
+    For s = 1 To 5
+
+        firstRow = 2 + (s - 1) * (horizonDays + 1)
+        finalRow = firstRow + horizonDays
+
+        leftPos = 20 + ((s - 1) Mod 2) * 530
+        topPos = 50 + Int((s - 1) / 2) * 610
+
+        ' Total rate chart
+        Set co = ws.ChartObjects.Add(leftPos, topPos, 500, 280)
+
+        With co.Chart
+
+            .ChartType = xlLine
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(1).Name = "ON"
+            .SeriesCollection(1).XValues = src.Range("A" & firstRow & ":A" & finalRow)
+            .SeriesCollection(1).values = src.Range("D" & firstRow & ":D" & finalRow)
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(2).Name = "1M"
+            .SeriesCollection(2).XValues = src.Range("A" & firstRow & ":A" & finalRow)
+            .SeriesCollection(2).values = src.Range("Q" & firstRow & ":Q" & finalRow)
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(3).Name = "3M"
+            .SeriesCollection(3).XValues = src.Range("A" & firstRow & ":A" & finalRow)
+            .SeriesCollection(3).values = src.Range("R" & firstRow & ":R" & finalRow)
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(4).Name = "6M"
+            .SeriesCollection(4).XValues = src.Range("A" & firstRow & ":A" & finalRow)
+            .SeriesCollection(4).values = src.Range("S" & firstRow & ":S" & finalRow)
+
+            .HasTitle = True
+            .ChartTitle.Text = ScenarioName(s) & " | Total rates"
+            .HasLegend = True
+            .Legend.Position = xlLegendPositionBottom
+            .Axes(xlValue).TickLabels.NumberFormat = "0.0%"
+
+        End With
+
+        ' Term premium chart
+        Set co = ws.ChartObjects.Add(leftPos, topPos + 290, 500, 280)
+
+        With co.Chart
+
+            .ChartType = xlLine
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(1).Name = "TP 1M"
+            .SeriesCollection(1).XValues = src.Range("A" & firstRow & ":A" & finalRow)
+            .SeriesCollection(1).values = src.Range("N" & firstRow & ":N" & finalRow)
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(2).Name = "TP 3M"
+            .SeriesCollection(2).XValues = src.Range("A" & firstRow & ":A" & finalRow)
+            .SeriesCollection(2).values = src.Range("O" & firstRow & ":O" & finalRow)
+
+            .SeriesCollection.NewSeries
+            .SeriesCollection(3).Name = "TP 6M"
+            .SeriesCollection(3).XValues = src.Range("A" & firstRow & ":A" & finalRow)
+            .SeriesCollection(3).values = src.Range("P" & firstRow & ":P" & finalRow)
+
+            .HasTitle = True
+            .ChartTitle.Text = ScenarioName(s) & " | Total term premium"
+            .HasLegend = True
+            .Legend.Position = xlLegendPositionBottom
+            .Axes(xlValue).TickLabels.NumberFormat = "0.0%"
+
+        End With
+
+    Next s
+
+End Sub
+
+'===============================================================================
+' ASSUMPTIONS SUMMARY
+'===============================================================================
+Private Sub UpdateScenarioSummary(ByVal ws As Worksheet)
+
+    ws.Range("A26").Value = "OUTPUT"
+    ws.Range("A27").Value = "Scenario_Daily"
+    ws.Range("B27").Value = "Daily decomposition of policy expectations, core TP, stress TP and total rates."
+    ws.Range("A28").Value = "Scenario_Charts"
+    ws.Range("B28").Value = "Two charts per scenario: total curve and term-premium behavior."
+
+    ws.Range("A26").Font.Bold = True
+    ws.Columns("A:F").AutoFit
+
+End Sub
+
+'===============================================================================
+' FORMAT
+'===============================================================================
+Private Sub FormatDailySheet(ByVal wb As Workbook)
+
+    Dim ws As Worksheet
+    Dim lr As Long
+
+    Set ws = wb.Worksheets("Scenario_Daily")
+    lr = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+
+    ws.Range("A1:S1").Font.Bold = True
+    ws.Range("A1:S1").AutoFilter
+
+    ws.Columns("A").NumberFormat = "dd-mmm-yyyy"
+    ws.Columns("C").NumberFormat = "0.00"
+    ws.Columns("D:S").NumberFormat = "0.000%"
+
+    ws.Columns("A:S").AutoFit
+
+End Sub
+
+'===============================================================================
+' UTILITIES
+'===============================================================================
+Private Function ScenarioName(ByVal scen As Long) As String
+
+    Select Case scen
+        Case 1
+            ScenarioName = "Gradual normalization"
+        Case 2
+            ScenarioName = "Higher for longer"
+        Case 3
+            ScenarioName = "Renewed inflation"
+        Case 4
+            ScenarioName = "Faster normalization"
+        Case 5
+            ScenarioName = "Recession / rapid cuts"
+        Case Else
+            ScenarioName = "Unknown"
+    End Select
+
+End Function
+
+Private Function NormalizeRate(ByVal v As Variant) As Double
+
+    Dim x As Double
+
+    If Not IsNumeric(v) Then
+        Err.Raise vbObjectError + 100, , "Starting rates must be numeric."
+    End If
+
+    x = CDbl(v)
+
+    If Abs(x) > 1# Then x = x / 100#
+
+    NormalizeRate = x
+
+End Function
+
+Private Function SheetExists(ByVal wb As Workbook, ByVal sheetName As String) As Boolean
+
+    Dim ws As Worksheet
+
+    For Each ws In wb.Worksheets
+        If LCase$(ws.Name) = LCase$(sheetName) Then
+            SheetExists = True
+            Exit Function
+        End If
+    Next ws
+
+End Function
+
+Private Sub DeleteSheetIfExists(ByVal wb As Workbook, ByVal sheetName As String)
+
+    On Error Resume Next
+    wb.Worksheets(sheetName).Delete
+    On Error GoTo 0
+
+End Sub
+
