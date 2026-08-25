@@ -1,0 +1,52 @@
+SLIDE 1 — HISTORICAL OUTCOME / REALIZED VALUE
+
+Recommended title
+…but realized value depends on the subsequent rate path.
+
+Main message
+Term premium is only the starting price. The realized value of extending duration is determined by how rates evolve after the investment decision.
+
+Comment — left chart
+The relative value of 6M changed materially through the cycle. Periods with an attractive initial spread did not consistently translate into positive realized excess return.
+
+Comment — right chart
+Starting spread alone provides limited guidance. Similar 6M–ON spreads produced materially different realized outcomes depending on the subsequent rate path.
+
+Evidence / KPI comment
+Even in the top quartile of starting 6M spreads, realized excess return averaged –9.7 bp and 6M won only 26.5% of decisions.
+
+Decision implication
+The curve spread is therefore a signal, not a decision rule. The investment decision needs to consider both the compensation available today and the risk that the future path differs from what is currently priced.
+
+Transition to allocation analysis
+Rather than asking which tenor will win, the next step is to test how different tenor allocations perform across alternative paths and measure the cost of being wrong.
+
+
+SLIDE 2 — CURRENT CURVE / FORWARD DECISION
+
+Recommended title
+Market expectations shape the term premium — realized value depends on the path that follows.
+
+Alternative shorter title
+Market expectations drive the term premium.
+
+Context
+The historical cycle shows that term rates move before policy decisions as the market reprices inflation, growth and the expected Fed path. The premium available in longer tenors therefore reflects both expected future short rates and compensation for uncertainty around that expectation.
+
+Current setup
+Short-term rates have moved lower, while 3M and 6M remain above ON. The positive term spread means the market is currently paying to extend duration, but that premium should be interpreted as compensation for uncertainty rather than a guaranteed return advantage.
+
+Looking forward
+If the Fed eases faster than currently priced, locking term should become more valuable as reinvestment rates fall. If cuts are delayed, inflation reaccelerates or the market reprices higher-for-longer, rolling shorter can outperform.
+
+Key message
+The market is currently paying a premium to extend duration. That premium compensates for uncertainty around the future Fed path: faster cuts favor locking today; higher-for-longer favors remaining short.
+
+Important nuance
+Market pricing can move before the Fed acts. The relevant risk is therefore the full path of expected short rates and term premium, not only the outcome of individual Fed meetings.
+
+Decision implication
+Today’s spread should be evaluated together with alternative future paths. The objective is to determine how much duration to take while preserving enough short-tenor exposure to remain resilient if the market view changes.
+
+Transition to portfolio slide
+This leads to the allocation framework: compare return across scenarios, measure regret versus the ex-post best tenor, and select a mix that remains competitive without depending on one rate view.
