@@ -1,0 +1,1126 @@
+Option Explicit
+
+'================================================================================
+' USD CASH ALLOCATION | FINAL POWERPOINT SLIDE BUILDER
+'
+' PURPOSE
+'   Creates the final one-slide PowerPoint directly from the calculated
+'   allocation/scenario outputs in the current Excel workbook.
+'
+' REQUIRED SHEETS
+'   Allocation_Strategies
+'   Allocation_Grid
+'   Allocation_Best_Tenor
+'   Allocation_Regret_By_Date
+'
+' OPTIONAL / REFERENCED IN FOOTNOTE
+'   Scenario_Daily
+'
+' OUTPUT
+'   USD_Cash_Allocation_Return_Regret.pptx
+'   Saved in the same folder as the Excel workbook.
+'
+' IMPORTANT
+'   - No PowerPoint reference is required. PowerPoint is late-bound.
+'   - No source curve is required.
+'   - All analytical numbers are read from the workbook at run time.
+'   - A temporary Excel sheet is created for chart rendering and deleted after.
+'
+' RUN
+'   Build_Final_Allocation_PPT
+'================================================================================
+
+Private Const PPT_W As Double = 960#
+Private Const PPT_H As Double = 540#
+
+Private Const PP_LAYOUT_BLANK As Long = 12
+Private Const PP_SAVE_AS_PPTX As Long = 24
+Private Const PP_PASTE_EMF As Long = 2
+Private Const MSO_TEXT_HORIZONTAL As Long = 1
+Private Const MSO_SHAPE_ROUNDED_RECTANGLE As Long = 5
+Private Const MSO_FALSE As Long = 0
+Private Const MSO_TRUE As Long = -1
+
+Private Const PP_ALIGN_LEFT As Long = 1
+Private Const PP_ALIGN_CENTER As Long = 2
+Private Const PP_ALIGN_RIGHT As Long = 3
+
+Private Const BRAND_LABEL As String = "rafael"
+Private Const OUTPUT_FILE As String = "USD_Cash_Allocation_Return_Regret.pptx"
+Private Const TEMP_SHEET As String = "PPT_Allocation_Temp"
+
+'================================================================================
+' MAIN
+'================================================================================
+Public Sub Build_Final_Allocation_PPT()
+
+    Dim wb As Workbook
+    Dim wsGrid As Worksheet
+    Dim wsBest As Worksheet
+    Dim wsRegret As Worksheet
+    Dim wsStrat As Worksheet
+    Dim wsTemp As Worksheet
+
+    Dim pptApp As Object
+    Dim pptPres As Object
+    Dim pptSlide As Object
+
+    Dim coFrontier As ChartObject
+    Dim coBest As ChartObject
+    Dim coRegret As ChartObject
+
+    Dim scenarioCount As Long
+    Dim dailyStarts As Long
+    Dim feasibleMixes As Long
+    Dim allocationTests As Double
+
+    Dim bestTenorName As String
+    Dim bestTenorShare As Double
+
+    Dim efficientCount As Long
+    Dim efficientMinTenor As Double
+    Dim efficientMaxTenor As Double
+
+    Dim referenceRow As Long
+    Dim referenceID As String
+    Dim referenceMix As String
+    Dim referenceReturn As Double
+    Dim referenceWorstRegret As Double
+
+    Dim outPath As String
+    Dim basePath As String
+
+    Dim oldScreen As Boolean
+    Dim oldAlerts As Boolean
+    Dim oldCalc As XlCalculation
+
+    Set wb = ThisWorkbook
+
+    If Not Ppt_SheetExists(wb, "Allocation_Strategies") Then
+        MsgBox "Missing sheet: Allocation_Strategies", vbCritical
+        Exit Sub
+    End If
+
+    If Not Ppt_SheetExists(wb, "Allocation_Grid") Then
+        MsgBox "Missing sheet: Allocation_Grid", vbCritical
+        Exit Sub
+    End If
+
+    If Not Ppt_SheetExists(wb, "Allocation_Best_Tenor") Then
+        MsgBox "Missing sheet: Allocation_Best_Tenor", vbCritical
+        Exit Sub
+    End If
+
+    If Not Ppt_SheetExists(wb, "Allocation_Regret_By_Date") Then
+        MsgBox "Missing sheet: Allocation_Regret_By_Date", vbCritical
+        Exit Sub
+    End If
+
+    Set wsGrid = wb.Worksheets("Allocation_Grid")
+    Set wsBest = wb.Worksheets("Allocation_Best_Tenor")
+    Set wsRegret = wb.Worksheets("Allocation_Regret_By_Date")
+    Set wsStrat = wb.Worksheets("Allocation_Strategies")
+
+    oldScreen = Application.ScreenUpdating
+    oldAlerts = Application.DisplayAlerts
+    oldCalc = Application.Calculation
+
+    On Error GoTo Fail
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+
+    Ppt_DeleteSheetIfExists wb, TEMP_SHEET
+    Set wsTemp = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    wsTemp.Name = TEMP_SHEET
+
+    scenarioCount = Ppt_CountScenarios(wsBest)
+    dailyStarts = Ppt_TotalDailyStarts(wsBest)
+    feasibleMixes = Ppt_LastDataRow(wsGrid, 1) - 1
+    allocationTests = CDbl(dailyStarts) * CDbl(feasibleMixes)
+
+    Ppt_FindOverallWinningTenor wsBest, bestTenorName, bestTenorShare
+    Ppt_GetEfficientZone wsGrid, efficientCount, efficientMinTenor, efficientMaxTenor
+    referenceRow = Ppt_FindReferenceAllocationRow(wsGrid)
+
+    If referenceRow = 0 Then
+        Err.Raise vbObjectError + 600, , "No efficient allocation was found in Allocation_Grid."
+    End If
+
+    referenceID = CStr(wsGrid.Cells(referenceRow, Ppt_HeaderCol(wsGrid, "Allocation ID")).Value)
+    referenceMix = Ppt_CompactAllocationLabel(wsGrid, referenceRow)
+    referenceReturn = CDbl(wsGrid.Cells(referenceRow, Ppt_HeaderCol(wsGrid, "Avg ann return")).Value2)
+    referenceWorstRegret = CDbl(wsGrid.Cells(referenceRow, Ppt_HeaderCol(wsGrid, "Worst regret bp")).Value2)
+
+    Set coFrontier = Ppt_CreateFrontierChart(wsTemp, wsGrid)
+    Set coBest = Ppt_CreateWinningTenorChart(wsTemp, wsBest)
+    Set coRegret = Ppt_CreateDailyRegretChart(wsTemp, wsRegret, "Recession / rapid cuts", 30)
+
+    On Error Resume Next
+    Set pptApp = GetObject(, "PowerPoint.Application")
+    On Error GoTo Fail
+
+    If pptApp Is Nothing Then
+        Set pptApp = CreateObject("PowerPoint.Application")
+    End If
+
+    If pptApp Is Nothing Then
+        Err.Raise vbObjectError + 601, , "PowerPoint could not be started."
+    End If
+
+    pptApp.Visible = True
+
+    Set pptPres = pptApp.Presentations.Add
+    pptPres.PageSetup.SlideWidth = PPT_W
+    pptPres.PageSetup.SlideHeight = PPT_H
+
+    Set pptSlide = pptPres.Slides.Add(1, PP_LAYOUT_BLANK)
+
+    Ppt_AddSlideBackground pptSlide
+    Ppt_AddHeader pptSlide
+    Ppt_AddMethodSteps pptSlide, scenarioCount, dailyStarts, feasibleMixes, allocationTests
+    Ppt_AddDefinitionBox pptSlide
+
+    Ppt_PasteChartAsPicture coFrontier.Chart, pptSlide, 32, 184, 538, 252
+    Ppt_PasteChartAsPicture coBest.Chart, pptSlide, 585, 140, 343, 147
+    Ppt_PasteChartAsPicture coRegret.Chart, pptSlide, 585, 298, 343, 151
+
+    Ppt_AddResultCards pptSlide, bestTenorName, bestTenorShare, efficientCount, efficientMinTenor, efficientMaxTenor, referenceMix, referenceReturn, referenceWorstRegret
+    Ppt_AddTakeaway pptSlide
+    Ppt_AddFootnote pptSlide
+
+    basePath = wb.Path
+    If Len(basePath) = 0 Then basePath = Application.DefaultFilePath
+
+    outPath = basePath & Application.PathSeparator & OUTPUT_FILE
+    outPath = Ppt_AvailableOutputPath(outPath)
+
+    pptPres.SaveAs outPath, PP_SAVE_AS_PPTX
+
+    wsTemp.Delete
+
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = oldAlerts
+    Application.ScreenUpdating = oldScreen
+
+    MsgBox "PowerPoint created:" & vbCrLf & outPath, vbInformation
+    Exit Sub
+
+Fail:
+    On Error Resume Next
+
+    If Not wsTemp Is Nothing Then wsTemp.Delete
+
+    Application.Calculation = oldCalc
+    Application.DisplayAlerts = oldAlerts
+    Application.ScreenUpdating = oldScreen
+
+    MsgBox "PowerPoint build failed: " & Err.Number & " - " & Err.Description, vbCritical
+
+End Sub
+
+'================================================================================
+' SLIDE STRUCTURE
+'================================================================================
+Private Sub Ppt_AddSlideBackground(ByVal sld As Object)
+
+    Dim shp As Object
+
+    Set shp = sld.Shapes.AddShape(1, 0, 0, PPT_W, PPT_H)
+    shp.Fill.ForeColor.RGB = RGB(255, 255, 255)
+    shp.Line.Visible = MSO_FALSE
+    shp.ZOrder 1
+
+End Sub
+
+Private Sub Ppt_AddHeader(ByVal sld As Object)
+
+    Ppt_AddText sld, 32, 14, 90, 22, BRAND_LABEL, 16, True, RGB(0, 87, 200), PP_ALIGN_LEFT
+    Ppt_AddText sld, 32, 42, 895, 31, "No single tenor wins across market paths — allocation should be chosen by return and regret", 20, True, RGB(0, 87, 200), PP_ALIGN_LEFT
+    Ppt_AddText sld, 32, 76, 895, 22, "Five stressed daily curve scenarios with sentiment-driven term-premium shocks, tested across every eligible 180-day starting date.", 9.5, False, RGB(101, 115, 130), PP_ALIGN_LEFT
+
+End Sub
+
+Private Sub Ppt_AddMethodSteps(ByVal sld As Object, ByVal scenarioCount As Long, ByVal dailyStarts As Long, ByVal feasibleMixes As Long, ByVal allocationTests As Double)
+
+    Dim gap As Double
+    Dim cardW As Double
+    Dim x As Double
+
+    gap = 9#
+    cardW = (896# - 4# * gap) / 5#
+
+    x = 32#
+    Ppt_AddStepCard sld, x, 96, cardW, 40, "1 | Define paths", Format(scenarioCount, "#,##0") & " stressed daily curves"
+
+    x = x + cardW + gap
+    Ppt_AddStepCard sld, x, 96, cardW, 40, "2 | Start daily", Format(dailyStarts, "#,##0") & " investments"
+
+    x = x + cardW + gap
+    Ppt_AddStepCard sld, x, 96, cardW, 40, "3 | Roll tenors", "ON daily · 1M/3M/6M"
+
+    x = x + cardW + gap
+    Ppt_AddStepCard sld, x, 96, cardW, 40, "4 | Test allocations", Format(feasibleMixes, "#,##0") & " feasible mixes"
+
+    x = x + cardW + gap
+    Ppt_AddStepCard sld, x, 96, cardW, 40, "5 | Measure regret", Ppt_FormatMillions(allocationTests) & " allocation tests"
+
+End Sub
+
+Private Sub Ppt_AddDefinitionBox(ByVal sld As Object)
+
+    Dim shp As Object
+
+    Set shp = Ppt_AddRoundedCard(sld, 32, 142, 205, 37, RGB(234, 242, 255), RGB(234, 242, 255))
+    Ppt_AddText sld, 52, 153, 165, 14, "Regret = ex-post best pure tenor return − allocation return", 7.2, True, RGB(11, 36, 80), PP_ALIGN_CENTER
+
+End Sub
+
+Private Sub Ppt_AddResultCards(ByVal sld As Object, ByVal bestTenor As String, ByVal bestShare As Double, ByVal efficientCount As Long, ByVal minTenor As Double, ByVal maxTenor As Double, ByVal referenceMix As String, ByVal avgReturn As Double, ByVal worstRegret As Double)
+
+    Ppt_AddResultCard sld, 32, 454, 221, 38, "Model result", bestTenor & " is best in " & Format(bestShare, "0.0%") & " of daily starts", "but not across every path / date"
+    Ppt_AddResultCard sld, 265, 454, 221, 38, "Efficient zone", Ppt_WeightedTenorText(minTenor, maxTenor), "only " & Format(efficientCount, "0") & " constrained mixes are efficient"
+    Ppt_AddResultCard sld, 498, 454, 221, 38, "Reference mix", referenceMix, Format(avgReturn, "0.00%") & " avg return · " & Format(worstRegret, "0.0") & " bp worst regret"
+    Ppt_AddResultCard sld, 731, 454, 197, 38, "Decision use", "Return shows opportunity; regret", "shows robustness"
+
+End Sub
+
+Private Sub Ppt_AddTakeaway(ByVal sld As Object)
+
+    Dim shp As Object
+
+    Set shp = Ppt_AddRoundedCard(sld, 32, 499, 896, 31, RGB(11, 36, 80), RGB(11, 36, 80))
+    Ppt_AddText sld, 60, 507, 840, 16, "Takeaway: the decision is not to forecast the winning tenor; it is to allocate cash so performance remains competitive when the realized path and term premium differ from the initial view.", 8.8, True, RGB(255, 255, 255), PP_ALIGN_CENTER
+
+End Sub
+
+Private Sub Ppt_AddFootnote(ByVal sld As Object)
+
+    Ppt_AddText sld, 32, 532, 896, 7, "Source: current workbook · Scenario_Daily · Allocation_Grid · Allocation_Best_Tenor · Allocation_Regret_By_Date", 5, False, RGB(101, 115, 130), PP_ALIGN_LEFT
+
+End Sub
+
+'================================================================================
+' POWERPOINT TEXT / CARD HELPERS
+'================================================================================
+Private Function Ppt_AddRoundedCard(ByVal sld As Object, ByVal x As Double, ByVal y As Double, ByVal w As Double, ByVal h As Double, ByVal fillRGB As Long, ByVal lineRGB As Long) As Object
+
+    Dim shp As Object
+
+    Set shp = sld.Shapes.AddShape(MSO_SHAPE_ROUNDED_RECTANGLE, x, y, w, h)
+
+    shp.Fill.Visible = MSO_TRUE
+    shp.Fill.ForeColor.RGB = fillRGB
+
+    shp.Line.Visible = MSO_TRUE
+    shp.Line.ForeColor.RGB = lineRGB
+    shp.Line.Weight = 0.75
+
+    Set Ppt_AddRoundedCard = shp
+
+End Function
+
+Private Sub Ppt_AddStepCard(ByVal sld As Object, ByVal x As Double, ByVal y As Double, ByVal w As Double, ByVal h As Double, ByVal title As String, ByVal body As String)
+
+    Dim shp As Object
+
+    Set shp = Ppt_AddRoundedCard(sld, x, y, w, h, RGB(248, 250, 252), RGB(213, 224, 237))
+
+    Ppt_AddText sld, x + 7, y + 7, w - 14, 10, title, 7.6, True, RGB(0, 87, 200), PP_ALIGN_LEFT
+    Ppt_AddText sld, x + 7, y + 23, w - 14, 10, body, 7.4, False, RGB(39, 49, 61), PP_ALIGN_LEFT
+
+End Sub
+
+Private Sub Ppt_AddResultCard(ByVal sld As Object, ByVal x As Double, ByVal y As Double, ByVal w As Double, ByVal h As Double, ByVal labelText As String, ByVal mainText As String, ByVal subText As String)
+
+    Dim shp As Object
+
+    Set shp = Ppt_AddRoundedCard(sld, x, y, w, h, RGB(250, 252, 255), RGB(213, 224, 237))
+
+    Ppt_AddText sld, x + 10, y + 9, 60, 9, labelText, 6.8, True, RGB(0, 87, 200), PP_ALIGN_LEFT
+    Ppt_AddText sld, x + 68, y + 7, w - 77, 12, mainText, 7.6, True, RGB(11, 36, 80), PP_ALIGN_LEFT
+    Ppt_AddText sld, x + 68, y + 22, w - 77, 9, subText, 6.3, False, RGB(101, 115, 130), PP_ALIGN_LEFT
+
+End Sub
+
+Private Function Ppt_AddText(ByVal sld As Object, ByVal x As Double, ByVal y As Double, ByVal w As Double, ByVal h As Double, ByVal txt As String, ByVal fontSize As Double, ByVal isBold As Boolean, ByVal fontRGB As Long, ByVal alignment As Long) As Object
+
+    Dim shp As Object
+
+    Set shp = sld.Shapes.AddTextbox(MSO_TEXT_HORIZONTAL, x, y, w, h)
+
+    shp.Line.Visible = MSO_FALSE
+    shp.Fill.Visible = MSO_FALSE
+
+    shp.TextFrame.MarginLeft = 0
+    shp.TextFrame.MarginRight = 0
+    shp.TextFrame.MarginTop = 0
+    shp.TextFrame.MarginBottom = 0
+    shp.TextFrame.WordWrap = MSO_TRUE
+
+    shp.TextFrame.TextRange.Text = txt
+    shp.TextFrame.TextRange.Font.Name = "Arial"
+    shp.TextFrame.TextRange.Font.Size = fontSize
+    shp.TextFrame.TextRange.Font.Bold = isBold
+    shp.TextFrame.TextRange.Font.Color.RGB = fontRGB
+    shp.TextFrame.TextRange.ParagraphFormat.Alignment = alignment
+
+    Set Ppt_AddText = shp
+
+End Function
+
+'================================================================================
+' FRONTIER CHART
+'================================================================================
+Private Function Ppt_CreateFrontierChart(ByVal wsTemp As Worksheet, ByVal wsGrid As Worksheet) As ChartObject
+
+    Dim lastRow As Long
+    Dim cWorst As Long
+    Dim cReturn As Long
+    Dim cEff As Long
+    Dim cID As Long
+    Dim cON As Long
+    Dim c1M As Long
+    Dim c3M As Long
+    Dim c6M As Long
+
+    Dim r As Long
+    Dim eRow As Long
+
+    Dim co As ChartObject
+    Dim ch As Chart
+    Dim serAll As Series
+    Dim serEff As Series
+    Dim pt As Long
+    Dim labelText As String
+
+    lastRow = Ppt_LastDataRow(wsGrid, 1)
+
+    cWorst = Ppt_HeaderCol(wsGrid, "Worst regret bp")
+    cReturn = Ppt_HeaderCol(wsGrid, "Avg ann return")
+    cEff = Ppt_HeaderCol(wsGrid, "Efficient")
+    cID = Ppt_HeaderCol(wsGrid, "Allocation ID")
+    cON = Ppt_HeaderCol(wsGrid, "ON")
+    c1M = Ppt_HeaderCol(wsGrid, "1M")
+    c3M = Ppt_HeaderCol(wsGrid, "3M")
+    c6M = Ppt_HeaderCol(wsGrid, "6M")
+
+    wsTemp.Range("A1").Value = "Eff ID"
+    wsTemp.Range("B1").Value = "Worst regret"
+    wsTemp.Range("C1").Value = "Avg return"
+    wsTemp.Range("D1").Value = "Label"
+
+    eRow = 2
+
+    For r = 2 To lastRow
+
+        If LCase$(Trim$(CStr(wsGrid.Cells(r, cEff).Value))) = "yes" Then
+
+            wsTemp.Cells(eRow, 1).Value = wsGrid.Cells(r, cID).Value
+            wsTemp.Cells(eRow, 2).Value = wsGrid.Cells(r, cWorst).Value
+            wsTemp.Cells(eRow, 3).Value = wsGrid.Cells(r, cReturn).Value
+
+            labelText = CStr(wsGrid.Cells(r, cID).Value) & "  " & Ppt_CompactWeights(CDbl(wsGrid.Cells(r, cON).Value2), CDbl(wsGrid.Cells(r, c1M).Value2), CDbl(wsGrid.Cells(r, c3M).Value2), CDbl(wsGrid.Cells(r, c6M).Value2))
+            wsTemp.Cells(eRow, 4).Value = labelText
+
+            eRow = eRow + 1
+
+        End If
+
+    Next r
+
+    Set co = wsTemp.ChartObjects.Add(10, 10, 720, 340)
+    Set ch = co.Chart
+
+    ch.ChartType = xlXYScatter
+
+    Set serAll = ch.SeriesCollection.NewSeries
+    serAll.Name = "Every feasible allocation"
+    serAll.XValues = wsGrid.Range(wsGrid.Cells(2, cWorst), wsGrid.Cells(lastRow, cWorst))
+    serAll.Values = wsGrid.Range(wsGrid.Cells(2, cReturn), wsGrid.Cells(lastRow, cReturn))
+    serAll.MarkerStyle = xlMarkerStyleCircle
+    serAll.MarkerSize = 5
+    serAll.Format.Line.Visible = msoFalse
+    serAll.MarkerForegroundColor = RGB(90, 155, 210)
+    serAll.MarkerBackgroundColor = RGB(90, 155, 210)
+
+    If eRow > 2 Then
+
+        Set serEff = ch.SeriesCollection.NewSeries
+        serEff.Name = "Efficient"
+        serEff.XValues = wsTemp.Range("B2:B" & eRow - 1)
+        serEff.Values = wsTemp.Range("C2:C" & eRow - 1)
+        serEff.MarkerStyle = xlMarkerStyleCircle
+        serEff.MarkerSize = 10
+        serEff.Format.Line.Visible = msoFalse
+        serEff.MarkerForegroundColor = RGB(0, 87, 200)
+        serEff.MarkerBackgroundColor = RGB(255, 255, 255)
+
+        serEff.ApplyDataLabels
+
+        For pt = 1 To serEff.Points.Count
+
+            serEff.Points(pt).DataLabel.Text = CStr(wsTemp.Cells(pt + 1, 4).Value)
+            serEff.Points(pt).DataLabel.Font.Name = "Arial"
+            serEff.Points(pt).DataLabel.Font.Size = 8
+            serEff.Points(pt).DataLabel.Font.Bold = True
+            serEff.Points(pt).DataLabel.Font.Color = RGB(11, 36, 80)
+
+        Next pt
+
+    End If
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "Every feasible allocation | average return vs worst regret"
+    ch.ChartTitle.Font.Name = "Arial"
+    ch.ChartTitle.Font.Size = 12
+    ch.ChartTitle.Font.Bold = True
+    ch.ChartTitle.Font.Color = RGB(11, 36, 80)
+
+    ch.HasLegend = False
+
+    ch.Axes(xlCategory).HasTitle = True
+    ch.Axes(xlCategory).AxisTitle.Text = "Worst regret vs ex-post best tenor (bp)"
+    ch.Axes(xlCategory).AxisTitle.Font.Name = "Arial"
+    ch.Axes(xlCategory).AxisTitle.Font.Size = 8
+
+    ch.Axes(xlValue).HasTitle = True
+    ch.Axes(xlValue).AxisTitle.Text = "Average annualized return"
+    ch.Axes(xlValue).AxisTitle.Font.Name = "Arial"
+    ch.Axes(xlValue).AxisTitle.Font.Size = 8
+    ch.Axes(xlValue).TickLabels.NumberFormat = "0.00%"
+
+    Ppt_FormatExcelChart ch
+
+    Set Ppt_CreateFrontierChart = co
+
+End Function
+
+'================================================================================
+' WINNING TENOR CHART
+'================================================================================
+Private Function Ppt_CreateWinningTenorChart(ByVal wsTemp As Worksheet, ByVal wsBest As Worksheet) As ChartObject
+
+    Dim lastRow As Long
+    Dim allRow As Long
+    Dim firstScenarioRow As Long
+    Dim finalScenarioRow As Long
+
+    Dim cScenario As Long
+    Dim cON As Long
+    Dim c1M As Long
+    Dim c3M As Long
+    Dim c6M As Long
+
+    Dim co As ChartObject
+    Dim ch As Chart
+    Dim ser As Series
+
+    lastRow = Ppt_LastDataRow(wsBest, 1)
+    allRow = Ppt_FindTextRow(wsBest, 1, "All scenarios")
+
+    firstScenarioRow = 2
+
+    If allRow > 0 Then
+        finalScenarioRow = allRow - 1
+    Else
+        finalScenarioRow = lastRow
+    End If
+
+    cScenario = Ppt_HeaderCol(wsBest, "Scenario")
+    cON = Ppt_HeaderCol(wsBest, "ON win %")
+    c1M = Ppt_HeaderCol(wsBest, "1M win %")
+    c3M = Ppt_HeaderCol(wsBest, "3M win %")
+    c6M = Ppt_HeaderCol(wsBest, "6M win %")
+
+    Set co = wsTemp.ChartObjects.Add(750, 10, 520, 240)
+    Set ch = co.Chart
+
+    ch.ChartType = xlBarStacked100
+
+    Set ser = ch.SeriesCollection.NewSeries
+    ser.Name = "ON"
+    ser.XValues = wsBest.Range(wsBest.Cells(firstScenarioRow, cScenario), wsBest.Cells(finalScenarioRow, cScenario))
+    ser.Values = wsBest.Range(wsBest.Cells(firstScenarioRow, cON), wsBest.Cells(finalScenarioRow, cON))
+    ser.Format.Fill.ForeColor.RGB = RGB(139, 169, 214)
+
+    Set ser = ch.SeriesCollection.NewSeries
+    ser.Name = "1M"
+    ser.XValues = wsBest.Range(wsBest.Cells(firstScenarioRow, cScenario), wsBest.Cells(finalScenarioRow, cScenario))
+    ser.Values = wsBest.Range(wsBest.Cells(firstScenarioRow, c1M), wsBest.Cells(finalScenarioRow, c1M))
+    ser.Format.Fill.ForeColor.RGB = RGB(68, 112, 183)
+
+    Set ser = ch.SeriesCollection.NewSeries
+    ser.Name = "3M"
+    ser.XValues = wsBest.Range(wsBest.Cells(firstScenarioRow, cScenario), wsBest.Cells(finalScenarioRow, cScenario))
+    ser.Values = wsBest.Range(wsBest.Cells(firstScenarioRow, c3M), wsBest.Cells(finalScenarioRow, c3M))
+    ser.Format.Fill.ForeColor.RGB = RGB(112, 173, 71)
+
+    Set ser = ch.SeriesCollection.NewSeries
+    ser.Name = "6M"
+    ser.XValues = wsBest.Range(wsBest.Cells(firstScenarioRow, cScenario), wsBest.Cells(finalScenarioRow, cScenario))
+    ser.Values = wsBest.Range(wsBest.Cells(firstScenarioRow, c6M), wsBest.Cells(finalScenarioRow, c6M))
+    ser.Format.Fill.ForeColor.RGB = RGB(0, 87, 200)
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "Winning pure tenor by scenario"
+    ch.ChartTitle.Font.Name = "Arial"
+    ch.ChartTitle.Font.Size = 11
+    ch.ChartTitle.Font.Bold = True
+    ch.ChartTitle.Font.Color = RGB(11, 36, 80)
+
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+    ch.Legend.Font.Name = "Arial"
+    ch.Legend.Font.Size = 7
+
+    ch.Axes(xlValue).MinimumScale = 0
+    ch.Axes(xlValue).MaximumScale = 1
+    ch.Axes(xlValue).MajorUnit = 0.2
+    ch.Axes(xlValue).TickLabels.NumberFormat = "0%"
+
+    ch.Axes(xlValue).HasTitle = True
+    ch.Axes(xlValue).AxisTitle.Text = "Share of daily starts"
+    ch.Axes(xlValue).AxisTitle.Font.Name = "Arial"
+    ch.Axes(xlValue).AxisTitle.Font.Size = 7
+
+    Ppt_FormatExcelChart ch
+
+    Set Ppt_CreateWinningTenorChart = co
+
+End Function
+
+'================================================================================
+' DAILY REGRET CHART
+'================================================================================
+Private Function Ppt_CreateDailyRegretChart(ByVal wsTemp As Worksheet, ByVal wsRegret As Worksheet, ByVal scenarioName As String, ByVal movingAverageDays As Long) As ChartObject
+
+    Dim lastRow As Long
+    Dim startRow As Long
+    Dim endRow As Long
+
+    Dim cScenario As Long
+    Dim cDate As Long
+    Dim cShort As Long
+    Dim cBalanced As Long
+    Dim cTerm As Long
+    Dim c6M As Long
+
+    Dim r As Long
+    Dim outRow As Long
+    Dim lookbackStart As Long
+
+    Dim co As ChartObject
+    Dim ch As Chart
+    Dim ser As Series
+
+    cScenario = Ppt_HeaderCol(wsRegret, "Scenario")
+    cDate = Ppt_HeaderCol(wsRegret, "Start date")
+    cShort = Ppt_HeaderCol(wsRegret, "Short / liquid")
+    cBalanced = Ppt_HeaderCol(wsRegret, "Balanced")
+    cTerm = Ppt_HeaderCol(wsRegret, "Term heavy")
+    c6M = Ppt_HeaderCol(wsRegret, "6M only")
+
+    lastRow = Ppt_LastDataRow(wsRegret, cScenario)
+
+    startRow = 0
+    endRow = 0
+
+    For r = 2 To lastRow
+
+        If CStr(wsRegret.Cells(r, cScenario).Value) = scenarioName Then
+
+            If startRow = 0 Then startRow = r
+            endRow = r
+
+        End If
+
+    Next r
+
+    If startRow = 0 Then
+        startRow = 2
+        scenarioName = CStr(wsRegret.Cells(startRow, cScenario).Value)
+
+        For r = startRow To lastRow
+
+            If CStr(wsRegret.Cells(r, cScenario).Value) = scenarioName Then
+                endRow = r
+            Else
+                Exit For
+            End If
+
+        Next r
+    End If
+
+    wsTemp.Range("F1:J1").Value = Array("Date", "Short / liquid", "Balanced", "Term heavy", "6M only")
+
+    outRow = 2
+
+    For r = startRow To endRow
+
+        If r >= startRow + movingAverageDays - 1 Then
+
+            lookbackStart = r - movingAverageDays + 1
+
+            wsTemp.Cells(outRow, 6).Value = wsRegret.Cells(r, cDate).Value
+            wsTemp.Cells(outRow, 7).Value = Application.WorksheetFunction.Average(wsRegret.Range(wsRegret.Cells(lookbackStart, cShort), wsRegret.Cells(r, cShort)))
+            wsTemp.Cells(outRow, 8).Value = Application.WorksheetFunction.Average(wsRegret.Range(wsRegret.Cells(lookbackStart, cBalanced), wsRegret.Cells(r, cBalanced)))
+            wsTemp.Cells(outRow, 9).Value = Application.WorksheetFunction.Average(wsRegret.Range(wsRegret.Cells(lookbackStart, cTerm), wsRegret.Cells(r, cTerm)))
+            wsTemp.Cells(outRow, 10).Value = Application.WorksheetFunction.Average(wsRegret.Range(wsRegret.Cells(lookbackStart, c6M), wsRegret.Cells(r, c6M)))
+
+            outRow = outRow + 1
+
+        End If
+
+    Next r
+
+    Set co = wsTemp.ChartObjects.Add(750, 270, 520, 245)
+    Set ch = co.Chart
+
+    ch.ChartType = xlLine
+
+    Set ser = ch.SeriesCollection.NewSeries
+    ser.Name = "Short / liquid"
+    ser.XValues = wsTemp.Range("F2:F" & outRow - 1)
+    ser.Values = wsTemp.Range("G2:G" & outRow - 1)
+    ser.Format.Line.ForeColor.RGB = RGB(67, 114, 204)
+    ser.Format.Line.Weight = 1.5
+
+    Set ser = ch.SeriesCollection.NewSeries
+    ser.Name = "Balanced"
+    ser.XValues = wsTemp.Range("F2:F" & outRow - 1)
+    ser.Values = wsTemp.Range("H2:H" & outRow - 1)
+    ser.Format.Line.ForeColor.RGB = RGB(0, 87, 200)
+    ser.Format.Line.Weight = 1.5
+
+    Set ser = ch.SeriesCollection.NewSeries
+    ser.Name = "Term heavy"
+    ser.XValues = wsTemp.Range("F2:F" & outRow - 1)
+    ser.Values = wsTemp.Range("I2:I" & outRow - 1)
+    ser.Format.Line.ForeColor.RGB = RGB(0, 166, 166)
+    ser.Format.Line.Weight = 1.5
+
+    Set ser = ch.SeriesCollection.NewSeries
+    ser.Name = "6M only"
+    ser.XValues = wsTemp.Range("F2:F" & outRow - 1)
+    ser.Values = wsTemp.Range("J2:J" & outRow - 1)
+    ser.Format.Line.ForeColor.RGB = RGB(11, 36, 80)
+    ser.Format.Line.Weight = 1.7
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = "Daily regret | " & LCase$(scenarioName)
+    ch.ChartTitle.Font.Name = "Arial"
+    ch.ChartTitle.Font.Size = 11
+    ch.ChartTitle.Font.Bold = True
+    ch.ChartTitle.Font.Color = RGB(11, 36, 80)
+
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionTop
+    ch.Legend.Font.Name = "Arial"
+    ch.Legend.Font.Size = 6.5
+
+    ch.Axes(xlCategory).TickLabels.NumberFormat = "mmm-yy"
+    ch.Axes(xlCategory).HasTitle = True
+    ch.Axes(xlCategory).AxisTitle.Text = "Starting date (" & Format(movingAverageDays, "0") & "D MA)"
+    ch.Axes(xlCategory).AxisTitle.Font.Name = "Arial"
+    ch.Axes(xlCategory).AxisTitle.Font.Size = 7
+
+    ch.Axes(xlValue).HasTitle = True
+    ch.Axes(xlValue).AxisTitle.Text = "bp"
+    ch.Axes(xlValue).AxisTitle.Font.Name = "Arial"
+    ch.Axes(xlValue).AxisTitle.Font.Size = 7
+
+    Ppt_FormatExcelChart ch
+
+    Set Ppt_CreateDailyRegretChart = co
+
+End Function
+
+'================================================================================
+' EXCEL CHART FORMATTING / POWERPOINT PASTE
+'================================================================================
+Private Sub Ppt_FormatExcelChart(ByVal ch As Chart)
+
+    On Error Resume Next
+
+    ch.ChartArea.Format.Fill.Visible = msoTrue
+    ch.ChartArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+    ch.ChartArea.Format.Line.Visible = msoFalse
+
+    ch.PlotArea.Format.Fill.Visible = msoTrue
+    ch.PlotArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
+    ch.PlotArea.Format.Line.Visible = msoFalse
+
+    ch.Axes(xlCategory).TickLabels.Font.Name = "Arial"
+    ch.Axes(xlCategory).TickLabels.Font.Size = 7
+    ch.Axes(xlValue).TickLabels.Font.Name = "Arial"
+    ch.Axes(xlValue).TickLabels.Font.Size = 7
+
+    ch.Axes(xlValue).MajorGridlines.Format.Line.ForeColor.RGB = RGB(225, 230, 236)
+    ch.Axes(xlValue).MajorGridlines.Format.Line.Weight = 0.5
+
+    On Error GoTo 0
+
+End Sub
+
+Private Sub Ppt_PasteChartAsPicture(ByVal ch As Chart, ByVal sld As Object, ByVal x As Double, ByVal y As Double, ByVal w As Double, ByVal h As Double)
+
+    Dim pasted As Object
+    Dim shp As Object
+
+    ch.CopyPicture Appearance:=xlScreen, Format:=xlPicture
+    DoEvents
+
+    Set pasted = sld.Shapes.PasteSpecial(PP_PASTE_EMF)
+    Set shp = pasted.Item(1)
+
+    shp.LockAspectRatio = MSO_FALSE
+    shp.Left = x
+    shp.Top = y
+    shp.Width = w
+    shp.Height = h
+
+End Sub
+
+'================================================================================
+' WORKBOOK ANALYTICS
+'================================================================================
+Private Sub Ppt_FindOverallWinningTenor(ByVal ws As Worksheet, ByRef tenorName As String, ByRef winShare As Double)
+
+    Dim rowAll As Long
+    Dim headers(1 To 4) As String
+    Dim names(1 To 4) As String
+    Dim i As Long
+    Dim c As Long
+    Dim v As Double
+
+    headers(1) = "ON win %"
+    headers(2) = "1M win %"
+    headers(3) = "3M win %"
+    headers(4) = "6M win %"
+
+    names(1) = "ON"
+    names(2) = "1M"
+    names(3) = "3M"
+    names(4) = "6M"
+
+    rowAll = Ppt_FindTextRow(ws, Ppt_HeaderCol(ws, "Scenario"), "All scenarios")
+
+    If rowAll = 0 Then rowAll = Ppt_LastDataRow(ws, 1)
+
+    tenorName = ""
+    winShare = -1#
+
+    For i = 1 To 4
+
+        c = Ppt_HeaderCol(ws, headers(i))
+        v = CDbl(ws.Cells(rowAll, c).Value2)
+
+        If v > winShare Then
+            winShare = v
+            tenorName = names(i)
+        End If
+
+    Next i
+
+End Sub
+
+Private Sub Ppt_GetEfficientZone(ByVal ws As Worksheet, ByRef efficientCount As Long, ByRef minTenor As Double, ByRef maxTenor As Double)
+
+    Dim lastRow As Long
+    Dim cEff As Long
+    Dim cTenor As Long
+    Dim r As Long
+    Dim x As Double
+
+    lastRow = Ppt_LastDataRow(ws, 1)
+    cEff = Ppt_HeaderCol(ws, "Efficient")
+    cTenor = Ppt_HeaderCol(ws, "Weighted tenor")
+
+    efficientCount = 0
+    minTenor = 1E+30
+    maxTenor = -1E+30
+
+    For r = 2 To lastRow
+
+        If LCase$(Trim$(CStr(ws.Cells(r, cEff).Value))) = "yes" Then
+
+            x = CDbl(ws.Cells(r, cTenor).Value2)
+
+            efficientCount = efficientCount + 1
+
+            If x < minTenor Then minTenor = x
+            If x > maxTenor Then maxTenor = x
+
+        End If
+
+    Next r
+
+    If efficientCount = 0 Then
+        minTenor = 0#
+        maxTenor = 0#
+    End If
+
+End Sub
+
+Private Function Ppt_FindReferenceAllocationRow(ByVal ws As Worksheet) As Long
+
+    Dim lastRow As Long
+    Dim cEff As Long
+    Dim cReturn As Long
+    Dim r As Long
+    Dim bestReturn As Double
+
+    lastRow = Ppt_LastDataRow(ws, 1)
+    cEff = Ppt_HeaderCol(ws, "Efficient")
+    cReturn = Ppt_HeaderCol(ws, "Avg ann return")
+
+    bestReturn = -1E+30
+    Ppt_FindReferenceAllocationRow = 0
+
+    For r = 2 To lastRow
+
+        If LCase$(Trim$(CStr(ws.Cells(r, cEff).Value))) = "yes" Then
+
+            If CDbl(ws.Cells(r, cReturn).Value2) > bestReturn Then
+
+                bestReturn = CDbl(ws.Cells(r, cReturn).Value2)
+                Ppt_FindReferenceAllocationRow = r
+
+            End If
+
+        End If
+
+    Next r
+
+End Function
+
+Private Function Ppt_CountScenarios(ByVal ws As Worksheet) As Long
+
+    Dim lastRow As Long
+    Dim cScenario As Long
+    Dim r As Long
+    Dim txt As String
+
+    lastRow = Ppt_LastDataRow(ws, 1)
+    cScenario = Ppt_HeaderCol(ws, "Scenario")
+
+    Ppt_CountScenarios = 0
+
+    For r = 2 To lastRow
+
+        txt = Trim$(CStr(ws.Cells(r, cScenario).Value))
+
+        If Len(txt) > 0 And LCase$(txt) <> "all scenarios" Then
+            Ppt_CountScenarios = Ppt_CountScenarios + 1
+        End If
+
+    Next r
+
+End Function
+
+Private Function Ppt_TotalDailyStarts(ByVal ws As Worksheet) As Long
+
+    Dim rowAll As Long
+    Dim cScenario As Long
+    Dim cObs As Long
+    Dim lastRow As Long
+    Dim r As Long
+
+    cScenario = Ppt_HeaderCol(ws, "Scenario")
+    cObs = Ppt_HeaderCol(ws, "Observations")
+
+    rowAll = Ppt_FindTextRow(ws, cScenario, "All scenarios")
+
+    If rowAll > 0 Then
+        Ppt_TotalDailyStarts = CLng(ws.Cells(rowAll, cObs).Value2)
+        Exit Function
+    End If
+
+    lastRow = Ppt_LastDataRow(ws, cScenario)
+    Ppt_TotalDailyStarts = 0
+
+    For r = 2 To lastRow
+        Ppt_TotalDailyStarts = Ppt_TotalDailyStarts + CLng(ws.Cells(r, cObs).Value2)
+    Next r
+
+End Function
+
+'================================================================================
+' LABEL HELPERS
+'================================================================================
+Private Function Ppt_CompactAllocationLabel(ByVal ws As Worksheet, ByVal r As Long) As String
+
+    Dim cON As Long
+    Dim c1M As Long
+    Dim c3M As Long
+    Dim c6M As Long
+
+    cON = Ppt_HeaderCol(ws, "ON")
+    c1M = Ppt_HeaderCol(ws, "1M")
+    c3M = Ppt_HeaderCol(ws, "3M")
+    c6M = Ppt_HeaderCol(ws, "6M")
+
+    Ppt_CompactAllocationLabel = Ppt_CompactWeights(CDbl(ws.Cells(r, cON).Value2), CDbl(ws.Cells(r, c1M).Value2), CDbl(ws.Cells(r, c3M).Value2), CDbl(ws.Cells(r, c6M).Value2))
+
+End Function
+
+Private Function Ppt_CompactWeights(ByVal wON As Double, ByVal w1M As Double, ByVal w3M As Double, ByVal w6M As Double) As String
+
+    Dim txt As String
+
+    txt = ""
+
+    If wON > 0.0000001 Then txt = txt & Format(wON, "0%") & " ON"
+    If w1M > 0.0000001 Then
+        If Len(txt) > 0 Then txt = txt & " / "
+        txt = txt & Format(w1M, "0%") & " 1M"
+    End If
+
+    If w3M > 0.0000001 Then
+        If Len(txt) > 0 Then txt = txt & " / "
+        txt = txt & Format(w3M, "0%") & " 3M"
+    End If
+
+    If w6M > 0.0000001 Then
+        If Len(txt) > 0 Then txt = txt & " / "
+        txt = txt & Format(w6M, "0%") & " 6M"
+    End If
+
+    If Len(txt) = 0 Then txt = "0%"
+
+    Ppt_CompactWeights = txt
+
+End Function
+
+Private Function Ppt_WeightedTenorText(ByVal minTenor As Double, ByVal maxTenor As Double) As String
+
+    If Abs(maxTenor - minTenor) < 0.000001 Then
+        Ppt_WeightedTenorText = Format(minTenor, "0.0") & " months weighted tenor"
+    Else
+        Ppt_WeightedTenorText = Format(minTenor, "0.0") & "–" & Format(maxTenor, "0.0") & " months weighted tenor"
+    End If
+
+End Function
+
+Private Function Ppt_FormatMillions(ByVal x As Double) As String
+
+    If Abs(x) >= 1000000# Then
+        Ppt_FormatMillions = Format(x / 1000000#, "0.00") & "m"
+    ElseIf Abs(x) >= 1000# Then
+        Ppt_FormatMillions = Format(x / 1000#, "0.0") & "k"
+    Else
+        Ppt_FormatMillions = Format(x, "#,##0")
+    End If
+
+End Function
+
+'================================================================================
+' HEADER / ROW HELPERS
+'================================================================================
+Private Function Ppt_HeaderCol(ByVal ws As Worksheet, ByVal headerText As String) As Long
+
+    Dim lastCol As Long
+    Dim c As Long
+
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+    For c = 1 To lastCol
+
+        If LCase$(Trim$(CStr(ws.Cells(1, c).Value))) = LCase$(Trim$(headerText)) Then
+            Ppt_HeaderCol = c
+            Exit Function
+        End If
+
+    Next c
+
+    Err.Raise vbObjectError + 610, , "Header not found on " & ws.Name & ": " & headerText
+
+End Function
+
+Private Function Ppt_LastDataRow(ByVal ws As Worksheet, ByVal colNo As Long) As Long
+
+    Ppt_LastDataRow = ws.Cells(ws.Rows.Count, colNo).End(xlUp).Row
+
+End Function
+
+Private Function Ppt_FindTextRow(ByVal ws As Worksheet, ByVal colNo As Long, ByVal searchText As String) As Long
+
+    Dim lastRow As Long
+    Dim r As Long
+
+    lastRow = Ppt_LastDataRow(ws, colNo)
+
+    For r = 2 To lastRow
+
+        If LCase$(Trim$(CStr(ws.Cells(r, colNo).Value))) = LCase$(Trim$(searchText)) Then
+            Ppt_FindTextRow = r
+            Exit Function
+        End If
+
+    Next r
+
+    Ppt_FindTextRow = 0
+
+End Function
+
+'================================================================================
+' FILE / SHEET HELPERS
+'================================================================================
+Private Function Ppt_AvailableOutputPath(ByVal requestedPath As String) As String
+
+    Dim altPath As String
+    Dim dotPos As Long
+
+    If Len(Dir$(requestedPath)) = 0 Then
+        Ppt_AvailableOutputPath = requestedPath
+        Exit Function
+    End If
+
+    On Error Resume Next
+    Kill requestedPath
+
+    If Err.Number = 0 Then
+        On Error GoTo 0
+        Ppt_AvailableOutputPath = requestedPath
+        Exit Function
+    End If
+
+    Err.Clear
+    On Error GoTo 0
+
+    dotPos = InStrRev(requestedPath, ".")
+
+    If dotPos > 0 Then
+        altPath = Left$(requestedPath, dotPos - 1) & "_" & Format(Now, "yyyymmdd_hhnnss") & Mid$(requestedPath, dotPos)
+    Else
+        altPath = requestedPath & "_" & Format(Now, "yyyymmdd_hhnnss") & ".pptx"
+    End If
+
+    Ppt_AvailableOutputPath = altPath
+
+End Function
+
+Private Function Ppt_SheetExists(ByVal wb As Workbook, ByVal sheetName As String) As Boolean
+
+    Dim ws As Worksheet
+
+    For Each ws In wb.Worksheets
+
+        If LCase$(ws.Name) = LCase$(sheetName) Then
+            Ppt_SheetExists = True
+            Exit Function
+        End If
+
+    Next ws
+
+End Function
+
+Private Sub Ppt_DeleteSheetIfExists(ByVal wb As Workbook, ByVal sheetName As String)
+
+    On Error Resume Next
+    wb.Worksheets(sheetName).Delete
+    On Error GoTo 0
+
+End Sub
