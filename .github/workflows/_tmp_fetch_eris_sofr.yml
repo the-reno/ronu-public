@@ -6,15 +6,17 @@ on:
       - '.github/workflows/_tmp_fetch_eris_sofr.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch and print daily 1M 3M 6M SOFR OIS
+      - uses: actions/checkout@v4
+      - name: Fetch daily 1M 3M 6M SOFR OIS
         shell: bash
         run: |
+          mkdir -p tmp
           python - <<'PY'
           import csv, io, urllib.request
           from datetime import datetime
@@ -24,11 +26,8 @@ jobs:
           with urllib.request.urlopen(req, timeout=60) as r:
               text = r.read().decode('utf-8-sig')
 
-          reader = csv.DictReader(io.StringIO(text))
-          print('BEGIN_ERIS_DATA')
-          print('Date,SOFR1M,SOFR3M,SOFR6M')
-          n = 0
-          for row in reader:
+          out = []
+          for row in csv.DictReader(io.StringIO(text)):
               raw_date = (row.get('Evaluation Date') or row.get('EvaluationDate') or '').strip()
               if not raw_date:
                   continue
@@ -42,9 +41,18 @@ jobs:
               if dt is None or dt < datetime(2022,1,1):
                   continue
               vals = [row.get('SOFR1M','').strip(), row.get('SOFR3M','').strip(), row.get('SOFR6M','').strip()]
-              if not all(vals):
-                  continue
-              print(f'{dt:%Y-%m-%d},{vals[0]},{vals[1]},{vals[2]}')
-              n += 1
-          print(f'END_ERIS_DATA rows={n}')
+              if all(vals):
+                  out.append((dt, *vals))
+          out.sort(key=lambda x: x[0])
+          with open('tmp/_tmp_eris_sofr_daily.csv','w',newline='',encoding='utf-8') as f:
+              w=csv.writer(f)
+              w.writerow(['Date','SOFR1M','SOFR3M','SOFR6M'])
+              for dt,a,b,c in out:
+                  w.writerow([dt.strftime('%Y-%m-%d'),a,b,c])
+          print(f'wrote {len(out)} rows')
           PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tmp/_tmp_eris_sofr_daily.csv
+          git commit -m 'Temporary Eris SOFR daily extraction' || true
+          git push
