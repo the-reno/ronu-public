@@ -6,14 +6,13 @@ on:
       - '.github/workflows/_tmp_fetch_eris_sofr_stage.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   stage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Fetch daily SOFR OIS and stage CSV
+      - name: Fetch daily SOFR OIS CSV
         shell: bash
         run: |
           mkdir -p tmp
@@ -36,13 +35,13 @@ jobs:
               vals=[row.get('SOFR1M','').strip(),row.get('SOFR3M','').strip(),row.get('SOFR6M','').strip()]
               if all(vals): out.append((dt,*vals))
           out.sort(key=lambda x:x[0])
-          with open('tmp/_tmp_eris_sofr_daily.csv','w',newline='',encoding='utf-8') as f:
+          with open('tmp/eris_sofr_daily.csv','w',newline='',encoding='utf-8') as f:
               w=csv.writer(f); w.writerow(['Date','SOFR1M','SOFR3M','SOFR6M'])
               for dt,a,b,c in out: w.writerow([dt.strftime('%Y-%m-%d'),a,b,c])
           print('rows',len(out))
           PY
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add tmp/_tmp_eris_sofr_daily.csv
-          git commit -m 'Temporary Eris SOFR daily extraction'
-          git push
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eris-sofr-daily
+          path: tmp/eris_sofr_daily.csv
+          retention-days: 1
