@@ -1,0 +1,144 @@
+name: Temporary SOFR curve data export
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tmp-sofr-curve-export.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download public data and build joined CSV
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import io
+          import json
+          import urllib.request
+          from datetime import datetime
+          from pathlib import Path
+
+          ERIS_URL = "https://files.erisfutures.com/ftp/Eris_Historical_ParCouponCurve_SOFR.csv"
+          FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=SOFR&cosd=2022-01-01"
+          OUT = Path("usd_sofr_on_1m_3m_6m_since_2022.csv")
+
+          def download_text(url: str) -> str:
+              request = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "Mozilla/5.0 SOFR-public-data-export/1.0"},
+              )
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  return response.read().decode("utf-8-sig")
+
+          def parse_date(value: str):
+              value = value.strip()
+              for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+                  try:
+                      return datetime.strptime(value, fmt).date()
+                  except ValueError:
+                      pass
+              raise ValueError(f"Unsupported date: {value!r}")
+
+          eris_text = download_text(ERIS_URL)
+          eris_reader = csv.DictReader(io.StringIO(eris_text))
+          eris_headers = {h.strip(): h for h in (eris_reader.fieldnames or [])}
+          date_header = next(
+              (eris_headers[k] for k in ("Evaluation Date", "EvaluationDate", "Date") if k in eris_headers),
+              None,
+          )
+          required = ["SOFR1M", "SOFR3M", "SOFR6M"]
+          missing = [col for col in required if col not in eris_headers]
+          if not date_header or missing:
+              raise RuntimeError(
+                  f"Unexpected Eris columns. date_header={date_header}, missing={missing}, "
+                  f"available={list(eris_headers)}"
+              )
+
+          eris = {}
+          for row in eris_reader:
+              raw_date = (row.get(date_header) or "").strip()
+              if not raw_date:
+                  continue
+              d = parse_date(raw_date)
+              if d.isoformat() < "2022-01-01":
+                  continue
+              try:
+                  values = tuple(float((row.get(eris_headers[col]) or "").strip()) for col in required)
+              except ValueError:
+                  continue
+              eris[d] = values
+
+          fred_text = download_text(FRED_URL)
+          fred_reader = csv.DictReader(io.StringIO(fred_text))
+          fred_fields = [h.strip() for h in (fred_reader.fieldnames or [])]
+          fred_date_header = next((h for h in fred_fields if h.lower() in {"date", "observation_date"}), None)
+          fred_value_header = next((h for h in fred_fields if h.upper() == "SOFR"), None)
+          if not fred_date_header or not fred_value_header:
+              raise RuntimeError(f"Unexpected FRED columns: {fred_fields}")
+
+          sofr_on = {}
+          for row in fred_reader:
+              raw_date = (row.get(fred_date_header) or "").strip()
+              raw_value = (row.get(fred_value_header) or "").strip()
+              if not raw_date or raw_value in {"", ".", "NA", "NaN"}:
+                  continue
+              d = parse_date(raw_date)
+              if d.isoformat() < "2022-01-01":
+                  continue
+              try:
+                  sofr_on[d] = float(raw_value)
+              except ValueError:
+                  continue
+
+          dates = sorted(set(eris).intersection(sofr_on))
+          if not dates:
+              raise RuntimeError("No common dates between Eris and FRED data")
+
+          with OUT.open("w", newline="", encoding="utf-8") as f:
+              writer = csv.writer(f)
+              writer.writerow([
+                  "Date",
+                  "SOFR_ON_pct",
+                  "SOFR_OIS_1M_pct",
+                  "SOFR_OIS_3M_pct",
+                  "SOFR_OIS_6M_pct",
+              ])
+              for d in dates:
+                  r1, r3, r6 = eris[d]
+                  writer.writerow([
+                      d.isoformat(),
+                      f"{sofr_on[d]:.6f}",
+                      f"{r1:.6f}",
+                      f"{r3:.6f}",
+                      f"{r6:.6f}",
+                  ])
+
+          metadata = {
+              "rows": len(dates),
+              "first_date": dates[0].isoformat(),
+              "last_date": dates[-1].isoformat(),
+              "units": "percent per annum",
+              "on_source": FRED_URL,
+              "on_underlying_source": "Federal Reserve Bank of New York SOFR",
+              "term_source": ERIS_URL,
+              "term_definition": "Eris SOFR OIS spot-starting par coupon curve",
+              "note": "1M/3M/6M are forward-looking OIS par rates, not CME Term SOFR and not backward-looking SOFR averages.",
+          }
+          Path("sources_and_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(metadata, indent=2))
+          PY
+
+      - name: Upload data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: usd-sofr-curve-public-data
+          path: |
+            usd_sofr_on_1m_3m_6m_since_2022.csv
+            sources_and_metadata.json
+          retention-days: 1
