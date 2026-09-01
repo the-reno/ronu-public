@@ -14,17 +14,26 @@ the file.
 - Static browser preview with model/reference comparison
 - Simple Windows manager built with Tkinter
 
-## Quick start on Windows
+## Corporate environment
 
-1. Place the required runtime files in the folder structure below.
-2. Double-click `START_HERE.bat`.
-3. The first run creates a private `.venv` and installs the Python packages.
-4. Edit the spreadsheet, refresh the preview, and build the presentation.
+This version does not use batch files, ActiveX, COM, or PowerPoint automation.
+It also does not download or install packages automatically.
 
-Command-line shortcuts:
+Use a corporate-approved Python 3.10+ installation. Ask your Python or desktop
+administrator to make the packages in `requirements.txt` available through the
+company's approved Python environment or internal package index.
 
-- `BUILD_NOW.bat` builds the PPTX directly.
-- `OPEN_PREVIEW.bat` regenerates and opens the browser preview.
+From PowerShell, Command Prompt, an IDE terminal, or the approved Python console:
+
+```text
+python run.py status
+python run.py build
+python run.py preview
+python run.py preview --open
+```
+
+Run `python run.py` without a command to use the interactive text menu. The
+optional Tkinter interface remains available through `python run.py gui`.
 
 ## Required runtime structure
 
@@ -33,6 +42,7 @@ presentation-builder/
 ├── app.py
 ├── build_presentation.py
 ├── preview.py
+├── run.py
 ├── requirements.txt
 ├── config/
 │   └── presentation_config.xlsx
@@ -55,13 +65,17 @@ The workbook must contain these Excel tables:
 | Paragraphs | `tblParagraphs` | Alignment and line spacing |
 | Formats | `tblFormats` | Simplified reusable styles |
 
-## Direct Python usage
+## Dependency setup
 
-```bash
+Use the method approved by the company. If the corporate Python environment
+permits pip and already points to an internal package index:
+
+```text
 python -m pip install -r requirements.txt
-python build_presentation.py
-python preview.py --open
 ```
+
+No administrator access is required by the code itself. A virtual environment
+is optional and is not created automatically.
 
 The output filename is controlled by `OUTPUT_FILE_NAME` in `tblSettings`.
 
@@ -70,4 +84,3 @@ The output filename is controlled by `OUTPUT_FILE_NAME` in `tblSettings`.
 The USD cash-allocation model used to validate this builder contains seven
 slides and 193 objects. The generated deck reproduced all 193 objects and
 passed the slide overflow test.
-
