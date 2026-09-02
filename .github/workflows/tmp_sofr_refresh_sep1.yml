@@ -1,0 +1,84 @@
+name: Temporary SOFR refresh Sep1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tmp_sofr_refresh_sep1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build latest joined SOFR curve
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv, io, json, urllib.request
+          from datetime import datetime
+          from pathlib import Path
+
+          ERIS_URL = 'https://files.erisfutures.com/ftp/Eris_Historical_ParCouponCurve_SOFR.csv'
+          FRED_URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=SOFR&cosd=2022-01-01'
+          OUT = Path('usd_sofr_on_1m_3m_6m_through_sep1.csv')
+
+          def get(url):
+              req=urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 SOFR-refresh/1.0'})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  return r.read().decode('utf-8-sig')
+
+          def dparse(s):
+              s=s.strip()
+              for fmt in ('%Y-%m-%d','%m/%d/%Y','%m/%d/%y'):
+                  try: return datetime.strptime(s,fmt).date()
+                  except ValueError: pass
+              raise ValueError(s)
+
+          etxt=get(ERIS_URL)
+          er=csv.DictReader(io.StringIO(etxt))
+          headers={h.strip():h for h in er.fieldnames or []}
+          dh=next((headers[k] for k in ('Evaluation Date','EvaluationDate','Date') if k in headers),None)
+          reqcols=['SOFR1M','SOFR3M','SOFR6M']
+          data={}
+          for row in er:
+              if not row.get(dh): continue
+              d=dparse(row[dh])
+              if d.isoformat()<'2022-01-01' or d.isoformat()>'2026-09-01': continue
+              try: vals=[float(row[headers[c]]) for c in reqcols]
+              except Exception: continue
+              data[d]=vals
+
+          ftxt=get(FRED_URL)
+          fr=csv.DictReader(io.StringIO(ftxt))
+          ffields=[h.strip() for h in fr.fieldnames or []]
+          fdh=next(h for h in ffields if h.lower() in ('date','observation_date'))
+          fvh=next(h for h in ffields if h.upper()=='SOFR')
+          on={}
+          for row in fr:
+              rv=(row.get(fvh) or '').strip()
+              if rv in ('','.','NA','NaN'): continue
+              d=dparse(row[fdh])
+              if d.isoformat()<'2022-01-01' or d.isoformat()>'2026-09-01': continue
+              on[d]=float(rv)
+
+          dates=sorted(set(data).intersection(on))
+          with OUT.open('w',newline='',encoding='utf-8') as f:
+              w=csv.writer(f)
+              w.writerow(['Date','SOFR_ON_pct','SOFR_OIS_1M_pct','SOFR_OIS_3M_pct','SOFR_OIS_6M_pct'])
+              for d in dates:
+                  a,b,c=data[d]
+                  w.writerow([d.isoformat(),f'{on[d]:.6f}',f'{a:.6f}',f'{b:.6f}',f'{c:.6f}'])
+          meta={'rows':len(dates),'first_date':dates[0].isoformat(),'last_date':dates[-1].isoformat(),'latest':[dates[-1].isoformat(),on[dates[-1]],*data[dates[-1]]], 'eris_url':ERIS_URL,'fred_url':FRED_URL}
+          Path('metadata.json').write_text(json.dumps(meta,indent=2)+'\n')
+          print(json.dumps(meta,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sofr-refresh-sep1
+          path: |
+            usd_sofr_on_1m_3m_6m_through_sep1.csv
+            metadata.json
+          retention-days: 1
