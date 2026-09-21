@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#111413">
+<meta name="description" content="A working dark editorial layout for Ronu. Explore chapters, topics, and optional detail. Standalone layout prototype; not the published article.">
+<title>Endurance — Ronu / Layout study</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<noscript><div class="noscript">This interactive prototype needs JavaScript enabled. Open this HTML file in a browser with JavaScript enabled.</div></noscript>
+<header class="topbar">
+  <button class="mobile-menu" id="menu-toggle" aria-label="Open section navigation" aria-expanded="false" aria-controls="sidebar"><svg class="icon" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  <a class="brand" href="#energy/overview" aria-label="Ronu — return to the first chapter">ronu<span class="brand-dot">.</span></a>
+  <span class="top-divider" aria-hidden="true"></span><span class="top-label">A personal exploration</span>
+  <div class="top-actions">
+    <button class="search-trigger" id="open-search" aria-haspopup="dialog" aria-label="Find a topic"><svg class="icon" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span class="search-text">Find a topic</span><span class="key" aria-hidden="true">Ctrl K</span></button>
+    <button class="focus-trigger" id="focus-toggle" aria-pressed="false"><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16"/></svg><span>Focus view</span></button>
+  </div>
+</header>
+<div class="overlay" id="rail-overlay"></div>
+<aside class="rail" id="sidebar" aria-label="Chapter navigation">
+  <button class="mobile-close" id="close-menu" aria-label="Close section navigation"><svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
+  <div class="rail-top"><p class="rail-title">Endurance</p><p class="rail-sub">The human system, explored.</p><div class="rail-rule"></div></div>
+  <div class="nav-label mono"><span>Chapters</span><span>05</span></div>
+  <nav class="chapter-list" id="chapter-nav" aria-label="Chapters"></nav>
+  <div class="rail-progress"><div class="progress-caption"><span>Chapter position</span><span id="progress-label">01 / 05</span></div><div class="progress-track" role="progressbar" id="chapter-progress" aria-label="Chapter position" aria-valuemin="1" aria-valuemax="5" aria-valuenow="1"><span class="progress-fill" id="progress-fill"></span></div></div>
+  <div class="rail-bottom"><a class="draft-return" href="../../index.html" target="_top">← All drafts</a><p class="personal-note">Curiosity, one layer at a time.</p><p class="signature">Rafael Renó</p><button class="layout-link" data-open-about><svg class="icon" viewBox="0 0 24 24" style="width:14px;height:14px"><circle cx="12" cy="12" r="8"/><path d="M12 11v5M12 8v.1"/></svg>About this layout</button></div>
+</aside>
+<main class="main" id="main" tabindex="-1">
+  <section class="hero" aria-labelledby="page-title">
+    <div class="eyebrow-row"><span class="eyebrow mono">Field notes / The human system</span><span class="draft-tag"><span class="status-dot"></span>Layout study · 01</span></div>
+    <div class="hero-grid"><h1 id="page-title">From fuel to<br><span>movement.</span></h1><div class="hero-side"><p>A closer look at what powers a muscle — and what it takes to keep going.</p><div class="scale-trail"><span>Molecule</span><span class="trail-line"></span><span>Muscle</span><span class="trail-line"></span><span>Whole body</span></div></div></div>
+  </section>
+  <div class="focus-strip"><span>Endurance / Focus view</span><label class="sr-only" for="chapter-select">Change chapter</label><select class="chapter-select" id="chapter-select"></select></div>
+  <article class="chapter" aria-labelledby="section-title">
+    <div class="section-top"><span class="section-number" id="section-number">01</span><span class="section-label mono" id="section-label">Energy</span><span class="section-count mono" id="section-count">01 / 05</span></div>
+    <h2 id="section-title" tabindex="-1">Start small. Follow the energy.</h2>
+    <p class="section-description" id="section-description">One question at a time, from the basic idea to the mechanism.</p>
+    <div class="topic-tabs" id="topic-tabs" role="tablist" aria-label="Topics in this chapter"></div>
+    <section class="topic-panel" id="topic-panel" role="tabpanel" tabindex="0">
+      <div class="topic-grid">
+        <div class="topic-text"><div class="topic-eyebrow mono" id="topic-eyebrow"></div><h3 class="topic-heading" id="topic-heading"></h3><div id="topic-copy"></div></div>
+        <figure class="concept" aria-labelledby="concept-label">
+          <div class="concept-top"><span class="mono" id="concept-label">The connection</span><span class="concept-badge">SELECT A STEP</span></div>
+          <div class="concept-steps" id="concept-steps" role="group" aria-label="Explore the conceptual steps"></div>
+          <figcaption class="concept-caption" id="concept-caption" aria-live="polite"></figcaption>
+          <div class="concept-foot"><span>Conceptual view</span><span>Not a simulation</span></div>
+        </figure>
+      </div>
+      <div class="details-stack">
+        <details id="mechanism-detail"><summary><svg class="icon detail-icon" viewBox="0 0 24 24"><path d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h3"/></svg><span class="detail-label">Go one level deeper</span><span class="detail-hint">The mechanism</span><span class="plus" aria-hidden="true"></span></summary><div class="detail-copy" id="mechanism-copy"></div></details>
+        <details id="connection-detail"><summary><svg class="icon detail-icon" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="m7 11 10-4M7 13l10 4"/></svg><span class="detail-label">Connect it to the next idea</span><span class="detail-hint">The bigger picture</span><span class="plus" aria-hidden="true"></span></summary><div class="detail-copy" id="connection-copy"></div></details>
+      </div>
+    </section>
+    <div class="next-row"><button class="previous" id="previous-chapter"><svg class="icon" viewBox="0 0 24 24"><path d="M20 12H4m6-6-6 6 6 6"/></svg>Previous chapter</button><a class="next" id="next-chapter" href="#signal/overview"><span><span class="next-label" id="next-label">Up next / 02</span><span class="next-title" id="next-title">The signal</span></span><span class="next-arrow"><svg class="icon" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></svg></span></a></div>
+  </article>
+  <footer class="page-foot"><span><a href="../../index.html" target="_top">All drafts</a> · Endurance v1 · Sample copy, not the final article.</span><button class="footer-button" data-open-about>How this page works</button></footer>
+  <div class="sr-only" aria-live="polite" id="route-announcement"></div>
+</main>
+<dialog class="search-dialog" id="search-dialog" aria-label="Find a topic">
+  <div class="dialog-search-head"><svg class="icon" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><label class="sr-only" for="topic-search">Search all chapters and topics</label><input id="topic-search" type="search" placeholder="Find a topic…" autocomplete="off"><button class="dialog-close" data-close="search-dialog" aria-label="Close search"><svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+  <div class="search-results" id="search-results"></div><div class="search-bottom">Search every chapter · Tab or ↓ to navigate · Esc to close</div>
+</dialog>
+<dialog class="about-dialog" id="about-dialog" aria-labelledby="about-title">
+  <div class="about-top"><span class="mono">Ronu / Layout study 01</span><button class="dialog-close" data-close="about-dialog" aria-label="Close layout information"><svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+  <h2 id="about-title">A quiet space to follow an idea.</h2><p>This is a working layout example, not a redesign of the article’s content. The same structure can support other subjects.</p>
+  <ol class="structure-list"><li><span><strong>Chapters.</strong> Move between the main sections without losing your place.</span></li><li><span><strong>Topics.</strong> Choose a specific question inside a chapter.</span></li><li><span><strong>The explanation.</strong> Short reading on one side; a useful visual on the other.</span></li><li><span><strong>Optional depth.</strong> Open the mechanism and connections only when you need them.</span></li><li><span><strong>Continue or focus.</strong> Follow the next chapter, search, or reduce the interface.</span></li></ol>
+  <p>Try the chapter navigation, topic tabs, diagram steps, expandable notes, search, and Focus view. On a phone, use the menu to open the chapters.</p><p class="about-source">Sample content adapted from <a href="https://ronu.one/triathlon/energy.html" target="_blank" rel="noopener noreferrer">Ronu’s Endurance notes</a>. Conceptual sketches are not physiological models. Content and scientific references will be reviewed separately. Nothing here changes the live website.</p><button class="return-exploring" data-close="about-dialog">Back to exploring</button>
+</dialog>
+<script src="content.js" defer></script>
+<script src="app.js" defer></script>
+</body>
+</html>
